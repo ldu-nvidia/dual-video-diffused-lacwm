@@ -145,20 +145,41 @@ class LatentActionDiTModel(nn.Module):
             z = self.morphology_tokens(morphology_index).unsqueeze(1).unsqueeze(1) + z
         return z
 
-    def _pool_actions_to_latent_frames(self, z: torch.Tensor, num_frames: int) -> torch.Tensor:
-        """Pool per-frame latent actions [N, T, A, D] -> per-latent-frame [N, Fp, D].
-        Frame t maps to latent frame 0 if t==0 else (t-1)//temporal_ratio + 1 (causal VAE).
-        Uses a constant assignment matrix + einsum so gradients flow back to the inverse model."""
-        z = z.mean(dim=2)  # [N, T, D] (A=1)
-        N, T, D = z.shape
+    def _latent_actions(self, rgb: torch.Tensor, morphology_index, Fp: int, K: int):
+        """Generate ONLY the num_future latent actions (one per future transition).
+
+        The inverse model is run over a (num_future + 1)-frame window = [last history
+        frame | all future frames]; the boundary frame anchors the first action, so the
+        window yields exactly num_future transition actions. We do not generate or use
+        the history-region actions (the history is supplied to the world model via the
+        reference channel, not as actions).
+
+        Returns:
+            z_future:      [N, num_future, A, D]  raw (for action-decoding supervision)
+            z_control:     [N, Fp, D]             per-latent-frame control (history rows = 0)
+            future_tokens: [N, num_future, h, w, d] per-frame latents of the future frames
+        """
+        win = max(self.num_history_frames - 1, 0)        # last history frame anchors action 1
+        rgb_win = rgb[:, win:]                            # [N, num_future + 1, C, H, W]
+        x_pf_win = self._encode_per_frame(rgb_win)        # [N, num_future + 1, h, w, d]
+        z_win = self._forward_inverse_model(x_pf_win)     # [N, num_future + 1, A, D]
+        z_future = z_win[:, 1:]                            # [N, num_future, A, D]
+        future_tokens = x_pf_win[:, 1:]                    # [N, num_future, h, w, d]
+        z_morph = self._add_morphology(z_future, morphology_index).mean(dim=2)  # [N, num_future, D]
+        z_control = self._future_control(z_morph, Fp, K)  # [N, Fp, D]
+        return z_future, z_control, future_tokens
+
+    def _future_control(self, z_future: torch.Tensor, Fp: int, K: int) -> torch.Tensor:
+        """Pool the num_future latent actions onto the future latent frames [K:Fp]
+        (each future latent frame covers temporal_ratio pixel frames); history latent
+        frames [0:K] get zero control. einsum keeps grad flowing to the inverse model."""
+        N, Fnum, D = z_future.shape
         tr = self.rgb_tokenizer.temporal_ratio
-        fp = self.rgb_tokenizer.latent_temporal_len(num_frames)
-        M = z.new_zeros(fp, T)  # constant (no grad): mean-pool assignment
-        for t in range(min(T, num_frames)):
-            li = 0 if t == 0 else min((t - 1) // tr + 1, fp - 1)
-            M[li, t] = 1.0
-        M = M / M.sum(dim=1, keepdim=True).clamp(min=1.0)
-        return torch.einsum("ft,ntd->nfd", M, z)
+        M = z_future.new_zeros(Fp, Fnum)
+        for j in range(Fnum):
+            M[min(K + j // tr, Fp - 1), j] = 1.0
+        M = M / M.sum(dim=1, keepdim=True).clamp(min=1.0)  # history rows are all-zero -> stay 0
+        return torch.einsum("fj,njd->nfd", M, z_future)
 
     # ---------------------------------------------------- diffusion conditioning
     def _build_context(self, batch_size: int, device, dtype):
@@ -232,11 +253,6 @@ class LatentActionDiTModel(nn.Module):
         morphology_index = kwargs.get("morphology_index", None)
         device = rgb.device
 
-        T = rgb.shape[1]
-        # --- latent action from per-frame latents (inverse model) ---
-        x_pf = self._encode_per_frame(rgb)               # [N,T,h,w,d]
-        z = self._forward_inverse_model(x_pf)            # [N,T,A,D]
-
         # --- diffusion target: full-clip temporal latent ---
         latents = self._encode_clip(rgb).to(rgb.dtype)   # [N,16,Fp,h,w]
         N, Cl, Fp, h, w = latents.shape
@@ -246,9 +262,9 @@ class LatentActionDiTModel(nn.Module):
         K = min(self.num_history_latent, Fp)
         ref[:, :, :K] = latents[:, :, :K]
 
-        # control = per-latent-frame latent action (+morphology)
-        z_morph = self._add_morphology(z, morphology_index)
-        z_control = self._pool_actions_to_latent_frames(z_morph, T).to(rgb.dtype)  # [N,Fp,D]
+        # --- exactly num_future latent actions (one per future transition) ---
+        z_future, z_control, future_tokens = self._latent_actions(rgb, morphology_index, Fp, K)
+        z_control = z_control.to(rgb.dtype)
 
         # flow matching
         noise = torch.randn_like(latents)
@@ -270,20 +286,25 @@ class LatentActionDiTModel(nn.Module):
         total_loss = flow_loss
         self.aux_losses["flow_loss"] = flow_loss.detach().clone()
 
-        # --- action decoding (unchanged from LAM) ---
+        # --- action decoding: supervise the num_future latent actions against the
+        #     future GT action chunks (actions[:, num_history:]) ---
         if actions is not None and self.action_decoder is not None:
+            fut = self.num_history_frames
+            gt_actions = actions[:, fut:]
+            gt_mask = mask[:, fut:] if mask is not None else None
             ahat = self._forward_action_decoder(
-                z, tokenized_rgb=self.rgb_pos_embed(x_pf), morphology_index=morphology_index
+                z_future, tokenized_rgb=self.rgb_pos_embed(future_tokens),
+                morphology_index=morphology_index,
             )
             if isinstance(ahat, dict):
                 act_loss = self._multi_action_decoding_loss(
-                    ahat, actions, loss_type=self.config.get("action_decoding_loss_type", "l1"),
-                    loss_mask=mask,
+                    ahat, gt_actions, loss_type=self.config.get("action_decoding_loss_type", "l1"),
+                    loss_mask=gt_mask,
                 )
             else:
                 act_loss = self._action_decoding_loss(
-                    ahat, actions, loss_type=self.config.get("action_decoding_loss_type", "l1"),
-                    loss_mask=mask,
+                    ahat, gt_actions, loss_type=self.config.get("action_decoding_loss_type", "l1"),
+                    loss_mask=gt_mask,
                 )
             total_loss = total_loss + self.config.get("action_decoding_weight", 0.5) * act_loss
             self.aux_losses["act_decoding_loss"] = act_loss.detach().clone()
@@ -293,15 +314,13 @@ class LatentActionDiTModel(nn.Module):
     # ----------------------------------------------------------------- sampling
     @torch.no_grad()
     def _sample_future(self, rgb, morphology_index=None):
-        x_pf = self._encode_per_frame(rgb)
-        z = self._forward_inverse_model(x_pf)
         latents = self._encode_clip(rgb).to(rgb.dtype)
         N, Cl, Fp, h, w = latents.shape
         K = min(self.num_history_latent, Fp)
         ref = torch.zeros_like(latents)
         ref[:, :, :K] = latents[:, :, :K]
-        z_morph = self._add_morphology(z, morphology_index)
-        z_control = self._pool_actions_to_latent_frames(z_morph, rgb.shape[1]).to(rgb.dtype)
+        _, z_control, _ = self._latent_actions(rgb, morphology_index, Fp, K)
+        z_control = z_control.to(rgb.dtype)
         context = self._build_context(N, rgb.device, rgb.dtype)
         clip_fea = self._build_clip(N, rgb.device, rgb.dtype)
 
