@@ -1,0 +1,26 @@
+_target_: robot_wm.inference.task.reach.ReachTask
+terminations:
+  - _target_: robot_wm.inference.task.termination.time_termination.TimeTermination
+    max_time: 300
+  # - _target_: robot_wm.inference.task.termination.endeffector_distance_termination.EndEffectorDistanceTermination
+  #   pos_tolerance: 0.05 # m
+  #   angle_tolerance: 1.0 # deg
+  - _target_: robot_wm.inference.task.termination.outofbounds_termination.BoxOutOfBoundsTermination
+    box_min: [0.15, -0.5, 0.03]
+    box_max: [0.9, 0.5, 0.9]
+  - _target_: robot_wm.inference.task.termination.cycles_of_planning.CyclesOfPlanningTermination
+    max_cycles: 2
+
+metrics:
+  - _target_: robot_wm.inference.task.metrics.execution_time.ExecutionTimeMetric
+  - _target_: robot_wm.inference.task.metrics.pose_error.PoseErrorMetric
+  - _target_: robot_wm.inference.task.metrics.object_pose_error.ObjectPoseErrorMetric
+    id_of_april_tag: 6
+
+
+reference_episode:
+  # _target_: robot_wm.inference.task.reference_episode.h5_imagegoal_reference_episode.DummyImageGoalReferenceEpisode
+  _target_: robot_wm.inference.task.reference_episode.h5_imagegoal_reference_episode.H5ImageGoalReferenceEpisode
+  episode_path: "/home/abhagejji/eai/robot_world_models/evaluation_tasks/mpk/push/v1/run_0001/episode.h5"
+  # episode_path: "/home/abhagejji/eai/robot_world_models/evaluation_tasks/mpk/reach/test_axis/run_0001/episode.h5"
+  # episode_path: "/home/abhagejji/eai/robot_world_models/evaluation_tasks/mpk/reach/test_axis/run_0001/episode.h5"

@@ -1,0 +1,38 @@
+defaults:
+  - _self_
+  - /tokenizers/rgb@rgb_tokenizer: ???
+  - /modules@rgb_pos_embed: positional_embedding
+  - /networks@inverse_model: st_inverse_model
+  - /modules@action_pos_embed: positional_embedding
+  - /networks@forward_model: st_forward_model
+
+_target_: lam.latent_action_model.LatentActionModel
+latent_action_dim: 64
+rgb_tokenizer: ${rgb_tokenizer}
+rgb_pos_embed:
+  _args_: ???
+  dim: ${..rgb_tokenizer.output_dim}
+inverse_model:
+  arch: ???
+  num_actions: 1
+  input_dim: ${..rgb_tokenizer.output_dim}
+  output_dim: ${..latent_action_dim}
+quantizer: null
+action_pos_embed:
+  _args_: ???
+  dim: ${..latent_action_dim}
+action_decoder:
+forward_model:
+  arch: ???
+  x_dim: ${..rgb_tokenizer.output_dim}
+  context_dim: ${..latent_action_dim}
+  output_dim: ${.x_dim}
+loss_scheduler:
+  _target_: lam.loss_scheduler.CustomLossScheduler
+  pretrain_steps: ???
+  warmup_steps: ???
+  total_steps: ???
+  seed: ???
+  losses: ["teacher-forcing", "sampling"]
+config:
+  sampling_horizon: 4

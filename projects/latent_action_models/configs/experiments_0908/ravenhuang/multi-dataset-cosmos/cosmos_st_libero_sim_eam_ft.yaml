@@ -1,0 +1,124 @@
+# @package _global_
+defaults:
+  - ravenhuang/multi-dataset-cosmos/libero_sim_split_base.yaml
+
+## notes:
+## model size: ~140M params
+## effective batch size: 384 (6 nodes)
+
+name: libero_sim_eam_ft_80
+
+
+dataset:
+  transform:
+    sample_size: 9
+  datasets:
+    Libero:
+      sample_zero_action: true
+      transform:
+        resize_to: [180, 320]
+        cameras: ["agentview_rgb"]
+
+
+val_dataset:
+  datasets:
+    Libero:
+      sample_zero_action: true
+      transform:
+        resize_to: [180, 320]
+        cameras: ["agentview_rgb"]
+
+
+viz_dataset:
+  datasets:
+    Libero:
+      sample_zero_action: true
+      transform:
+        resize_to: [180, 320]
+        cameras: ["agentview_rgb"]
+
+
+libero_unseen_val_dataset:
+  datasets:
+    Libero:
+      sample_zero_action: true
+      transform:
+        resize_to: [180, 320]
+        cameras: ["agentview_rgb"]
+
+
+
+data_loader:
+  batch_size: 8
+
+hydra:
+  launcher:
+    nodes: 4
+    account: cortex
+    qos: h100_cortex_high
+
+model:
+  rgb_tokenizer:
+    tokenizer_name: Cosmos-0.1-Tokenizer-CI8x8
+    output_dim: 16
+  rgb_pos_embed:
+    _args_:
+      - ${dataset.transform.sample_size}
+      - 23
+      - 40
+  action_encoder:
+    _target_: robot_wm.modeling.modules.mlp.MultiMLP
+    output_dim: 64
+    decoders:
+      "5": # libero
+        # _target_: robot_wm.modeling.modules.mlp.MLP
+        _target_: robot_wm.modeling.tokenizers.action.decoder.ActionXattenEncoder
+        input_dim: 80 # action_dim
+        hidden_dim: 256
+        output_dim: ${model.action_encoder.output_dim}
+        rgb_latent_dim: 16
+  inverse_model:
+    arch: small
+    num_actions: 1
+  quantizer:
+    dim: 64
+    size: 2048
+    use_ste: False
+  morphology_tokens:
+    _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
+    num_embeddings: 9
+    embedding_dim: 64
+  forward_model:
+    arch: small
+    # use_video_cross_attention: false
+    # use_spatial_attention_only: true
+    use_video_cross_attention: true
+    use_spatial_attention_only: false
+    rope_end: 2048
+  loss_scheduler:
+    pretrain_steps: 0
+    ae_only_steps: 85_001
+    # action_decode_steps: 85_000
+    losses: ["teacher-forcing"]
+  config:
+    backprog_action_decoding: False #don't modify acion latent during pre-training
+    decode_zhat: True
+    action_decoding_weight: 10
+    action_decoding_loss_type: "l1"
+    use_cycle_consistency_loss: False
+    lora_finetune: True
+    lora_rank: 2
+
+wandb:
+  entity: project_vit
+  project: lacwm
+
+trainer:
+  config:
+    # saving:
+    #   save_path: '/svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/data/experiments_0908/libero_sim_scratch_sample_zero_action/2025-11-19/17-09-43/snapshot.pt'
+    max_iter: 60_000
+    load_path: /svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/data/experiments_0908/ewm_agibot_egodex_droid_tfds_mt_xatten_cosmos_singlemlp_t/2026-03-30/20-42-14/snapshot.pt
+    exclude_keys:
+    - action_decoder
+    - loss_scheduler

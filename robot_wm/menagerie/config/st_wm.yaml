@@ -1,0 +1,4 @@
+_target_: robot_wm.menagerie.stwm.STWM
+config:
+  ckpt_path: /fsx-cortex/sergioarnaud/experiments/st_wm/ct_st_wm_base_16_samplingloss_v2/2025-05-18/07-12-17/0/snapshot.pt
+  ckpt_source: "local"

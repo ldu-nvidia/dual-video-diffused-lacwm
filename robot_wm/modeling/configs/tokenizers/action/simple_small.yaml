@@ -1,0 +1,3 @@
+_target_: robot_wm.modeling.tokenizers.action.simple.SimpleActionTokenizer
+input_dim: 7
+output_dim: 16

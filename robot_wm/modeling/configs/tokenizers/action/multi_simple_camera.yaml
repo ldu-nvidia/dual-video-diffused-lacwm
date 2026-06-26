@@ -1,0 +1,5 @@
+_target_: robot_wm.modeling.tokenizers.action.simple.MultiActionWithCameraTokenizer
+input_dim: ???
+output_dim: ???
+token_dim: ???
+num_morphologies: ???

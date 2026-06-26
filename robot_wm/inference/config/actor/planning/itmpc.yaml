@@ -1,0 +1,11 @@
+_target_: robot_wm.inference.actor.planning.itmpc.ITMPC
+config:
+  sample_size: 50
+  iterations: 10
+  pred_horizon_s: 1
+  SIGMA: 0.04
+  VIS_W: 1.0
+  use_proprio: False
+  PROP_W: 0.0
+  cost:
+    _target_: robot_wm.inference.actor.cost.visual_based_latents_cost.L2VisualLatentsCost

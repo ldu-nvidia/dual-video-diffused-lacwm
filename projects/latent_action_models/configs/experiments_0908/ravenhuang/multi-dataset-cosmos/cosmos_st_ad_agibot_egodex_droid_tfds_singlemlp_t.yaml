@@ -1,0 +1,79 @@
+# @package _global_
+defaults:
+  - ravenhuang/multi-dataset-cosmos/cosmos_st_lam_vq_ad_agibot_egodex_droid_tfds_xatten_base.yaml
+
+## notes:
+## Agibot + EgoDex + DROID multi-dataset training on viscam cluster
+## Agibot: 3857 episodes with camera params (from /viscam/projects/egodex/agibot_params)
+## EgoDex: 46234 episodes (from /viscam/projects/egodex/egodex_part2)
+## DROID: full dataset via TFDS (from /viscam/data/DROID/droid/1.0.1)
+## model size: ~140M params
+
+name: ewm_agibot_egodex_droid_tfds_mt_xatten_cosmos_singlemlp_t
+
+dataset:
+  img_augment: False
+  datasets:
+    Agibot:
+      subsample_traj: 50000
+    EgoDex:
+      subsample_traj: 50000
+    Droid:
+      subsample_traj: 50000
+
+data_loader:
+  batch_size: 12
+
+hydra:
+  launcher:
+    nodes: 8
+    account: viscam
+    qos: normal
+    timeout_min: 6000
+
+model:
+  action_encoder:
+    _target_: robot_wm.modeling.modules.mlp.MLP
+    input_dim: 785
+    hidden_dim: 256
+    output_dim: 64
+  rgb_tokenizer:
+    tokenizer_name: "Cosmos-0.1-Tokenizer-CI8x8"
+    output_dim: 16
+  inverse_model:
+    arch: small
+    num_actions: 1
+  quantizer:
+    dim: 64
+    size: 2048
+    use_ste: False
+  forward_model:
+    arch: small
+    # use_video_cross_attention: false
+    # use_spatial_attention_only: true
+    use_video_cross_attention: true
+    use_spatial_attention_only: false
+  morphology_tokens:
+    _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
+    num_embeddings: 9
+    embedding_dim: 64
+  loss_scheduler:
+    pretrain_steps: 0
+    ae_only_steps: 80_001
+    # action_decode_steps: 80_000
+    losses: ["teacher-forcing"]
+  config:
+    backprog_action_decoding: True
+    decode_zhat: True
+    action_decoding_weight: 50
+    action_decoding_loss_type: "l1"
+    use_cycle_consistency_loss: False
+
+wandb:
+  entity: project_vit
+  project: lacwm
+
+trainer:
+  config:
+    max_iter: 40_000
+    load_path: /svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/data/experiments_0908/ewm_agibot_egodex_droid_tfds_mt_xatten_cosmos_singlemlp_t/2026-03-30/20-42-14/snapshot.pt

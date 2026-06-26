@@ -1,0 +1,6 @@
+_target_: robot_wm.menagerie.stwm.STWM
+config:
+  ckpt_source: "huggingface"
+  # ckpt_path: /fsx-cortex/sergioarnaud/experiments/robot-actions/large_exp_1/2025-03-22/04-14-07/0/snapshot.best
+  ckpt_path: pl5-CT-30M-ST-1B-DROID/snapshot.best
+

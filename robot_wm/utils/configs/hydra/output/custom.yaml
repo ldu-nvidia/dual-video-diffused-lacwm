@@ -1,0 +1,6 @@
+# @package hydra
+run:
+  dir: data/experiments_0908/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+sweep:
+  dir: data/experiments_0908/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  subdir: ${hydra.job.num}

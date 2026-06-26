@@ -1,0 +1,7 @@
+_target_: robot_wm.modeling.tokenizers.rgb.cosmos.CosmosImageTokenizer
+tokenizer_name: ???
+tokenizer_type: both
+output_dim: ???
+input_range: "normal"
+input_mean: [0.485, 0.456, 0.406]
+input_std: [0.229, 0.224, 0.225]

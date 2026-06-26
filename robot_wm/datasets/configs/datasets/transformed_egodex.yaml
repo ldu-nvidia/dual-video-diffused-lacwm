@@ -1,0 +1,20 @@
+_target_: robot_wm.datasets.egodex.dataset.EgoDexDataset
+manifest:  "/home/ravenhuang/h2r/robot_world_models/data/datasets/egodex/egodex/train_paths.csv"
+statistic_manifest: "/home/ravenhuang/h2r/robot_world_models/data/datasets/egodex/egodex/all_episode_paths.csv"
+transform:
+  _target_: robot_wm.datasets.agios.transform.AgiosTransform
+  cameras: ["ego_centric_image"]
+  output_keys: ["rgb", "actions", "mask"]
+  sample_size: 16
+  chunk_size: 4
+  mean: null
+  std: null
+  resize_to: [180, 320]
+  hand_pos_scale: 1.0
+  hand_state_dim: 69
+  action_type: delta-state+camera
+  integrate_chunks: false
+  seed: ${seed}
+  multiview: false
+to_numpy: false
+normalize_keys: ["actions"]

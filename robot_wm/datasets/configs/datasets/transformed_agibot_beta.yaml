@@ -1,0 +1,15 @@
+_target_: robot_wm.datasets.agibot.dataset.AgibotDataset
+csv_path: "/checkpoint/cortex/ravenhuang/agibot_sync/manifest_csv/task_episode_beta.csv"
+seed: 1234
+infinite: true
+transform:
+  _target_: robot_wm.datasets.agibot.transform.AgibotTransform
+  cameras: ["head_color"]
+  output_keys: ["rgb", "actions", "mask"]
+  sample_size: 9
+  chunk_size: 5
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  resize_to: [180, 320]
+  action_type: delta-state
+  seed: ${seed}

@@ -1,0 +1,35 @@
+_target_: robot_wm.inference.actor.wm_mpc_planner.WMMPCPlanner
+config:
+  trajectory_optimization:
+    _target_: robot_wm.inference.actor.planning.itmpc.ITMPC
+    config:
+      sample_size: 50
+      iterations: 10
+      pred_horizon_s: 1
+      SIGMA: 0.04
+      VIS_W: 1.0
+      use_proprio: False
+      PROP_W: 0.0
+      cost:
+        _target_: robot_wm.inference.actor.cost.visual_based_latents_cost.L2VisualLatentsCost
+
+  world_model:
+    _target_: robot_wm.menagerie.jepa_wm.JepaWM
+    config:
+      size: 256
+      window: 16
+      tubulet_size: 2
+      max_context: 1
+      obs_frame_skip: 1
+      wm_frequency: 7.5  # hz
+      max_rollout_length: 1000
+      grid_size: 16
+      weight_path: "/home/abhagejji/eai/robot_world_models/model_registry/jepa/artem/jepa-wm-rope"
+
+  robot_frequency: 30   # hz
+  actor_frequency: 5    # hz
+  planning_frequency: 1 # hz
+
+  plan_every: 0
+  action_aggregation_horizon: 1
+  max_history_size: 900

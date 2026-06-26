@@ -1,0 +1,36 @@
+defaults:
+  - _self_
+  - /tokenizers/rgb@rgb_tokenizer: ???
+  - /modules@rgb_pos_embed: positional_embedding
+  - /modules@action_pos_embed: positional_embedding
+  - /networks@forward_model: st_forward_model
+
+_target_: lam.latent_action_model_ae.AELatentActionModel
+rgb_tokenizer: ${rgb_tokenizer}
+rgb_pos_embed:
+  _args_: ???
+  dim: ${..rgb_tokenizer.output_dim}
+quantizer:
+  _target_: robot_wm.modeling.modules.vector_quantization.VectorQuantizer
+  dim: ???
+  size: ???
+action_encoder:
+  output_dim: ???
+action_pos_embed:
+  _args_: ???
+  dim: ${..action_encoder.output_dim}
+action_decoder:
+forward_model:
+  arch: ???
+  x_dim: ${..rgb_tokenizer.output_dim}
+  context_dim: ${..action_encoder.output_dim}
+  output_dim: ${.x_dim}
+loss_scheduler:
+  _target_: lam.loss_scheduler.CustomLossScheduler
+  pretrain_steps: ???
+  warmup_steps: ???
+  total_steps: ???
+  seed: ???
+  losses: ["teacher-forcing", "sampling"]
+config:
+  sampling_horizon: 4

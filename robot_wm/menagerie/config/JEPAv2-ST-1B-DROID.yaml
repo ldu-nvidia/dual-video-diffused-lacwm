@@ -1,0 +1,6 @@
+_target_: robot_wm.menagerie.stwm.STWM
+config:
+  # ckpt_source: "local"
+  # ckpt_path: "/fsx-cortex/dud/experiments/robot-actions/2025-04-29_01-18-23_JEPA2_48N_fixfix/0/snapshot.pt"
+  ckpt_source: "huggingface"
+  ckpt_path: 76a-JEPAv2c-1B-ST-1B/snapshot.pt

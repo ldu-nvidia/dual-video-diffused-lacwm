@@ -1,0 +1,162 @@
+# @package _global_
+# Combined multi-dataset cosmos smoke: libero + droid(lerobot) + ABC (single-view).
+defaults:
+  - override /datasets@dataset: transformed_multi_combined
+  - override /datasets@val_dataset: transformed_multi_combined
+  - override /datasets@viz_dataset: transformed_multi_combined
+  - override /models@model: latent_action_model_vq
+  - override /tokenizers/rgb@model.rgb_tokenizer: cosmos
+  - override /optimizers@optimizer_factory: adamw
+  - override /lr_schedulers@lr_scheduler_factory: linear_warmup_cosine_decay
+
+name: combined_smoke
+
+dataset: &ds
+  padding_dim: 157
+  seed: ${seed}
+  infinite: true
+  transform:
+    sample_size: 9
+    chunk_size: 5
+  datasets:
+    Libero:
+      manifest: /home/ravenh/lacwm/lacwm/robot_wm/datasets/csv_files/libero_smoke_train.csv
+      subsample_traj: 40
+    Droid:
+      subsample_traj: 40
+    ABC:
+      manifest: /scr/ravenh/lacwm_data/abc_pp/manifest_smoke.txt
+      subsample_traj: 40
+
+val_dataset:
+  <<: *ds
+viz_dataset:
+  <<: *ds
+
+val_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${val_dataset}
+    batch_size: ${data_loader.batch_size}
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+viz_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${viz_dataset}
+    batch_size: 2
+    num_workers: 1
+    pin_memory: true
+    prefetch_factor: 1
+    persistent_workers: False
+
+data_loader:
+  batch_size: 4
+  num_workers: 2
+
+model:
+  rgb_tokenizer:
+    tokenizer_name: Cosmos-0.1-Tokenizer-CI8x8
+    output_dim: 16
+  rgb_pos_embed:
+    _args_:
+      - ${dataset.transform.sample_size}
+      - 23
+      - 40
+  inverse_model:
+    arch: small
+    num_actions: 1
+  quantizer:
+    _target_: robot_wm.modeling.modules.vector_quantization.VectorQuantizer
+    dim: 64
+    size: 2048
+    use_ste: False
+  morphology_tokens:
+    _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
+    num_embeddings: 10
+    embedding_dim: 64
+  action_pos_embed:
+    _args_:
+      - ${dataset.transform.sample_size}
+      - ${model.inverse_model.num_actions}
+  forward_model:
+    arch: small
+    use_video_cross_attention: true
+    use_spatial_attention_only: false
+    rope_end: 2048
+  action_decoder:
+    _target_: robot_wm.modeling.modules.mlp.SplitMultiMLP
+    input_dim: ${mul:${model.quantizer.dim},${model.inverse_model.num_actions}}
+    split_type:
+      action_type_split:
+        "ee":
+          - 0
+          - ${div:${model.action_decoder.input_dim},2}
+        "joint_states":
+          - 0
+          - ${div:${model.action_decoder.input_dim},2}
+        "camera":
+          - ${div:${model.action_decoder.input_dim},2}
+          - ${model.action_decoder.input_dim}
+      "0": {"ee": 50, "camera": 45}
+      "5": {"ee": 35, "camera": 45}
+      "9": {"ee": 70, "camera": 45}
+    decoders:
+      "0":
+        target: robot_wm.modeling.tokenizers.action.decoder.ActionXattenDecoder
+        input_dim: ${model.action_decoder.input_dim}
+        hidden_dim: 1024
+        output_dim: 95
+        rgb_latent_dim: ${model.rgb_tokenizer.output_dim}
+      "5":
+        target: robot_wm.modeling.tokenizers.action.decoder.ActionXattenDecoder
+        input_dim: ${model.action_decoder.input_dim}
+        hidden_dim: 1024
+        output_dim: 80
+        rgb_latent_dim: ${model.rgb_tokenizer.output_dim}
+      "9":
+        target: robot_wm.modeling.tokenizers.action.decoder.ActionXattenDecoder
+        input_dim: ${model.action_decoder.input_dim}
+        hidden_dim: 1024
+        output_dim: 115
+        rgb_latent_dim: ${model.rgb_tokenizer.output_dim}
+  loss_scheduler:
+    pretrain_steps: 0
+    warmup_steps: 10_000
+    total_steps: ${trainer.config.max_iter}
+    ae_only_steps: 85_001
+    losses: ["teacher-forcing"]
+    seed: ${seed}
+  config:
+    backprog_action_decoding: False
+    decode_zhat: True
+    action_decoding_weight: 10
+    action_decoding_loss_type: "l1"
+    use_cycle_consistency_loss: False
+
+optimizer_factory:
+  lr: 3e-4
+  betas: [0.9, 0.95]
+lr_scheduler_factory:
+  lr_lambda:
+    warmup_steps: 6_000
+    total_steps: ${trainer.config.max_iter}
+    final_learning_rate: 3e-7
+
+wandb:
+  entity: project_vit
+  project: lacwm
+
+trainer:
+  config:
+    max_iter: 30
+    logging: {log_every: 5}
+    saving: {save_every: 20}
+    validation: {val_every: 25, n_val_samples: 4}
+    visualization: {viz_every: 1000}
+    gradient_clipping: {max_norm: 0.75}
+
+hydra:
+  run:
+    dir: /scr/ravenh/lacwm_runs/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: /scr/ravenh/lacwm_runs/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

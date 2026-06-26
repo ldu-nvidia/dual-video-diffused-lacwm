@@ -1,0 +1,195 @@
+# References:
+#     Genie: Generative Interactive Environments (https://arxiv.org/abs/2402.15391)
+#     Latent Action Pretraining from Videos (https://arxiv.org/abs/2410.11758)
+#     https://github.com/pytorch/torchtitan/blob/6cb13c7a97eed890f7df872261c9bf1523959dee/torchtitan/models/llama/model.py
+
+import logging
+from typing import Callable
+
+import torch
+import torch.nn as nn
+from einops import repeat
+
+from robot_wm.modeling.modules.attention import precompute_freqs_cis
+from robot_wm.modeling.modules.video_blocks import (
+    STAttentionBlock,
+    VideoCrossAttentionBlock,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class InverseModelOutput(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_layers: int,
+        num_actions: int,
+        output_dim: int,
+        build_norm: Callable[[int], nn.Module] = nn.RMSNorm,
+    ):
+        super().__init__()
+        self.query = nn.Embedding(num_actions, embedding_dim=dim)
+        self.layers = nn.ModuleDict()
+        for idx in range(num_layers):
+            self.layers[str(idx)] = VideoCrossAttentionBlock(dim, num_heads)
+        self.norm = build_norm(dim)
+        self.proj = nn.Linear(dim, output_dim, bias=True)
+
+    def init_weights(self, offset: int):
+        nn.init.trunc_normal_(self.query.weight, mean=0.0, std=0.02)
+        for idx, layer in enumerate(self.layers.values(), offset):
+            init_std = 0.02 / (2 * (idx + 1)) ** 0.5
+            layer.init_weights(init_std=init_std)
+        nn.init.trunc_normal_(self.proj.weight, mean=0.0, std=0.02)
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
+        self.norm.reset_parameters()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: torch.Tensor [N, T, H, W, D]
+        Returns:
+            torch.Tensor [N, T, A, D]
+        """
+        N, T, _, _, _ = x.shape
+        query = repeat(self.query.weight, "A D -> N T A D", N=N, T=T)
+        for layer in self.layers.values():
+            query = layer(query=query, context=x)
+        query = self.norm(query)
+        query = self.proj(query)
+        return query
+
+
+class STInverseModel(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_layers: int,
+        num_output_layers: int,
+        num_actions: int,
+        input_dim: int,
+        output_dim: int,
+        rope_end: int,
+        rope_theta: int,
+        attn_drop_prob: float = 0.0,
+        proj_drop_prob: float = 0.0,
+        mlp_drop_prob: float = 0.0,
+        residual_drop_prob: float = 0.0,
+        build_norm: Callable[[int], nn.Module] = nn.RMSNorm,
+    ):
+        super().__init__()
+        self.input_proj = nn.Linear(input_dim, dim, bias=False)
+        self.layers = nn.ModuleDict()
+        for idx in range(num_layers):
+            self.layers[str(idx)] = STAttentionBlock(
+                dim=dim,
+                num_heads=num_heads,
+                attn_drop_prob=attn_drop_prob,
+                proj_drop_prob=proj_drop_prob,
+                mlp_drop_prob=mlp_drop_prob,
+                residual_drop_prob=residual_drop_prob,
+            )
+        self.norm = build_norm(dim)
+        self.output_proj = InverseModelOutput(
+            dim, num_heads, num_output_layers, num_actions, output_dim
+        )
+        self.proj_dropout = nn.Dropout(p=proj_drop_prob)
+        self.register_buffer(
+            name="freqs_cis",
+            tensor=precompute_freqs_cis(
+                dim=dim // num_heads, end=rope_end, theta=rope_theta
+            ),
+            persistent=False,
+        )
+
+    def init_weights(self):
+        self.norm.reset_parameters()
+        nn.init.trunc_normal_(self.input_proj.weight, mean=0.0, std=0.02)
+        for idx, layer in enumerate(self.layers.values()):
+            init_std = 0.02 / (2 * (idx + 1)) ** 0.5
+            layer.init_weights(init_std=init_std)
+        self.output_proj.init_weights(offset=len(self.layers))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: torch.Tensor [N, T, H, W, D]
+        Returns:
+            torch.Tensor [N, T, A, D]
+        """
+        x = self.input_proj(x)
+        x = self.proj_dropout(x)
+        for layer in self.layers.values():
+            x = layer(x, self.freqs_cis)
+        x = self.norm(x)
+        z = self.output_proj(x)
+        z = self.proj_dropout(z)
+        return z
+
+
+def get_arch(arch: str, **kwargs) -> STInverseModel:
+    if arch == "small":
+        kwargs["dim"] = 512
+        kwargs["num_heads"] = 16
+        kwargs["num_layers"] = 8
+        kwargs["num_output_layers"] = 4
+    elif arch == "base":
+        kwargs["dim"] = 768
+        kwargs["num_heads"] = 16
+        kwargs["num_layers"] = 12
+        kwargs["num_output_layers"] = 6
+    elif arch == "large":
+        kwargs["dim"] = 1024
+        kwargs["num_heads"] = 16
+        kwargs["num_layers"] = 18
+        kwargs["num_output_layers"] = 9
+    elif arch == "huge":
+        kwargs["dim"] = 1536
+        kwargs["num_heads"] = 24
+        kwargs["num_layers"] = 18
+        kwargs["num_output_layers"] = 9
+    else:
+        raise ValueError(f"invalid arch: {arch}")
+    return STInverseModel(**kwargs)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        format="%(levelname)-8s %(name)s %(asctime)s %(message)s", level=logging.INFO
+    )
+
+    N, T, H, W, D = 7, 9, 23, 40, 16
+    x = torch.randn(N, T, H, W, D).to("cuda")
+    logger.info(f"{x.shape = }")
+
+    dim, num_heads, num_layers = 512, 16, 8
+    num_output_layers, num_actions = 4, 1
+    input_dim, output_dim = D, 4
+    rope_end, rope_theta = 2 * max(T, H * W), 50_000
+    inverse_model = STInverseModel(
+        dim=dim,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        num_output_layers=num_output_layers,
+        num_actions=num_actions,
+        input_dim=input_dim,
+        output_dim=output_dim,
+        rope_end=rope_end,
+        rope_theta=rope_theta,
+    )
+    inverse_model = inverse_model.to("cuda")
+    size = sum(p.numel() for p in inverse_model.parameters())
+    logger.info(f"{size = :,}")
+
+    z = inverse_model(x)
+    logger.info(f"{z.shape = }")
+
+    # print gpu usage
+    gpu_allocated = torch.cuda.memory_allocated() / 1024 / 1024 / 1024
+    logger.info(f"GPU memory (allocated): {gpu_allocated:0.1f} GB")
+    gpu_reserved = torch.cuda.memory_reserved() / 1024 / 1024 / 1024
+    logger.info(f"GPU memory ( reserved): {gpu_reserved:0.1f} GB")

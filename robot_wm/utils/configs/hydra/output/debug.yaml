@@ -1,0 +1,6 @@
+# @package hydra
+run:
+  dir: data/experiments/${name}/debug
+sweep:
+  dir: data/experiments/${name}/debug
+  subdir: ${hydra.job.override_dirname}

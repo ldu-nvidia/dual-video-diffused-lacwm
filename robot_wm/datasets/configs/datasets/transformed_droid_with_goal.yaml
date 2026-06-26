@@ -1,0 +1,20 @@
+_target_: robot_wm.datasets.droid.dataset.DroidDataset
+manifest: ???
+seed: ???
+infinite: true
+transform:
+  _target_: robot_wm.datasets.droid.transform.DroidTransform
+  cameras: ["exterior_image_1_left", "exterior_image_2_left"]
+  output_keys: ["rgb", "actions", "goal"]
+  sample_size: ???
+  chunk_size: ???
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  action_type: delta-state
+  integrate_chunks: false
+  seed: ${seed}
+  multiview: false
+  goal_type: "image"
+  max_image_goal_horizon: 90 # 3s @ 30fps
+  min_image_goal_horizon: 1
+to_numpy: false

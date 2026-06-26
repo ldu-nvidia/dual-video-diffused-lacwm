@@ -1,0 +1,7 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - robot: franka # franka
+  - actor: wm_mpc_planner_jepa #wm_mpc_planner_5hz_dino_p209 #wm_mpc_planner_jepa #wm_mpc_planner, random
+  - task : push #reach # push

@@ -1,0 +1,154 @@
+# @package _global_
+defaults:
+  - /datasets@val_dataset_droid: transformed_multi_droid_tfds
+  - /datasets@viz_dataset_droid: transformed_multi_droid_tfds
+  - override /datasets@dataset: transformed_multi_droid_tfds
+  - override /datasets@val_dataset: null
+  - override /datasets@viz_dataset: transformed_multi_droid_tfds
+  - override /models@model: latent_action_model_vq
+  - override /tokenizers/rgb@model.rgb_tokenizer: cosmos
+  - override /optimizers@optimizer_factory: adamw
+  - override /lr_schedulers@lr_scheduler_factory: linear_warmup_cosine_decay
+
+name: ???
+
+dataset:  &dataset
+  padding_dim: 157
+  seed: ${seed}
+  infinite: true
+  transform:
+      sample_size: 9
+      chunk_size: 5
+  datasets:
+    Droid:  &droid
+      seed: ${seed}
+      infinite: ${dataset.infinite}
+      data_dir: /viscam/data/DROID/droid/1.0.1
+      transform:
+        action_type: delta-state+camera+abs_finger
+        sample_size: ${dataset.transform.sample_size}
+        chunk_size: ${dataset.transform.chunk_size}
+        cameras: ["exterior_image_1_left", "exterior_image_2_left"]
+        mean: null
+        std: null
+        resize_to: null
+      normalize_keys: null
+
+
+data_loader:
+  batch_size: ???
+
+
+val_dataset_droid:
+  <<: *dataset
+  datasets:
+    Droid:
+      <<: *droid
+
+val_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${val_dataset_droid}
+    batch_size: ${data_loader.batch_size}
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+
+
+viz_dataset:
+  <<: *dataset
+  datasets:
+    Droid:
+      <<: *droid
+
+viz_dataset_droid:
+  <<: *dataset
+  datasets:
+    Droid:
+      <<: *droid
+
+viz_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${viz_dataset}
+    batch_size: 2
+    num_workers: 1
+    pin_memory: true
+    prefetch_factor: 1
+    persistent_workers: False
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${viz_dataset_droid}
+    batch_size: 2
+    num_workers: 1
+    pin_memory: true
+    prefetch_factor: 1
+    persistent_workers: False
+
+model:
+  inverse_model:
+    arch: ???
+  rgb_tokenizer:
+    input_range: "[0, 1]"
+    input_mean: null
+    input_std: null
+  rgb_pos_embed:
+    _args_:
+      - ${dataset.transform.sample_size}
+      - 23
+      - 40
+  quantizer:
+    _target_: robot_wm.modeling.modules.vector_quantization.VectorQuantizer
+    dim: ???
+    size: ???
+  action_pos_embed:
+    _args_:
+      - ${dataset.transform.sample_size}
+      - ${model.inverse_model.num_actions}
+  forward_model:
+    arch: ???
+  action_decoder:
+    _target_: robot_wm.modeling.modules.mlp.SplitMultiMLP
+    input_dim: ${mul:${model.quantizer.dim},${model.inverse_model.num_actions}}
+    split_type:
+      action_type_split:
+        "ee":
+          - 0
+          - ${div:${model.action_decoder.input_dim},2}
+        "camera":
+          - ${div:${model.action_decoder.input_dim},2}
+          - ${model.action_decoder.input_dim}
+      "0":
+        "ee": 50
+        "camera": 45
+    decoders:
+      "0": #droid
+        target: robot_wm.modeling.tokenizers.action.decoder.ActionXattenDecoder
+        input_dim: ${model.action_decoder.input_dim}
+        hidden_dim: 1024
+        output_dim: 95 # action_dim * chunk_size
+        rgb_latent_dim: ${model.rgb_tokenizer.output_dim}
+
+  loss_scheduler:
+    pretrain_steps: ???
+    warmup_steps: 10_000
+    total_steps: ${trainer.config.max_iter}
+    seed: ${seed}
+  config:
+    backprog_action_decoding: True
+    action_decoding_weight: 100
+    decode_zhat: False
+
+
+optimizer_factory:
+  lr: 3e-4
+  betas: [0.9, 0.95]
+
+lr_scheduler_factory:
+  lr_lambda:
+    warmup_steps: 6_000
+    total_steps: ${trainer.config.max_iter}
+    final_learning_rate: 3e-7
+
+trainer:
+  config:
+    max_iter: 80_000
+    gradient_clipping:
+      max_norm: 0.75

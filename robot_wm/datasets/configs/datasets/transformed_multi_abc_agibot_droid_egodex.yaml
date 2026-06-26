@@ -1,0 +1,92 @@
+_target_: robot_wm.datasets.multi_dataset.MultiDataset
+padding_dim: ???
+seed: ${seed}
+infinite: true
+transform:
+  sample_size: ???
+  chunk_size: ???
+datasets:
+  Droid:
+    _target_: robot_wm.datasets.droid.lerobot_dataset.DroidLeRobotDataset
+    data_dir: /scr/ravenh/lacwm_data/droid_lerobot
+    seed: ${seed}
+    infinite: ${dataset.infinite}
+    subsample_traj: 10000
+    transform:
+      _target_: robot_wm.datasets.droid.transform.DroidTransform
+      cameras: ["exterior_image_1_left", "wrist_image_left"]   # ego + 1 wrist
+      output_keys: ["rgb", "actions", "mask"]
+      sample_size: ${dataset.transform.sample_size}
+      chunk_size: ${dataset.transform.chunk_size}
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      resize_to: [180, 320]
+      action_type: delta-state+camera+abs_finger
+      multiview: true
+      num_views: 3
+      wrist_mask_prob: 0.2
+      seed: ${seed}
+    normalize_keys: null
+  EgoDex:
+    _target_: robot_wm.datasets.egodex.dataset.EgoDexDataset
+    manifest: /scr/ravenh/lacwm_data/egodex_cdn/manifest.csv
+    seed: ${seed}
+    subsample_traj: 10000
+    transform:
+      _target_: robot_wm.datasets.agios.transform.AgiosTransform
+      cameras: ["ego_centric_image"]   # ego only (no wrist) -> padded to num_views
+      output_keys: ["rgb", "actions", "mask"]
+      sample_size: ${dataset.transform.sample_size}
+      chunk_size: ${dataset.transform.chunk_size}
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      resize_to: [180, 320]
+      hand_pos_scale: 1.0
+      hand_state_dim: 69
+      action_type: delta-state+camera+abs_finger
+      integrate_chunks: false
+      multiview: false
+      num_views: 3
+      seed: ${seed}
+    to_numpy: false
+    normalize_keys: null
+  Agibot:
+    _target_: robot_wm.datasets.agibot.dataset.AgibotDataset
+    manifest: /scr/ravenh/lacwm_data/agibot/manifest.csv
+    seed: ${seed}
+    infinite: ${dataset.infinite}
+    subsample_traj: 10000
+    transform:
+      _target_: robot_wm.datasets.agibot.transform.AgibotTransform
+      cameras: ["head_color", "hand_left_color", "hand_right_color"]   # ego + 2 wrist
+      output_keys: ["rgb", "actions", "mask"]
+      sample_size: ${dataset.transform.sample_size}
+      chunk_size: ${dataset.transform.chunk_size}
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      resize_to: [180, 320]
+      action_type: delta-state+camera+abs_finger
+      multiview: true
+      num_views: 3
+      wrist_mask_prob: 0.2
+      seed: ${seed}
+  ABC:
+    _target_: robot_wm.datasets.abc.dataset.ABCDataset
+    manifest: /scr/ravenh/lacwm_data/abc_pp/manifest.txt
+    seed: ${seed}
+    infinite: ${dataset.infinite}
+    subsample_traj: 10000
+    transform:
+      _target_: robot_wm.datasets.abc.transform.ABCTransform
+      cameras: ["top", "left_wrist", "right_wrist"]   # ego + 2 wrist
+      output_keys: ["rgb", "actions", "mask"]
+      sample_size: ${dataset.transform.sample_size}
+      chunk_size: ${dataset.transform.chunk_size}
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      resize_to: [180, 320]
+      action_type: action+camera
+      multiview: true
+      num_views: 3
+      wrist_mask_prob: 0.2
+      seed: ${seed}
