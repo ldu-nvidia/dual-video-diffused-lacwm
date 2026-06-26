@@ -10,12 +10,16 @@ robot_wm/datasets/base.py
 robot_wm/datasets/get_csv.py
 robot_wm/datasets/multi_dataset.py
 robot_wm/datasets/utils.py
+robot_wm/datasets/abc/__init__.py
+robot_wm/datasets/abc/dataset.py
+robot_wm/datasets/abc/transform.py
 robot_wm/datasets/agios/__init__.py
 robot_wm/datasets/agios/dataset.py
 robot_wm/datasets/agios/transform.py
 robot_wm/datasets/configs/__init__.py
 robot_wm/datasets/droid/__init__.py
 robot_wm/datasets/droid/dataset.py
+robot_wm/datasets/droid/lerobot_dataset.py
 robot_wm/datasets/droid/tfds_dataset.py
 robot_wm/datasets/droid/transform.py
 robot_wm/inference/__init__.py
@@ -77,6 +81,7 @@ robot_wm/modeling/networks/__init__.py
 robot_wm/modeling/networks/forward_model.py
 robot_wm/modeling/networks/st_forward_model.py
 robot_wm/modeling/networks/st_inverse_model.py
+robot_wm/modeling/networks/wan_forward_model.py
 robot_wm/modeling/tokenizers/__init__.py
 robot_wm/modeling/tokenizers/action/__init__.py
 robot_wm/modeling/tokenizers/action/base.py
@@ -86,6 +91,7 @@ robot_wm/modeling/tokenizers/rgb/__init__.py
 robot_wm/modeling/tokenizers/rgb/base.py
 robot_wm/modeling/tokenizers/rgb/cosmos.py
 robot_wm/modeling/tokenizers/rgb/transforms.py
+robot_wm/modeling/tokenizers/rgb/wan_vae.py
 robot_wm/utils/__init__.py
 robot_wm/utils/cluster_status.py
 robot_wm/utils/config.py
