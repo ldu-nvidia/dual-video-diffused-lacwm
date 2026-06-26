@@ -85,6 +85,16 @@ class LatentActionDiTModel(nn.Module):
         # number of *latent* frames that are treated as known history (reference)
         self.num_history_latent = self.rgb_tokenizer.latent_temporal_len(num_history_frames)
 
+        # learnable temporal pooling: the temporal_ratio future actions falling in each
+        # future latent frame are concatenated (temporal order) and combined by an MLP
+        # into one control feature -- replaces uniform average pooling.
+        tr = self.rgb_tokenizer.temporal_ratio
+        self.action_pool = nn.Sequential(
+            nn.Linear(tr * latent_action_dim, 2 * tr * latent_action_dim),
+            nn.SiLU(),
+            nn.Linear(2 * tr * latent_action_dim, latent_action_dim),
+        )
+
         # flow-matching scheduler (for sigmas / timesteps)
         from omegaconf import OmegaConf
 
@@ -170,16 +180,21 @@ class LatentActionDiTModel(nn.Module):
         return z_future, z_control, future_tokens
 
     def _future_control(self, z_future: torch.Tensor, Fp: int, K: int) -> torch.Tensor:
-        """Pool the num_future latent actions onto the future latent frames [K:Fp]
-        (each future latent frame covers temporal_ratio pixel frames); history latent
-        frames [0:K] get zero control. einsum keeps grad flowing to the inverse model."""
+        """Map the num_future latent actions onto the future latent frames [K:Fp] with a
+        LEARNABLE MLP (not average pooling): the temporal_ratio actions that fall in each
+        future latent frame are concatenated in temporal order and combined by self.action_pool.
+        History latent frames [0:K] get zero control."""
         N, Fnum, D = z_future.shape
         tr = self.rgb_tokenizer.temporal_ratio
-        M = z_future.new_zeros(Fp, Fnum)
-        for j in range(Fnum):
-            M[min(K + j // tr, Fp - 1), j] = 1.0
-        M = M / M.sum(dim=1, keepdim=True).clamp(min=1.0)  # history rows are all-zero -> stay 0
-        return torch.einsum("fj,njd->nfd", M, z_future)
+        n_future_lat = Fp - K
+        assert Fnum == n_future_lat * tr, (
+            f"learnable pool expects num_future ({Fnum}) == (Fp-K)*temporal_ratio "
+            f"({n_future_lat}*{tr}); adjust num_history/num_future."
+        )
+        grouped = z_future.reshape(N, n_future_lat, tr * D)  # consecutive tr actions per future latent frame
+        pooled = self.action_pool(grouped)                   # [N, n_future_lat, D]  (learnable)
+        hist = z_future.new_zeros(N, K, D)                   # history latent frames -> zero control
+        return torch.cat([hist, pooled], dim=1)              # [N, Fp, D]
 
     # ---------------------------------------------------- diffusion conditioning
     def _build_context(self, batch_size: int, device, dtype):
