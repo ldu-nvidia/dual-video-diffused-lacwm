@@ -38,13 +38,13 @@ class LatentActionDiTModel(nn.Module):
     def __init__(
         self,
         rgb_tokenizer: WanVAETokenizer,
-        rgb_pos_embed: PositionalEmbedding,
-        inverse_model: STInverseModel,
-        action_decoder: nn.Module,
-        action_pos_embed: PositionalEmbedding,
         forward_model: WanForwardModel,
         loss_scheduler: CustomLossScheduler,
         config: DictConfig,
+        rgb_pos_embed: PositionalEmbedding = None,
+        inverse_model: STInverseModel = None,
+        action_decoder: nn.Module = None,
+        action_pos_embed: PositionalEmbedding = None,
         morphology_tokens: nn.Module = None,
         num_history_frames: int = 5,
         num_future_frames: int = 8,
@@ -126,9 +126,12 @@ class LatentActionDiTModel(nn.Module):
         log_model_size(self, logger.info)
 
     def init_weights(self):
-        self.rgb_pos_embed.init_weights()
-        self.inverse_model.init_weights()
-        self.action_pos_embed.init_weights()
+        if self.rgb_pos_embed is not None:
+            self.rgb_pos_embed.init_weights()
+        if self.inverse_model is not None:
+            self.inverse_model.init_weights()
+        if self.action_pos_embed is not None:
+            self.action_pos_embed.init_weights()
         self.forward_model.init_weights()
         self.loss_scheduler.reset()
         if self.action_decoder is not None:
@@ -155,8 +158,10 @@ class LatentActionDiTModel(nn.Module):
             z = self.morphology_tokens(morphology_index).unsqueeze(1).unsqueeze(1) + z
         return z
 
-    def _latent_actions(self, rgb: torch.Tensor, morphology_index, Fp: int, K: int):
+    def _latent_actions(self, rgb: torch.Tensor, actions, morphology_index, Fp: int, K: int):
         """Generate ONLY the num_future latent actions (one per future transition).
+        `actions` is unused here (the LAM derives the latent from frames); the explicit
+        action world model overrides this method to encode `actions` directly.
 
         The inverse model is run over a (num_future + 1)-frame window = [last history
         frame | all future frames]; the boundary frame anchors the first action, so the
@@ -278,7 +283,7 @@ class LatentActionDiTModel(nn.Module):
         ref[:, :, :K] = latents[:, :, :K]
 
         # --- exactly num_future latent actions (one per future transition) ---
-        z_future, z_control, future_tokens = self._latent_actions(rgb, morphology_index, Fp, K)
+        z_future, z_control, future_tokens = self._latent_actions(rgb, actions, morphology_index, Fp, K)
         z_control = z_control.to(rgb.dtype)
 
         # flow matching
@@ -328,13 +333,13 @@ class LatentActionDiTModel(nn.Module):
 
     # ----------------------------------------------------------------- sampling
     @torch.no_grad()
-    def _sample_future(self, rgb, morphology_index=None):
+    def _sample_future(self, rgb, actions=None, morphology_index=None):
         latents = self._encode_clip(rgb).to(rgb.dtype)
         N, Cl, Fp, h, w = latents.shape
         K = min(self.num_history_latent, Fp)
         ref = torch.zeros_like(latents)
         ref[:, :, :K] = latents[:, :, :K]
-        _, z_control, _ = self._latent_actions(rgb, morphology_index, Fp, K)
+        _, z_control, _ = self._latent_actions(rgb, actions, morphology_index, Fp, K)
         z_control = z_control.to(rgb.dtype)
         context = self._build_context(N, rgb.device, rgb.dtype)
         clip_fea = self._build_clip(N, rgb.device, rgb.dtype)
@@ -352,7 +357,7 @@ class LatentActionDiTModel(nn.Module):
     @torch.no_grad()
     def visualize(self, rgb, actions=None, mask=None, **kwargs):
         morphology_index = kwargs.get("morphology_index", None)
-        pred_pix, gt_pix = self._sample_future(rgb, morphology_index)
+        pred_pix, gt_pix = self._sample_future(rgb, actions, morphology_index)
         nf = min(self.num_future_frames, pred_pix.shape[2])
         pred = pred_pix[:, :, -nf:]   # [N,C,nf,H,W]
         gt = gt_pix[:, :, -nf:]
