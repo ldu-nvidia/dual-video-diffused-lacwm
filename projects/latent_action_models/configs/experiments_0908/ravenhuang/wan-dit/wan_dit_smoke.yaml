@@ -28,8 +28,10 @@ dataset: &ds
     ABC:    {subsample_traj: 40}
 val_dataset:
   <<: *ds
+  img_augment: False
 viz_dataset:
   <<: *ds
+  img_augment: False
 
 val_data_loader:
   - _target_: torchdata.stateful_dataloader.StatefulDataLoader
