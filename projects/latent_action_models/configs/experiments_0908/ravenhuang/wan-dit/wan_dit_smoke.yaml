@@ -96,7 +96,7 @@ model:
     losses: ["teacher-forcing"]
     seed: ${seed}
   config:
-    action_decoding_weight: 0.5
+    action_decoding_weight: 0.1
     action_decoding_loss_type: "l1"
     flow_loss_on_future_only: true
 

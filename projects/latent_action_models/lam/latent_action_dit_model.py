@@ -329,6 +329,14 @@ class LatentActionDiTModel(nn.Module):
             total_loss = total_loss + self.config.get("action_decoding_weight", 0.5) * act_loss
             self.aux_losses["act_decoding_loss"] = act_loss.detach().clone()
 
+        # non-finite guard: a single bad batch (e.g. a degenerate frame/action) must never
+        # corrupt the weights. Discard the non-finite graph and emit a finite zero-grad loss.
+        self.aux_losses = {k: torch.nan_to_num(v) for k, v in self.aux_losses.items()}
+        if not torch.isfinite(total_loss):
+            warnings.warn("non-finite training loss; skipping batch (zero-grad loss emitted)")
+            anchor = next(self.forward_model.action_to_control.parameters())
+            total_loss = anchor.sum() * 0.0
+
         return total_loss
 
     # ----------------------------------------------------------------- sampling

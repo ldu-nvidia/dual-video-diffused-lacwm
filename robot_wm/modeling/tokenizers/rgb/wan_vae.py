@@ -71,6 +71,7 @@ class WanVAETokenizer(RGBTokenizer):
             os.path.join(model_path, vae_kwargs.get("vae_subpath", vae_subpath)),
             additional_kwargs=vae_kwargs,
         )
+        self.model = self.model.float()  # keep the VAE in fp32 (bf16 conv VAE is numerically unstable -> nan)
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
@@ -102,8 +103,8 @@ class WanVAETokenizer(RGBTokenizer):
         x = rearrange(rgb, "n t c h w -> (n t) c h w")
         x = self._pad_hw(x)
         x = x.unsqueeze(2)  # (n t) c 1 H W  -> single-frame videos
-        x = x.to(dtype=self.model.dtype)
-        z = self.model.encode(x).latent_dist.mode()  # (n t) d 1 h w
+        with torch.autocast(device_type="cuda", enabled=False):
+            z = self.model.encode(x.float()).latent_dist.mode()  # (n t) d 1 h w
         z = z.squeeze(2)
         z = rearrange(z, "(n t) d h w -> n t d h w", n=n, t=t)
         return z
@@ -117,9 +118,9 @@ class WanVAETokenizer(RGBTokenizer):
         x = rearrange(video, "n c f h w -> (n) c f h w")
         # pad H, W (dims -2, -1)
         x = self._pad_hw(x)
-        x = x.to(dtype=self.model.dtype)
-        dist = self.model.encode(x).latent_dist
-        return dist.sample() if sample else dist.mode()
+        with torch.autocast(device_type="cuda", enabled=False):
+            dist = self.model.encode(x.float()).latent_dist
+            return dist.sample() if sample else dist.mode()
 
     # ------------------------------------------------------------------ decode
     @torch.no_grad()
@@ -128,8 +129,8 @@ class WanVAETokenizer(RGBTokenizer):
         Args:  z [N, d, F', h, w]
         Returns: [N, C, F, H, W]
         """
-        z = z.to(dtype=self.model.dtype)
-        dec = self.model.decode(z).sample  # [N, C, F, H, W], clamped to [-1,1]
+        with torch.autocast(device_type="cuda", enabled=False):
+            dec = self.model.decode(z.float()).sample  # [N, C, F, H, W], clamped to [-1,1]
         if out_hw is not None:
             dec = dec[..., : out_hw[0], : out_hw[1]]
         return dec
