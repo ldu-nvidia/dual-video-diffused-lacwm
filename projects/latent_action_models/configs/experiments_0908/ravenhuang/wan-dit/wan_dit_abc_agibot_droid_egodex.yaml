@@ -49,8 +49,8 @@ viz_data_loader:
     persistent_workers: False
 
 data_loader:
-  batch_size: 2
-  num_workers: 12
+  batch_size: 16
+  num_workers: 16
   pin_memory: true
   prefetch_factor: 4
   persistent_workers: true
@@ -62,7 +62,7 @@ model:
   inverse_model: {arch: small, num_actions: 1, rope_end: 6144}
   action_pos_embed:
     _args_: ["${dataset.transform.sample_size}", "${model.inverse_model.num_actions}"]
-  forward_model: {lora_rank: 16, lora_alpha: 32, lora_dropout: 0.05, gradient_checkpointing: true}
+  forward_model: {lora_rank: 64, lora_alpha: 128, lora_dropout: 0.05, gradient_checkpointing: true}
   num_history_frames: 5
   num_future_frames: 8
   morphology_tokens:
