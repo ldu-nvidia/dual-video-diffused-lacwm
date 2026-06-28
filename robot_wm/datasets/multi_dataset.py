@@ -187,17 +187,15 @@ class MultiDataset(Dataset):
         episode["decode_camera"] = getattr(dataset, "decode_camera", True)
 
         if self.img_augment and "rgb" in episode:
-            # import pdb; pdb.set_trace()  # DEBUG
-            # import mediapy
             original_rgb = episode["rgb"].clone()
-            episode["rgb"] = self.augment(original_rgb)
-            # mediapy.write_video(
-            #     f"augmented_video_{index}.mp4",
-            #     episode["rgb"].permute(0, 2, 3, 1).numpy(),
-            #     fps=30,
-            # )
+            # rgb is normalized to [-1,1] (mean=std=0.5). kornia ColorJitter/RandomGamma assume
+            # [0,1] input (they clamp to [0,1]), so augment in [0,1] -- i.e. BEFORE normalization --
+            # then re-normalize back to [-1,1]. (Augmenting the normalized [-1,1] tensor directly
+            # collapses the range to [0,1] and feeds the VAE out-of-distribution data.)
+            rgb01 = ((original_rgb + 1.0) * 0.5).clamp(0.0, 1.0)
+            episode["rgb"] = self.augment(rgb01) * 2.0 - 1.0
             episode["crop_rgb"] = random_crop_resize_same(
-                self.rot_augment(self.augment(original_rgb))
+                self.rot_augment(self.augment(rgb01)) * 2.0 - 1.0
             )
             # mediapy.write_video(
             #     f"augmented_video_cropped_{index}.mp4",
