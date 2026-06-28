@@ -94,8 +94,15 @@ class Attention(nn.Module):
         k = k.permute(0, 2, 1, 3)  # N, Hkv, L, E
         v = v.permute(0, 2, 1, 3)  # N, Hkv, L, E
 
-        # attention
-        with torch.nn.attention.sdpa_kernel(self.sdpa_backend_order, set_priority=True):
+        # attention. For SHORT sequences (e.g. temporal attention over a few frames) the FLASH
+        # fused backward can emit NaN gradients when keys are degenerate (identical across the
+        # sequence -- happens here because masked/padded views are constant across frames). The
+        # MATH backend is exact, stable, and cheap at small L, so use it for short sequences and
+        # keep the fast flash/efficient order for long ones (e.g. spatial attention over h*w).
+        backend_order = (
+            [torch.nn.attention.SDPBackend.MATH] if q.shape[-2] <= 256 else self.sdpa_backend_order
+        )
+        with torch.nn.attention.sdpa_kernel(backend_order, set_priority=True):
             attn_drop_prob = self.attn_drop_prob if self.training else 0.0
             enable_gqa = self.num_heads != self.num_kv_heads
             x = F.scaled_dot_product_attention(
