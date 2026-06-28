@@ -341,13 +341,27 @@ class LatentActionDiTModel(nn.Module):
                       f"|vpred|={_mx(v_pred):.2e} flow={float(flow_loss):.3e} finflow={bool(torch.isfinite(flow_loss))} "
                       f"act={(float(_act) if _act is not None else -1):.3e}", flush=True)
 
-        # non-finite guard: a single bad batch (e.g. a degenerate frame/action) must never
-        # corrupt the weights. Discard the non-finite graph and emit a finite zero-grad loss.
-        self.aux_losses = {k: torch.nan_to_num(v) for k, v in self.aux_losses.items()}
+        # non-finite DETECTOR: surface exactly WHERE a NaN/Inf first originates (rgb input /
+        # VAE latent / action path / DiT output) + which morphology, so the real bug can be
+        # fixed at the source rather than masked. The zero-grad skip only avoids corrupting the
+        # weights so we can keep collecting these diagnostics across batches.
         if not torch.isfinite(total_loss):
-            warnings.warn("non-finite training loss; skipping batch (zero-grad loss emitted)")
+            import os as _os
+            _fin = lambda t: bool(torch.isfinite(t).all())
+            _act = self.aux_losses.get("act_decoding_loss", None)
+            self._nonfinite_count = getattr(self, "_nonfinite_count", 0) + 1
+            print(
+                f"[NONFINITE #{self._nonfinite_count}] rank={_os.environ.get('RANK', '0')} "
+                f"morph={morphology_index.tolist() if morphology_index is not None else None} "
+                f"rgb_nonfinite={int((~torch.isfinite(rgb)).sum())} "
+                f"rgb_range=[{float(rgb.min()):.3f},{float(rgb.max()):.3f}] | finite: "
+                f"latents={_fin(latents)} z_control={_fin(z_control)} v_pred={_fin(v_pred)} "
+                f"flow={_fin(flow_loss)} act={(_fin(_act) if _act is not None else 'NA')}",
+                flush=True,
+            )
             anchor = next(self.forward_model.action_to_control.parameters())
             total_loss = anchor.sum() * 0.0
+        self.aux_losses = {k: torch.nan_to_num(v) for k, v in self.aux_losses.items()}
 
         return total_loss
 

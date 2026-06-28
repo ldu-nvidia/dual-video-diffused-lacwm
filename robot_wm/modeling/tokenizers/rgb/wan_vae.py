@@ -50,7 +50,6 @@ class WanVAETokenizer(RGBTokenizer):
         spatial_compression_ratio: int = 8,
         temporal_compression_ratio: int = 4,
         pad_multiple: int = 16,
-        latent_clamp: float = 16.0,
     ):
         super().__init__(
             output_dim=output_dim,
@@ -65,10 +64,6 @@ class WanVAETokenizer(RGBTokenizer):
         self.temporal_ratio = temporal_compression_ratio
         # pixel H,W must be divisible by spatial(8) * patch(2) = 16 so the DiT patchify works
         self.pad_multiple = pad_multiple
-        # sanitize bound: rare corrupt videos decode to garbage/NaN -> NaN/extreme latents ->
-        # NaN loss OR an illegal-memory-access in the DiT's fused attention. Clamp so no
-        # bad value ever reaches the DiT.
-        self.latent_clamp = latent_clamp
 
         cfg = OmegaConf.load(config_path)
         vae_kwargs = OmegaConf.to_container(cfg["vae_kwargs"])
@@ -97,14 +92,6 @@ class WanVAETokenizer(RGBTokenizer):
     def latent_temporal_len(self, num_frames: int) -> int:
         return (num_frames - 1) // self.temporal_ratio + 1
 
-    def _sanitize_pixels(self, x: torch.Tensor) -> torch.Tensor:
-        # kill NaN/Inf from a corrupt decode and force the valid [-1, 1] pixel range
-        return torch.nan_to_num(x.float(), nan=0.0, posinf=1.0, neginf=-1.0).clamp_(-1.0, 1.0)
-
-    def _sanitize_latent(self, z: torch.Tensor) -> torch.Tensor:
-        c = self.latent_clamp
-        return torch.nan_to_num(z, nan=0.0, posinf=c, neginf=-c).clamp_(-c, c)
-
     # ------------------------------------------------------------------ encode
     @torch.no_grad()
     def encode_per_frame(self, rgb: torch.Tensor) -> torch.Tensor:
@@ -117,8 +104,8 @@ class WanVAETokenizer(RGBTokenizer):
         x = self._pad_hw(x)
         x = x.unsqueeze(2)  # (n t) c 1 H W  -> single-frame videos
         with torch.autocast(device_type="cuda", enabled=False):
-            z = self.model.encode(self._sanitize_pixels(x)).latent_dist.mode()  # (n t) d 1 h w
-        z = self._sanitize_latent(z.squeeze(2))
+            z = self.model.encode(x.float()).latent_dist.mode()  # (n t) d 1 h w
+        z = z.squeeze(2)
         z = rearrange(z, "(n t) d h w -> n t d h w", n=n, t=t)
         return z
 
@@ -132,9 +119,8 @@ class WanVAETokenizer(RGBTokenizer):
         # pad H, W (dims -2, -1)
         x = self._pad_hw(x)
         with torch.autocast(device_type="cuda", enabled=False):
-            dist = self.model.encode(self._sanitize_pixels(x)).latent_dist
-            z = dist.sample() if sample else dist.mode()
-        return self._sanitize_latent(z)
+            dist = self.model.encode(x.float()).latent_dist
+            return dist.sample() if sample else dist.mode()
 
     # ------------------------------------------------------------------ decode
     @torch.no_grad()
