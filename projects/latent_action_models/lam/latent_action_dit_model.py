@@ -48,6 +48,7 @@ class LatentActionDiTModel(nn.Module):
         morphology_tokens: nn.Module = None,
         num_history_frames: int = 5,
         num_future_frames: int = 8,
+        num_views: int = 3,
         latent_action_dim: int = 64,
         scheduler_config_path: str = "/scr/ravenh/VideoX-Fun/config/wan2.1/wan_civitai.yaml",
         null_prompt_path: str = "/scr/ravenh/wan_fun_1.3b_control/null_prompt_umt5.pt",
@@ -67,6 +68,7 @@ class LatentActionDiTModel(nn.Module):
         self.latent_action_dim = latent_action_dim
         self.num_history_frames = num_history_frames
         self.num_future_frames = num_future_frames
+        self.num_views = num_views
 
         self.rgb_tokenizer = rgb_tokenizer  # frozen Wan VAE
         for p in self.rgb_tokenizer.parameters():
@@ -265,6 +267,40 @@ class LatentActionDiTModel(nn.Module):
             )
         return total
 
+    def _build_loss_mask(self, rgb: torch.Tensor, mask: torch.Tensor, latents_shape) -> torch.Tensor:
+        """Latent-space validity mask [N,1,Fp,1,w] for the flow loss, combining:
+          - per-VIEW spatial validity: a width-stacked view that is a constant (black/padded)
+            image is excluded -> the model is not trained to predict masked/missing views;
+          - per-FRAME temporal validity: zero-padded frames (short trajectories, batch `mask`)
+            are excluded.
+        Masked regions remain as model INPUTS (history/control) but are not supervised."""
+        N, _, Fp, h, w = latents_shape
+        device = rgb.device
+        nv = self.num_views
+
+        # per-view: a view is "real" if its pixels vary (masked/padded views are constant)
+        if nv > 1 and rgb.shape[-1] % nv == 0 and w % nv == 0:
+            rv = rearrange(rgb, "n t c hh (v wv) -> n v (t c hh wv)", v=nv)
+            view_valid = (rv.float().std(dim=-1) > 1e-3).float()        # [N, nv]
+            width_mask = view_valid.repeat_interleave(w // nv, dim=1)   # [N, w]
+        else:
+            width_mask = torch.ones(N, w, device=device)
+
+        # per-frame -> per-latent-frame (a latent frame is valid only if all its pixel frames are)
+        if mask is not None:
+            tr = self.rgb_tokenizer.temporal_ratio
+            T = mask.shape[1]
+            lat_valid = torch.ones(N, Fp, device=device)
+            for li in range(Fp):
+                frames = [t for t in range(T) if (0 if t == 0 else (t - 1) // tr + 1) == li]
+                if frames:
+                    lat_valid[:, li] = mask[:, frames].float().amin(dim=1)
+            time_mask = lat_valid
+        else:
+            time_mask = torch.ones(N, Fp, device=device)
+
+        return (time_mask[:, None, :, None, None] * width_mask[:, None, None, None, :]).float()
+
     # ------------------------------------------------------------------ forward
     def forward(self, rgb: torch.Tensor, actions: torch.Tensor = None,
                 mask: torch.Tensor = None, **kwargs) -> torch.Tensor:
@@ -273,8 +309,18 @@ class LatentActionDiTModel(nn.Module):
         morphology_index = kwargs.get("morphology_index", None)
         device = rgb.device
 
+        # gated localization of a CUDA illegal-memory-access: a synchronize after each stage
+        # makes an async fault surface AT that stage's checkpoint (near-normal speed, unlike
+        # full CUDA_LAUNCH_BLOCKING). The traceback line then names the offending stage.
+        import os as _os
+        _sync = bool(_os.environ.get("DIT_SYNC"))
+        def _ck(stage):
+            if _sync:
+                torch.cuda.synchronize()  # if this raises IMA, `stage` (just produced) was the culprit
+
         # --- diffusion target: full-clip temporal latent ---
         latents = self._encode_clip(rgb).to(rgb.dtype)   # [N,16,Fp,h,w]
+        _ck("encode_clip")
         N, Cl, Fp, h, w = latents.shape
 
         # reference (history) latent frames, rest zeroed -> conditioning channel
@@ -285,6 +331,7 @@ class LatentActionDiTModel(nn.Module):
         # --- exactly num_future latent actions (one per future transition) ---
         z_future, z_control, future_tokens = self._latent_actions(rgb, actions, morphology_index, Fp, K)
         z_control = z_control.to(rgb.dtype)
+        _ck("latent_actions")
 
         # flow matching
         noise = torch.randn_like(latents)
@@ -292,19 +339,27 @@ class LatentActionDiTModel(nn.Module):
         sigmas = self._get_sigmas(timesteps, latents.ndim, latents.dtype, device)
         noisy = (1.0 - sigmas) * latents + sigmas * noise
         target = noise - latents
+        _ck("flow_matching_setup")
 
         context = self._build_context(N, device, rgb.dtype)
         clip_fea = self._build_clip(N, device, rgb.dtype)
         v_pred = self.forward_model(noisy, timesteps, z_control, ref, context, clip_fea)
+        _ck("forward_model_DiT")
 
-        # flow loss on future latent frames only
+        # masked flow loss: exclude masked/missing views and zero-padded frames from supervision
+        loss_mask = self._build_loss_mask(rgb, mask, latents.shape)  # [N,1,Fp,1,w]
         if self.config.get("flow_loss_on_future_only", True) and Fp > K:
-            fl_pred, fl_tgt = v_pred[:, :, K:], target[:, :, K:]
+            fl_pred, fl_tgt, m = v_pred[:, :, K:], target[:, :, K:], loss_mask[:, :, K:]
         else:
-            fl_pred, fl_tgt = v_pred, target
-        flow_loss = F.mse_loss(fl_pred.float(), fl_tgt.float())
+            fl_pred, fl_tgt, m = v_pred, target, loss_mask
+        se = (fl_pred.float() - fl_tgt.float()) ** 2
+        # m is [N,1,Fp,1,w] and broadcasts over channels+height; expand_as so the denominator
+        # counts the actual number of supervised scalar elements (not 1/(C*h) of them).
+        m = m.expand_as(se)
+        flow_loss = (se * m).sum() / m.sum().clamp(min=1.0)
         total_loss = flow_loss
         self.aux_losses["flow_loss"] = flow_loss.detach().clone()
+        _ck("flow_loss")
 
         # --- action decoding: supervise the num_future latent actions against the
         #     future GT action chunks (actions[:, num_history:]) ---
@@ -316,6 +371,7 @@ class LatentActionDiTModel(nn.Module):
                 z_future, tokenized_rgb=self.rgb_pos_embed(future_tokens),
                 morphology_index=morphology_index,
             )
+            _ck("action_decoder_forward")
             if isinstance(ahat, dict):
                 act_loss = self._multi_action_decoding_loss(
                     ahat, gt_actions, loss_type=self.config.get("action_decoding_loss_type", "l1"),
