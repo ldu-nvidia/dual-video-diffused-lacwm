@@ -329,6 +329,18 @@ class LatentActionDiTModel(nn.Module):
             total_loss = total_loss + self.config.get("action_decoding_weight", 0.5) * act_loss
             self.aux_losses["act_decoding_loss"] = act_loss.detach().clone()
 
+        # diagnostic: log magnitudes of each intermediate to find what blows up (gated by DIT_DIAG)
+        import os as _os
+        if _os.environ.get("DIT_DIAG") and _os.environ.get("RANK", "0") == "0":
+            self._fwd_count = getattr(self, "_fwd_count", 0) + 1
+            _mx = lambda t: (float(t.abs().max()) if t is not None and t.numel() else -1.0)
+            _act = self.aux_losses.get("act_decoding_loss", None)
+            if self._fwd_count % 10 == 0 or not torch.isfinite(total_loss):
+                print(f"DIAG fwd{self._fwd_count} morph={morphology_index.tolist() if morphology_index is not None else None} "
+                      f"|lat|={_mx(latents):.2e} |ref|={_mx(ref):.2e} |zctrl|={_mx(z_control):.2e} "
+                      f"|vpred|={_mx(v_pred):.2e} flow={float(flow_loss):.3e} finflow={bool(torch.isfinite(flow_loss))} "
+                      f"act={(float(_act) if _act is not None else -1):.3e}", flush=True)
+
         # non-finite guard: a single bad batch (e.g. a degenerate frame/action) must never
         # corrupt the weights. Discard the non-finite graph and emit a finite zero-grad loss.
         self.aux_losses = {k: torch.nan_to_num(v) for k, v in self.aux_losses.items()}

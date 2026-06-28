@@ -21,7 +21,7 @@ dataset: &ds
   padding_dim: 157
   seed: ${seed}
   infinite: true
-  img_augment: True
+  img_augment: False   # kornia aug clamps to [0,1], breaking the [-1,1] VAE range; disabled while stabilizing
   transform:
     sample_size: 13   # 5 history + 8 future
     chunk_size: 5
