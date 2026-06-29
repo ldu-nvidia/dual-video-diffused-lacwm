@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling
 from einops import rearrange
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from lam.loss_scheduler import CustomLossScheduler
 from robot_wm.modeling.modules.positional_embedding import PositionalEmbedding
@@ -98,8 +98,6 @@ class LatentActionDiTModel(nn.Module):
         )
 
         # flow-matching scheduler (for sigmas / timesteps)
-        from omegaconf import OmegaConf
-
         sched_cfg = OmegaConf.to_container(OmegaConf.load(scheduler_config_path)["scheduler_kwargs"])
         sched_cfg.pop("scheduler_subpath", None)
         self.noise_scheduler = FlowMatchEulerDiscreteScheduler(**sched_cfg)
@@ -309,18 +307,8 @@ class LatentActionDiTModel(nn.Module):
         morphology_index = kwargs.get("morphology_index", None)
         device = rgb.device
 
-        # gated localization of a CUDA illegal-memory-access: a synchronize after each stage
-        # makes an async fault surface AT that stage's checkpoint (near-normal speed, unlike
-        # full CUDA_LAUNCH_BLOCKING). The traceback line then names the offending stage.
-        import os as _os
-        _sync = bool(_os.environ.get("DIT_SYNC"))
-        def _ck(stage):
-            if _sync:
-                torch.cuda.synchronize()  # if this raises IMA, `stage` (just produced) was the culprit
-
         # --- diffusion target: full-clip temporal latent ---
         latents = self._encode_clip(rgb).to(rgb.dtype)   # [N,16,Fp,h,w]
-        _ck("encode_clip")
         N, Cl, Fp, h, w = latents.shape
 
         # reference (history) latent frames, rest zeroed -> conditioning channel
@@ -331,7 +319,6 @@ class LatentActionDiTModel(nn.Module):
         # --- exactly num_future latent actions (one per future transition) ---
         z_future, z_control, future_tokens = self._latent_actions(rgb, actions, morphology_index, Fp, K)
         z_control = z_control.to(rgb.dtype)
-        _ck("latent_actions")
 
         # flow matching
         noise = torch.randn_like(latents)
@@ -339,12 +326,10 @@ class LatentActionDiTModel(nn.Module):
         sigmas = self._get_sigmas(timesteps, latents.ndim, latents.dtype, device)
         noisy = (1.0 - sigmas) * latents + sigmas * noise
         target = noise - latents
-        _ck("flow_matching_setup")
 
         context = self._build_context(N, device, rgb.dtype)
         clip_fea = self._build_clip(N, device, rgb.dtype)
         v_pred = self.forward_model(noisy, timesteps, z_control, ref, context, clip_fea)
-        _ck("forward_model_DiT")
 
         # masked flow loss: exclude masked/missing views and zero-padded frames from supervision
         loss_mask = self._build_loss_mask(rgb, mask, latents.shape)  # [N,1,Fp,1,w]
@@ -359,7 +344,6 @@ class LatentActionDiTModel(nn.Module):
         flow_loss = (se * m).sum() / m.sum().clamp(min=1.0)
         total_loss = flow_loss
         self.aux_losses["flow_loss"] = flow_loss.detach().clone()
-        _ck("flow_loss")
 
         # --- action decoding: supervise the num_future latent actions against the
         #     future GT action chunks (actions[:, num_history:]) ---
@@ -371,7 +355,6 @@ class LatentActionDiTModel(nn.Module):
                 z_future, tokenized_rgb=self.rgb_pos_embed(future_tokens),
                 morphology_index=morphology_index,
             )
-            _ck("action_decoder_forward")
             if isinstance(ahat, dict):
                 act_loss = self._multi_action_decoding_loss(
                     ahat, gt_actions, loss_type=self.config.get("action_decoding_loss_type", "l1"),
@@ -385,35 +368,17 @@ class LatentActionDiTModel(nn.Module):
             total_loss = total_loss + self.config.get("action_decoding_weight", 0.5) * act_loss
             self.aux_losses["act_decoding_loss"] = act_loss.detach().clone()
 
-        # diagnostic: log magnitudes of each intermediate to find what blows up (gated by DIT_DIAG)
-        import os as _os
-        if _os.environ.get("DIT_DIAG") and _os.environ.get("RANK", "0") == "0":
-            self._fwd_count = getattr(self, "_fwd_count", 0) + 1
-            _mx = lambda t: (float(t.abs().max()) if t is not None and t.numel() else -1.0)
-            _act = self.aux_losses.get("act_decoding_loss", None)
-            if self._fwd_count % 10 == 0 or not torch.isfinite(total_loss):
-                print(f"DIAG fwd{self._fwd_count} morph={morphology_index.tolist() if morphology_index is not None else None} "
-                      f"|lat|={_mx(latents):.2e} |ref|={_mx(ref):.2e} |zctrl|={_mx(z_control):.2e} "
-                      f"|vpred|={_mx(v_pred):.2e} flow={float(flow_loss):.3e} finflow={bool(torch.isfinite(flow_loss))} "
-                      f"act={(float(_act) if _act is not None else -1):.3e}", flush=True)
-
-        # non-finite DETECTOR: surface exactly WHERE a NaN/Inf first originates (rgb input /
-        # VAE latent / action path / DiT output) + which morphology, so the real bug can be
-        # fixed at the source rather than masked. The zero-grad skip only avoids corrupting the
-        # weights so we can keep collecting these diagnostics across batches.
+        # Safety guard: a non-finite loss would poison every weight via the backward pass.
+        # Zero this batch's contribution (without detaching from the graph) and log which
+        # stage first went non-finite, so the source can be fixed rather than silently masked.
         if not torch.isfinite(total_loss):
-            import os as _os
-            _fin = lambda t: bool(torch.isfinite(t).all())
-            _act = self.aux_losses.get("act_decoding_loss", None)
-            self._nonfinite_count = getattr(self, "_nonfinite_count", 0) + 1
-            print(
-                f"[NONFINITE #{self._nonfinite_count}] rank={_os.environ.get('RANK', '0')} "
-                f"morph={morphology_index.tolist() if morphology_index is not None else None} "
-                f"rgb_nonfinite={int((~torch.isfinite(rgb)).sum())} "
-                f"rgb_range=[{float(rgb.min()):.3f},{float(rgb.max()):.3f}] | finite: "
-                f"latents={_fin(latents)} z_control={_fin(z_control)} v_pred={_fin(v_pred)} "
-                f"flow={_fin(flow_loss)} act={(_fin(_act) if _act is not None else 'NA')}",
-                flush=True,
+            fin = lambda t: bool(torch.isfinite(t).all())
+            logger.warning(
+                "non-finite loss; finite stages: latents=%s z_control=%s v_pred=%s flow=%s "
+                "(rgb range [%.3f, %.3f], morph=%s)",
+                fin(latents), fin(z_control), fin(v_pred), fin(flow_loss),
+                float(rgb.min()), float(rgb.max()),
+                morphology_index.tolist() if morphology_index is not None else None,
             )
             anchor = next(self.forward_model.action_to_control.parameters())
             total_loss = anchor.sum() * 0.0

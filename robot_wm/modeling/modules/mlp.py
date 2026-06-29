@@ -2,11 +2,18 @@
 #     https://github.com/pytorch/torchtitan/blob/6cb13c7a97eed890f7df872261c9bf1523959dee/torchtitan/models/llama/model.py
 
 import copy
+import logging
 from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
 from hydra.utils import get_class
+
+logger = logging.getLogger(__name__)
+
+# decoder keys we've already warned about, so a missing morphology decoder is reported
+# once instead of on every forward pass (avoids flooding the training log).
+_MISSING_DECODER_WARNED: set = set()
 
 
 class MLP(nn.Module):
@@ -150,7 +157,10 @@ class SplitMultiMLP(nn.Module):
             cur_action = []
             for k, split_dim in self.split_type["action_type_split"].items():
                 if f"{morph_id}_{k}" not in self.decoders:
-                    print(f"Warning: {morph_id}_{k} not in decoders")
+                    key = f"{morph_id}_{k}"
+                    if key not in _MISSING_DECODER_WARNED:
+                        _MISSING_DECODER_WARNED.add(key)
+                        logger.warning("no decoder for %s; skipping that action key", key)
                     continue
                 decoder = self.decoders[f"{morph_id}_{k}"]
                 input_latent = x_in[..., int(split_dim[0]) : int(split_dim[1])]
