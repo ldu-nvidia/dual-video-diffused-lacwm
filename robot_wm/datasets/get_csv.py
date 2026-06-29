@@ -18,7 +18,7 @@ def get_traj_ids(h5_path):
 
 def find_hdf5_files(
     root_dir,
-    output_csv="/svl/u/ravenh/lacwm/robot_world_models-raven-lam/robot_wm/datasets/csv_files/libero.csv",
+    output_csv="/home/ravenh/lacwm-dit/robot_wm/datasets/csv_files/libero.csv",
 ):
     train_rows = []
     val_rows = []

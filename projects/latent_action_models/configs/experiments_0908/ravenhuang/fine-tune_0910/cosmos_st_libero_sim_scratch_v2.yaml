@@ -101,5 +101,5 @@ wandb:
 trainer:
   config:
     # saving:
-    #   save_path: '/svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/data/experiments_0908/libero_sim_scratch_mv_sample_zero_action/2025-11-19/14-52-39/snapshot.pt'
+    #   save_path: '/home/ravenh/lacwm-dit/projects/latent_action_models/data/experiments_0908/libero_sim_scratch_mv_sample_zero_action/2025-11-19/14-52-39/snapshot.pt'
     max_iter: 100_000

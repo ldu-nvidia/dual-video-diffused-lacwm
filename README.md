@@ -1,13 +1,12 @@
 # lacwm-dit — Latent-Action World Model with a Wan2.1-Fun DiT forward model
 
-This is a fork of the `lacwm` latent-action world model (LAM) in which the forward
-(world) model is replaced by the **Wan2.1-Fun-1.3B-Control** video-diffusion transformer.
-The Cosmos tokenizer and `STForwardModel` are dropped; the whole pipeline runs on the
-**Wan VAE**, and the world model becomes a conditional video-diffusion model:
-given a few history frames and a latent action, it denoises the future frames.
+A latent-action world model whose forward (world) model is the
+**Wan2.1-Fun-1.3B-Control** video-diffusion transformer. The whole pipeline runs on the
+**Wan VAE**: the world model is a conditional video-diffusion model that, given a few
+history frames and a latent action, denoises the future frames.
 
-The inverse model (image frames → latent action) and the per-morphology action
-decoder are carried over from the LAM unchanged.
+The inverse model (image frames → latent action) and the per-morphology action decoder
+are the standard latent-action-model components; only the forward model is diffusion-based.
 
 ## Architecture
 
@@ -120,9 +119,9 @@ robot_wm/modeling/
   modules/attention.py                  # MATH SDPA for short sequences (NaN-in-backward fix)
 ```
 
-Everything else (datasets, transforms, inverse model, action decoder, trainer, optimizer,
-LR schedule, DDP, wandb) is reused from the LAM repo. See the docstrings at the top of each
-file above for the precise tensor shapes and conditioning layout.
+The remaining infrastructure (datasets, transforms, inverse model, action decoder, trainer,
+optimizer, LR schedule, DDP, wandb) is shared across the codebase. See the docstrings at the
+top of each file above for the precise tensor shapes and conditioning layout.
 
 ## Config knobs worth knowing
 

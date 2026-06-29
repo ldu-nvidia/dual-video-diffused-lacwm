@@ -18,10 +18,10 @@ import time
 
 sys.path.append(
     os.path.abspath(
-        "/svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models"
+        "/home/ravenh/lacwm-dit/projects/latent_action_models"
     )
 )
-os.environ["COSMOS_HOME"] = "/svl/u/ravenh/lacwm/Cosmos"
+os.environ["COSMOS_HOME"] = "/scr/ravenh/Cosmos"
 
 import torchvision.transforms.v2 as transforms
 
@@ -45,7 +45,7 @@ def _make_rgb_transform(resize_to):
 
 
 def load_wm_model(snapshot_dir):
-    # snapshot_dir = "/svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/data/experiments_0908/libero_sim_scratch_action_9/2025-11-24/19-41-14/"
+    # snapshot_dir = "/home/ravenh/lacwm-dit/projects/latent_action_models/data/experiments_0908/libero_sim_scratch_action_9/2025-11-24/19-41-14/"
     config_path = f"{snapshot_dir}/.hydra"
     print(config_path)
 

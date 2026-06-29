@@ -28,7 +28,7 @@ datasets:
 
   Agibot:
     _target_: robot_wm.datasets.agibot.dataset.AgibotDataset
-    csv_path: "/svl/u/ravenh/lacwm/data/manifests/agibot_viscam_train.csv"
+    csv_path: "/scr/ravenh/lacwm_data/manifests/agibot_viscam_train.csv"
     seed: ???
     infinite: true
     transform:
@@ -45,7 +45,7 @@ datasets:
 
   EgoDex:
     _target_: robot_wm.datasets.egodex.dataset.EgoDexDataset
-    manifest: "/svl/u/ravenh/lacwm/data/manifests/egodex_part2_train.csv"
+    manifest: "/scr/ravenh/lacwm_data/manifests/egodex_part2_train.csv"
     transform:
       _target_: robot_wm.datasets.agios.transform.AgiosTransform
       cameras: ["ego_centric_image"]

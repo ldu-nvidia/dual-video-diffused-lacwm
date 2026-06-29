@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 DATASET_ROOTS = {
     "alpha": "/checkpoint/cortex/ravenhuang/agibot_sync/AgiBotWorld-Alpha",
     "beta": "/checkpoint/cortex/ravenhuang/agibot_sync/AgiBotWorld-Beta",
-    "viscam": "/svl/u/ravenh/lacwm/data/agibot_combined",
+    "viscam": "/scr/ravenh/lacwm_data/agibot_combined",
     "scr": "/scr/ravenh/lacwm_data/agibot",
 }
 

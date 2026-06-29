@@ -53,7 +53,7 @@ class WorldModelPolicy(_base_policy.BasePolicy):
 @dataclasses.dataclass
 class Args:
     snapshot_dir: str = (
-        "/svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/"
+        "/home/ravenh/lacwm-dit/projects/latent_action_models/"
         "data/experiments_0908/libero_sim_scratch_action_9/2025-11-24/19-41-14/"
     )
     # Bind to all interfaces by default so the websocket client can reach us.

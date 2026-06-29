@@ -1,6 +1,6 @@
 # Wan2.1-Fun-1.3B-Control as the forward (world) model for the latent-action world model.
 #
-# Replaces STForwardModel. The frozen Wan DiT is LoRA-fine-tuned; a small trainable
+# The frozen Wan DiT is LoRA-fine-tuned; a small trainable
 # ActionToControl module maps the per-latent-frame latent action (64-d) into the Wan
 # Fun-Control "control" latent channel (16-ch). History frames go in the "reference"
 # channel. The two are channel-concatenated into `y` (32-ch); with the 16-ch noisy

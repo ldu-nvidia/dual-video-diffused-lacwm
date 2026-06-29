@@ -1,14 +1,13 @@
 # Latent-action world model with a Wan2.1-Fun-1.3B-Control diffusion forward model.
 #
-# Same skeleton as LatentActionModel (lam/latent_action_model.py) but the forward
-# (world) model is a conditional video-diffusion model instead of STForwardModel:
+# The forward (world) model is a conditional video-diffusion model:
 #
 #   rgb --WanVAE(per-frame)--> per-frame latents --inverse_model--> latent action z
 #   history frames --WanVAE(temporal)--> reference latent  ─┐
 #   latent action z --ActionToControl--> control latent     ┼─ y=[control|ref] (32ch)
 #   future frames  --WanVAE(temporal)+noise--> noisy (16ch) ─┘
 #       --> Wan DiT (frozen + LoRA) --flow-matching denoise--> future frames
-#   action_decoder(z) --> GT robot action (L1 supervision, unchanged from LAM)
+#   action_decoder(z) --> GT robot action (L1 supervision)
 #
 # Loss = flow_matching_mse(future) + action_decoding_weight * action_decoding_l1.
 
@@ -156,7 +155,7 @@ class LatentActionDiTModel(nn.Module):
 
     def _latent_actions(self, rgb: torch.Tensor, actions, morphology_index, Fp: int, K: int):
         """Generate ONLY the num_future latent actions (one per future transition).
-        `actions` is unused here (the LAM derives the latent from frames); the explicit
+        `actions` is unused here (this model derives the latent from frames); the explicit
         action world model overrides this method to encode `actions` directly.
 
         The inverse model is run over a (num_future + 1)-frame window = [last history
@@ -226,7 +225,7 @@ class LatentActionDiTModel(nn.Module):
         idx = idx.clamp(0, self.noise_scheduler.config.num_train_timesteps - 1)
         return self.noise_scheduler.timesteps.to(device)[idx].to(device)
 
-    # ------------------------------------------------------- action decoding (LAM)
+    # ------------------------------------------------------------- action decoding
     def _forward_action_decoder(self, z, tokenized_rgb=None, morphology_index=None):
         zhat = self._add_morphology(z, morphology_index)
         action_z = rearrange(zhat, "N T A D -> N T (A D)")

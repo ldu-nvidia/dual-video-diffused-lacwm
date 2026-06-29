@@ -76,4 +76,4 @@ wandb:
 trainer:
   config:
     max_iter: 40_000
-    load_path: /svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/data/experiments_0908/ewm_agibot_egodex_droid_tfds_mt_xatten_cosmos_singlemlp_t/2026-03-30/20-42-14/snapshot.pt
+    load_path: /home/ravenh/lacwm-dit/projects/latent_action_models/data/experiments_0908/ewm_agibot_egodex_droid_tfds_mt_xatten_cosmos_singlemlp_t/2026-03-30/20-42-14/snapshot.pt

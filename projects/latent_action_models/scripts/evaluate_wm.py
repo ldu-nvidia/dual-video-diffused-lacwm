@@ -19,10 +19,10 @@ from torch.utils.data import DataLoader
 
 sys.path.append(
     os.path.abspath(
-        "/svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models"
+        "/home/ravenh/lacwm-dit/projects/latent_action_models"
     )
 )
-os.environ["COSMOS_HOME"] = "/svl/u/ravenh/lacwm/Cosmos"
+os.environ["COSMOS_HOME"] = "/scr/ravenh/Cosmos"
 
 from hydra.utils import instantiate
 from omegaconf import OmegaConf

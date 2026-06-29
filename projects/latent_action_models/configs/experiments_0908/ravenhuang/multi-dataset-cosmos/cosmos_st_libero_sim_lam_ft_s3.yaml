@@ -121,9 +121,9 @@ lr_scheduler_factory:
 trainer:
   config:
     # saving:
-    #   save_path: '/svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/data/experiments_0908/libero_sim_scratch_sample_zero_action/2025-11-19/17-09-43/snapshot.pt'
+    #   save_path: '/home/ravenh/lacwm-dit/projects/latent_action_models/data/experiments_0908/libero_sim_scratch_sample_zero_action/2025-11-19/17-09-43/snapshot.pt'
     max_iter: 35_000
-    load_path: /svl/u/ravenh/lacwm/robot_world_models-raven-lam/projects/latent_action_models/data/experiments_0908/libero_sim_lam_ft_s2/2026-04-03/16-49-14/snapshot.pt
+    load_path: /home/ravenh/lacwm-dit/projects/latent_action_models/data/experiments_0908/libero_sim_lam_ft_s2/2026-04-03/16-49-14/snapshot.pt
     exclude_keys:
     - action_decoder
     - loss_scheduler

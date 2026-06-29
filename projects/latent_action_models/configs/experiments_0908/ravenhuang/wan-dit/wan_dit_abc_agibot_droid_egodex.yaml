@@ -1,8 +1,8 @@
 # @package _global_
 # Latent-action WORLD model with a Wan2.1-Fun-1.3B-Control diffusion forward model,
-# on ABC + Agibot + DROID + EgoDex. The Cosmos tokenizer + STForwardModel are replaced
-# by the Wan VAE + Wan DiT (LoRA fine-tuned). Inverse model (latent action) + per-morph
-# action decoder are unchanged from the LAM. Clip = 5 history + 8 future = 13 frames
+# on ABC + Agibot + DROID + EgoDex. RGB tokenizer = Wan VAE; forward model = Wan DiT
+# (LoRA fine-tuned). Inverse model (latent action) + per-morph action decoder as usual.
+# Clip = 5 history + 8 future = 13 frames
 # (Wan causal VAE needs F = 4k+1). Latent action -> Fun-Control "control" channel.
 # Launch (8 GPU):
 #   torchrun --standalone --nproc_per_node=8 train.py +experiments_0908=ravenhuang/wan-dit/wan_dit_abc_agibot_droid_egodex.yaml

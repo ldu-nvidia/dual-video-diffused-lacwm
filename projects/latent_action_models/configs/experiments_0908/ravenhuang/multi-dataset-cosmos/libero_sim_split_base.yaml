@@ -20,7 +20,7 @@ dataset:  &dataset
   datasets:
     Libero:  &libero
       seed: ${seed}
-      manifest: "/svl/u/ravenh/lacwm/robot_world_models-raven-lam/robot_wm/datasets/csv_files/libero.csv"
+      manifest: "/home/ravenh/lacwm-dit/robot_wm/datasets/csv_files/libero.csv"
       transform:
         action_type: action+camera #16
         multiview: false
@@ -41,14 +41,14 @@ val_dataset:
   datasets:
     Libero:
       <<: *libero
-      manifest: "/svl/u/ravenh/lacwm/robot_world_models-raven-lam/robot_wm/datasets/csv_files/libero.csv"
+      manifest: "/home/ravenh/lacwm-dit/robot_wm/datasets/csv_files/libero.csv"
 
 libero_unseen_val_dataset:
   <<: *dataset
   datasets:
     Libero:
       <<: *libero
-      manifest: "/svl/u/ravenh/lacwm/robot_world_models-raven-lam/robot_wm/datasets/csv_files/libero_val.csv"
+      manifest: "/home/ravenh/lacwm-dit/robot_wm/datasets/csv_files/libero_val.csv"
 
 
 val_data_loader:

@@ -26,7 +26,7 @@ dataset:  &dataset
   datasets:
     Agibot:  &agibot
       seed: ${seed}
-      csv_path: "/svl/u/ravenh/lacwm/data/manifests/agibot_viscam_train.csv"
+      csv_path: "/scr/ravenh/lacwm_data/manifests/agibot_viscam_train.csv"
       transform:
         sample_size: ${dataset.transform.sample_size}
         chunk_size: ${dataset.transform.chunk_size}
@@ -37,7 +37,7 @@ dataset:  &dataset
     EgoDex: &egodex
       seed: ${seed}
       infinite: ${dataset.infinite}
-      manifest: "/svl/u/ravenh/lacwm/data/manifests/egodex_part2_train.csv"
+      manifest: "/scr/ravenh/lacwm_data/manifests/egodex_part2_train.csv"
       transform:
         action_type: delta-state+camera+abs_finger
         sample_size: ${dataset.transform.sample_size}
