@@ -1,4 +1,4 @@
-# test_datasets_menagerie_modules.py
+# test_datasets_modules.py
 import importlib
 
 import pytest

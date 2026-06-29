@@ -1,4 +1,4 @@
-# a dataset that contains multiple datasets such as the droid dataset and the agios dataset, it needs to take in args for each dataset and then combine them
+# a dataset that contains multiple datasets such as the droid dataset and the egodex dataset, it needs to take in args for each dataset and then combine them
 import logging
 from typing import Any, Optional
 
@@ -18,7 +18,6 @@ Morphology_Mapping = {
     "MPKDataset": 0,
     "Hot3dDataset": 1,
     "EgoDexDataset": 2,
-    "AgiosDataset": 3,
     "MurpDataset": 4,
     "ManiSkillDataset": 5,
     "AgibotDataset": 6,
@@ -62,7 +61,7 @@ def random_crop_resize_same(batch: torch.Tensor, ratio_range=(0.6, 1.0)):
 
 class MultiDataset(Dataset):
     """
-    A dataset that contains multiple datasets such as the droid dataset and the agios dataset, it needs to take in args for each dataset and then combine them, an example is:
+    A dataset that contains multiple datasets such as the droid dataset and the egodex dataset, it needs to take in args for each dataset and then combine them, an example is:
     datasets:
         droid:
             _target_: robot_wm.datasets.droid.dataset.DroidDataset
@@ -71,9 +70,9 @@ class MultiDataset(Dataset):
             infinite: True
             transform: None
             to_numpy: False
-        agios:
-            _target_: robot_wm.datasets.agios.dataset.AgiosDataset
-            manifest: /path/to/agios/manifest
+        egodex:
+            _target_: robot_wm.datasets.egodex.dataset.EgoDexDataset
+            manifest: /path/to/egodex/manifest
             seed: 0
             infinite: True
             transform: None
