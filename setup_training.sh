@@ -67,11 +67,9 @@ setup_env() {
   conda env list | grep -qE "^\s*$CONDA_ENV\s" || conda create -y -n "$CONDA_ENV" python=3.10
   conda activate "$CONDA_ENV"
   pip install --upgrade pip
-  pip install torch==2.7.1 torchvision --index-url https://download.pytorch.org/whl/cu128 || \
+  pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128 || \
     warn "torch install failed — install a build matching your CUDA, then re-run"
-  pip install diffusers==0.38.0 accelerate ftfy librosa sentencepiece \
-              hydra-core omegaconf peft einops wandb "huggingface_hub[cli]" \
-              opencv-python decord av h5py pandas pyarrow scipy lpips imageio imageio-ffmpeg
+  pip install -r "$REPO_DIR/requirements.txt"
   pip install -e "$REPO_DIR"
   [ -d "$VIDEOX_DIR/.git" ] || git clone https://github.com/aigc-apps/VideoX-Fun.git "$VIDEOX_DIR"
 }

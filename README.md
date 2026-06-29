@@ -65,11 +65,16 @@ To provision a **new server** in one shot (env + weights + VideoX-Fun + datasets
 manifests + validation), use [`setup_training.sh`](setup_training.sh) — see **Data** below.
 The manual steps here are what it automates.
 
-1. **Environment** — `lacwm-dit` is a clone of the `lacwm` env (torch 2.7.1+cu128) with
-   `diffusers`, `accelerate`, `ftfy`, `librosa`, `sentencepiece` added, then:
+1. **Environment** — Python 3.10 + PyTorch 2.7.1 (cu128). One-shot from the repo root:
    ```bash
+   conda env create -f environment.yaml   # env "lacwm-dit": cu128 torch + requirements.txt + this package
    conda activate lacwm-dit
-   pip install -e .
+   ```
+   or manually:
+   ```bash
+   conda create -n lacwm-dit python=3.10 && conda activate lacwm-dit
+   pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+   pip install -r requirements.txt && pip install -e .
    ```
 2. **VideoX-Fun** (provides `videox_fun.models.*`): cloned at `/scr/ravenh/VideoX-Fun`.
    Import the submodules directly (e.g. `from videox_fun.models.wan_vae import
