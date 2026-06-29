@@ -96,14 +96,15 @@ AGIBOT_LIMIT=2000 EGODEX_PARTS=part2 ABC_ENABLE=0 ./setup_training.sh
 ```
 
 Each dataset has `<DS>_ENABLE` (1/0) and `<DS>_LIMIT` (episodes kept in the manifest;
-`all` = no cap), plus download-volume knobs (`DROID_FILES`, `AGIBOT_TASKS`, `EGODEX_PARTS`).
+`all` = no cap), plus download-volume knobs (`AGIBOT_TASKS`, `EGODEX_PARTS`; DROID volume
+follows `DROID_LIMIT` → `ceil(limit/1000)` chunks).
 Set `BASE` to relocate everything off `/scr/ravenh` and the script repoints the configs.
 
 ### Sources & expected layout (under `$DATA_ROOT`, default `/scr/ravenh/lacwm_data`)
 
 | Dataset | Source | On-disk layout (what the loader reads) | Notes |
 |---|---|---|---|
-| DROID | [lerobot/droid_1.0.1](https://huggingface.co/datasets/lerobot/droid_1.0.1) | `droid_lerobot/{data,meta,videos}`, `data/chunk-*/episode_*.parquet` | HF repo is LeRobot **v3.0** (`file-*.parquet`); the loader expects **v2.1** (`episode_*.parquet`) — convert or update the loader |
+| DROID | [cadene/droid](https://huggingface.co/datasets/cadene/droid) | `droid_lerobot/{data,meta,videos}`, `data/chunk-*/episode_*.parquet` | LeRobot **v2.1**, loads directly. (`lerobot/droid_1.0.1` is **v3.0** file-packed parquet and is *not* loadable as-is.) `DROID_LIMIT` → `ceil(limit/1000)` chunks |
 | Agibot | [agibot-world/AgiBotWorld-Alpha](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Alpha) | `agibot/{observations,proprio_stats,parameters,task_info}/<task>/<ep>` | layout matches directly; loader uses `*_aligned.json` camera params (may need an alignment prep step) |
 | EgoDex | [apple/ml-egodex](https://github.com/apple/ml-egodex) (zips on Apple's CDN) | `egodex_cdn/<part>/<task>/<n>.hdf5` | direct, no preprocessing; the active run used `part2.zip` |
 | ABC | [XDOF/ABC-130k](https://huggingface.co/datasets/XDOF/ABC-130k) | `abc_pp/<task>/episode_*/{top,left_wrist,right_wrist}.mp4 + states.npz` | HF is **raw** — preprocess with `robot_wm/datasets/abc/preprocessing/abc_batch_preprocess.py` |

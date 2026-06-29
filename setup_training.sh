@@ -14,7 +14,8 @@
 #   skip      — data already in place; only (re)generate manifests.
 #
 # Public sources:
-#   DROID   https://huggingface.co/datasets/lerobot/droid_1.0.1
+#   DROID   https://huggingface.co/datasets/cadene/droid   (LeRobot v2.1, matches the loader;
+#           NOTE lerobot/droid_1.0.1 is v3.0 file-packed parquet and is NOT loadable as-is)
 #   Agibot  https://huggingface.co/datasets/agibot-world/AgiBotWorld-Alpha
 #   ABC     https://huggingface.co/datasets/XDOF/ABC-130k
 #   EgoDex  https://github.com/apple/ml-egodex  (zips on Apple's CDN)
@@ -46,10 +47,10 @@ AGIBOT_ENABLE="${AGIBOT_ENABLE:-1}"; AGIBOT_LIMIT="${AGIBOT_LIMIT:-all}"
 EGODEX_ENABLE="${EGODEX_ENABLE:-1}"; EGODEX_LIMIT="${EGODEX_LIMIT:-all}"
 ABC_ENABLE="${ABC_ENABLE:-1}";       ABC_LIMIT="${ABC_LIMIT:-all}"
 
-# download-mode volume knobs (avoid pulling everything):
-DROID_FILES="${DROID_FILES:-4}"               # v3 parquet "file-NNN" shards to fetch (chunk-000)
+# download volume knobs (avoid pulling everything):
 AGIBOT_TASKS="${AGIBOT_TASKS:-all}"           # number of Alpha task dirs to fetch ("all" = 36)
-EGODEX_PARTS="${EGODEX_PARTS:-part2}"         # space-sep: part1..part5 test extra (existing run used part2)
+EGODEX_PARTS="${EGODEX_PARTS:-part2}"         # space-sep: part1..part5 test extra (active run used part2)
+# DROID volume derives from DROID_LIMIT: ceil(limit/1000) chunks of cadene/droid (all = 93 chunks)
 # ──────────────────────────────────────────────────────────────────────────────
 
 log()  { printf '\033[1;32m[setup]\033[0m %s\n' "$*"; }
@@ -92,14 +93,16 @@ fetch_droid() {                                  # -> $DATA_ROOT/droid_lerobot {
   [ "$DROID_ENABLE" = 1 ] || { log "droid: disabled"; return; }
   [ "$FETCH" = download ] || { log "droid: FETCH=$FETCH (using existing data)"; return; }
   mkdir -p "$DATA_ROOT/droid_lerobot"
-  log "hf download lerobot/droid_1.0.1 (meta + $DROID_FILES data shards + videos)"
-  local inc=(--include "meta/*")
-  for i in $(seq 0 $((DROID_FILES-1))); do inc+=(--include "data/chunk-000/file-$(printf %03d $i).parquet"); done
-  inc+=(--include "videos/*")
-  huggingface-cli download lerobot/droid_1.0.1 --repo-type dataset --local-dir "$DATA_ROOT/droid_lerobot" "${inc[@]}"
-  prep "lerobot/droid_1.0.1 is LeRobot v3.0 (data/chunk-000/file-*.parquet). The loader"
-  prep "(DroidLeRobotDataset) expects v2.1 (data/chunk-*/episode_*.parquet). Convert to v2.1"
-  prep "or update the loader before training on this download."
+  # cadene/droid is LeRobot v2.1 (data/chunk-*/episode_*.parquet + per-episode mp4 with the
+  # exact camera names the loader uses) -> loads directly, no conversion. ~1000 episodes/chunk.
+  local nchunks
+  if [ "$DROID_LIMIT" = all ]; then nchunks=93; else nchunks=$(( (DROID_LIMIT + 999) / 1000 )); fi
+  log "hf download cadene/droid (v2.1): meta + $nchunks chunk(s) (~$((nchunks * 1000)) episodes)"
+  local inc=(--include "meta/*") i c
+  for i in $(seq 0 $((nchunks - 1))); do
+    c=$(printf %03d "$i"); inc+=(--include "data/chunk-$c/*" --include "videos/chunk-$c/*")
+  done
+  huggingface-cli download cadene/droid --repo-type dataset --local-dir "$DATA_ROOT/droid_lerobot" "${inc[@]}"
 }
 
 fetch_agibot() {                                 # -> $DATA_ROOT/agibot {observations,proprio_stats,parameters,task_info}
