@@ -1,4 +1,0 @@
-_target_: robot_wm.datasets.multi_dataset.MultiDataset
-datasets: ???
-seed: ???
-infinite: True
