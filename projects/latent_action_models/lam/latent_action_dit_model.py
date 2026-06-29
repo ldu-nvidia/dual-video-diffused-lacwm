@@ -60,9 +60,6 @@ class LatentActionDiTModel(nn.Module):
         logit_mean: float = 0.0,
         logit_std: float = 1.0,
         viz_num_steps: int = 20,
-        # quantizer/action_encoder kept for config compatibility (unused)
-        quantizer: nn.Module = None,
-        action_encoder: nn.Module = None,
     ):
         super().__init__()
         self.latent_action_dim = latent_action_dim
@@ -82,7 +79,6 @@ class LatentActionDiTModel(nn.Module):
         self.loss_scheduler = loss_scheduler
         self.config = config
         self.morphology_tokens = morphology_tokens
-        self.quantizer = None  # no VQ
 
         # number of *latent* frames that are treated as known history (reference)
         self.num_history_latent = self.rgb_tokenizer.latent_temporal_len(num_history_frames)
