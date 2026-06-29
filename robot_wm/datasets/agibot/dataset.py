@@ -13,11 +13,12 @@ from robot_wm.datasets.base import Dataset
 logger = logging.getLogger(__name__)
 
 # TODO: make configurable
+_AGIBOT_DATA = os.environ.get("LACWM_DATA", "/scr/ravenh/lacwm_data")
 DATASET_ROOTS = {
-    "alpha": "/checkpoint/cortex/ravenhuang/agibot_sync/AgiBotWorld-Alpha",
-    "beta": "/checkpoint/cortex/ravenhuang/agibot_sync/AgiBotWorld-Beta",
-    "viscam": "/scr/ravenh/lacwm_data/agibot_combined",
-    "scr": "/scr/ravenh/lacwm_data/agibot",
+    "alpha": os.environ.get("AGIBOT_ALPHA_ROOT", f"{_AGIBOT_DATA}/agibot"),
+    "beta": os.environ.get("AGIBOT_BETA_ROOT", f"{_AGIBOT_DATA}/agibot"),
+    "viscam": f"{_AGIBOT_DATA}/agibot_combined",
+    "scr": f"{_AGIBOT_DATA}/agibot",
 }
 
 
@@ -206,7 +207,7 @@ class AgibotDataset(Dataset):
 
 
 if __name__ == "__main__":
-    CSV_PATH = "/fsx-cortex-datacache/shared/datasets/agibot/manifest_csv/task_episode_alpha.csv"
+    CSV_PATH = "data/agibot/task_episode_alpha.csv"
     dataset = AgibotDataset(CSV_PATH)
     idx = np.random.choice(len(dataset))
     sample = dataset[idx]

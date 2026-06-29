@@ -290,7 +290,7 @@ class _LazyImageArray:
 # Shard index with disk caching
 # ---------------------------------------------------------------------------
 
-_SHARD_CACHE_DIR = os.environ.get("DROID_SHARD_CACHE", "/scr/ravenh/lacwm_data/.droid_shard_offsets")
+_SHARD_CACHE_DIR = os.environ.get("DROID_SHARD_CACHE", os.path.join(os.environ.get("LACWM_DATA", "/scr/ravenh/lacwm_data"), ".droid_shard_offsets"))
 
 
 def _get_shard_offsets(shard_path: str) -> list[int]:

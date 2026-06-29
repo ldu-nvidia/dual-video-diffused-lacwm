@@ -52,8 +52,8 @@ class ActionToControl(nn.Module):
 class WanForwardModel(nn.Module):
     def __init__(
         self,
-        model_path: str = "/scr/ravenh/wan_fun_1.3b_control",
-        config_path: str = "/scr/ravenh/VideoX-Fun/config/wan2.1/wan_civitai.yaml",
+        model_path: str = os.environ.get("WAN_DIR", "/scr/ravenh/wan_fun_1.3b_control"),
+        config_path: str = os.path.join(os.environ.get("VIDEOX_HOME", "/scr/ravenh/VideoX-Fun"), "config/wan2.1/wan_civitai.yaml"),
         latent_action_dim: int = 64,
         lora_rank: int = 16,
         lora_alpha: int = 32,

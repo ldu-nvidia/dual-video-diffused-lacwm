@@ -126,7 +126,7 @@ class LiberoDataset(Dataset):
 
 
 if __name__ == "__main__":
-    CSV_PATH = "/home/ravenh/lacwm-dit/robot_wm/datasets/csv_files/libero.csv"
+    CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "csv_files", "libero.csv")
     transform = LiberoTransform(
         cameras=["agentview_rgb", "wrist_rgb"],
         output_keys=["rgb", "actions", "mask", "zero_action"],

@@ -38,7 +38,7 @@ def main(cfg: DictConfig):
                   f"shapes rgb={tuple(batch['rgb'].shape)} act={tuple(batch['actions'].shape)} :: {prob}", flush=True)
         # save culprit-candidate batch (overwrite each iter)
         torch.save({k: (v.cpu() if torch.is_tensor(v) else v) for k, v in batch.items()},
-                   "/scr/ravenh/wan_tests/last_batch.pt")
+                   "last_batch.pt")
         opt.zero_grad()
         with torch.autocast("cuda", dtype=torch.bfloat16):
             loss = model(**batch)

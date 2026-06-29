@@ -33,9 +33,13 @@ set -euo pipefail
 
 # ─────────────────────────────── CONFIG ──────────────────────────────────────
 BASE="${BASE:-/scr/ravenh}"                  # holds data + weights + VideoX-Fun
-DATA_ROOT="$BASE/lacwm_data"
-WAN_DIR="$BASE/wan_fun_1.3b_control"
-VIDEOX_DIR="$BASE/VideoX-Fun"
+# These four are EXPORTED so the configs + module defaults (which read them via
+# ${oc.env:VAR,default} / os.environ.get) resolve to this server. Defaults = /scr/ravenh.
+export LACWM_DATA="${LACWM_DATA:-$BASE/lacwm_data}"       # datasets
+export LACWM_RUNS="${LACWM_RUNS:-$BASE/lacwm_runs}"       # training outputs (run dirs)
+export WAN_DIR="${WAN_DIR:-$BASE/wan_fun_1.3b_control}"   # Wan2.1-Fun weights + null prompt
+export VIDEOX_HOME="${VIDEOX_HOME:-$BASE/VideoX-Fun}"     # VideoX-Fun library
+DATA_ROOT="$LACWM_DATA"; VIDEOX_DIR="$VIDEOX_HOME"        # internal aliases
 REPO_DIR="${REPO_DIR:-$HOME/lacwm-dit}"
 CONDA_ENV="${CONDA_ENV:-lacwm-dit}"
 
@@ -188,12 +192,18 @@ make_manifests() {
   fi
 }
 
-# ─── 5. Repoint repo paths if BASE != /scr/ravenh ─────────────────────────────
-repoint_paths() {
-  [ "$BASE" = /scr/ravenh ] && { log "BASE=/scr/ravenh — no path edits"; return; }
-  log "Repointing /scr/ravenh -> $BASE in repo configs + module defaults"
-  grep -rl '/scr/ravenh' "$REPO_DIR" --include='*.py' --include='*.yaml' 2>/dev/null \
-    | grep -v '/wandb/' | xargs -r sed -i "s|/scr/ravenh|$BASE|g"
+# ─── 5. Write a sourceable env file (configs read these vars at train time) ───
+write_env() {
+  local f="$REPO_DIR/.lacwm_env"
+  cat > "$f" <<EOF
+# Source before training/eval so configs resolve to this server's paths.
+# (Only needed if BASE != /scr/ravenh; otherwise the config defaults already match.)
+export LACWM_DATA="$LACWM_DATA"
+export LACWM_RUNS="$LACWM_RUNS"
+export WAN_DIR="$WAN_DIR"
+export VIDEOX_HOME="$VIDEOX_HOME"
+EOF
+  log "wrote $f  (run 'source $f' before launching training)"
 }
 
 # ─── 6. Validate + launch hint ────────────────────────────────────────────────
@@ -212,6 +222,7 @@ validate() {
   cat <<EOF
 
 Launch (from $REPO_DIR/projects/latent_action_models):
+  source $REPO_DIR/.lacwm_env          # if BASE != /scr/ravenh (else optional)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \\
   torchrun --standalone --nproc_per_node=8 train.py \\
     +experiments_0908=ravenhuang/wan-dit/wan_dit_abc_agibot_droid_egodex.yaml \\
@@ -221,12 +232,12 @@ EOF
 }
 
 case "${1:-all}" in
-  all)       setup_env; fetch_weights; fetch_datasets; make_manifests; repoint_paths; validate ;;
+  all)       setup_env; fetch_weights; fetch_datasets; make_manifests; write_env; validate ;;
   env)       setup_env ;;
   weights)   fetch_weights ;;
   datasets)  fetch_datasets ;;
   manifests) make_manifests ;;
-  repoint)   repoint_paths ;;
+  paths)     write_env ;;
   validate)  validate ;;
-  *) die "usage: $0 [all|env|weights|datasets|manifests|repoint|validate]" ;;
+  *) die "usage: $0 [all|env|weights|datasets|manifests|paths|validate]" ;;
 esac

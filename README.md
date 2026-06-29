@@ -103,9 +103,24 @@ AGIBOT_LIMIT=2000 EGODEX_PARTS=part2 ABC_ENABLE=0 ./setup_training.sh
 Each dataset has `<DS>_ENABLE` (1/0) and `<DS>_LIMIT` (episodes kept in the manifest;
 `all` = no cap), plus download-volume knobs (`AGIBOT_TASKS`, `EGODEX_PARTS`; DROID volume
 follows `DROID_LIMIT` → `ceil(limit/1000)` chunks).
-Set `BASE` to relocate everything off `/scr/ravenh` and the script repoints the configs.
 
-### Sources & expected layout (under `$DATA_ROOT`, default `/scr/ravenh/lacwm_data`)
+### Paths (no hardcoded locations)
+
+All filesystem locations are env-driven — the configs read them via `${oc.env:VAR,default}`
+and the Python defaults via `os.environ.get(VAR, default)`, with defaults matching `/scr/ravenh`:
+
+| Var | Default | What |
+|---|---|---|
+| `LACWM_DATA` | `/scr/ravenh/lacwm_data` | dataset root |
+| `LACWM_RUNS` | `/scr/ravenh/lacwm_runs` | training outputs (run dirs) |
+| `WAN_DIR` | `/scr/ravenh/wan_fun_1.3b_control` | Wan weights + null prompt |
+| `VIDEOX_HOME` | `/scr/ravenh/VideoX-Fun` | VideoX-Fun library |
+
+To relocate, set `BASE` (or the individual vars) when running `setup_training.sh`; it writes
+`.lacwm_env` with the exports — `source .lacwm_env` before launching training/eval. On a box
+that already uses `/scr/ravenh`, nothing is needed (defaults match).
+
+### Sources & expected layout (under `$LACWM_DATA`, default `/scr/ravenh/lacwm_data`)
 
 | Dataset | Source | On-disk layout (what the loader reads) | Notes |
 |---|---|---|---|

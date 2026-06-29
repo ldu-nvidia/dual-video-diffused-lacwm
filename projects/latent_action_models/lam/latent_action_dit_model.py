@@ -12,6 +12,7 @@
 # Loss = flow_matching_mse(future) + action_decoding_weight * action_decoding_l1.
 
 import logging
+import os
 import warnings
 from typing import Any, Mapping, Sequence
 
@@ -49,8 +50,8 @@ class LatentActionDiTModel(nn.Module):
         num_future_frames: int = 8,
         num_views: int = 3,
         latent_action_dim: int = 64,
-        scheduler_config_path: str = "/scr/ravenh/VideoX-Fun/config/wan2.1/wan_civitai.yaml",
-        null_prompt_path: str = "/scr/ravenh/wan_fun_1.3b_control/null_prompt_umt5.pt",
+        scheduler_config_path: str = os.path.join(os.environ.get("VIDEOX_HOME", "/scr/ravenh/VideoX-Fun"), "config/wan2.1/wan_civitai.yaml"),
+        null_prompt_path: str = os.path.join(os.environ.get("WAN_DIR", "/scr/ravenh/wan_fun_1.3b_control"), "null_prompt_umt5.pt"),
         text_dim: int = 4096,
         clip_seq_len: int = 257,
         clip_dim: int = 1280,

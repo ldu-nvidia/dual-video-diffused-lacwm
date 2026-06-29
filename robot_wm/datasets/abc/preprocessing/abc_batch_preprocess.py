@@ -13,8 +13,9 @@ from robot_wm.datasets.abc.preprocessing.abc_preprocess import preprocess
 # Paths are env-overridable (defaults match the original /scr/ravenh layout):
 #   ABC_RAW  raw episodes root, globbed as <ABC_RAW>/<task>/<episode>/episode.mcap
 #   ABC_PP   output root: abc_pp/<task>/<episode>/{top,left_wrist,right_wrist}.mp4 + states.npz
-ABC_RAW = os.environ.get("ABC_RAW", "/scr/ravenh/lacwm_data/abc/data/train")
-ABC_PP = os.environ.get("ABC_PP", "/scr/ravenh/lacwm_data/abc_pp")
+_LACWM_DATA = os.environ.get("LACWM_DATA", "/scr/ravenh/lacwm_data")
+ABC_RAW = os.environ.get("ABC_RAW", os.path.join(_LACWM_DATA, "abc/data/train"))
+ABC_PP = os.environ.get("ABC_PP", os.path.join(_LACWM_DATA, "abc_pp"))
 MANIFEST = os.environ.get("ABC_MANIFEST", os.path.join(ABC_PP, "manifest.txt"))
 NPROC = int(os.environ.get("ABC_NPROC", "16"))
 

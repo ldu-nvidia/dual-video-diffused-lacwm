@@ -38,9 +38,9 @@ class WanVAETokenizer(RGBTokenizer):
 
     def __init__(
         self,
-        model_path: str = "/scr/ravenh/wan_fun_1.3b_control",
+        model_path: str = os.environ.get("WAN_DIR", "/scr/ravenh/wan_fun_1.3b_control"),
         vae_subpath: str = "Wan2.1_VAE.pth",
-        config_path: str = "/scr/ravenh/VideoX-Fun/config/wan2.1/wan_civitai.yaml",
+        config_path: str = os.path.join(os.environ.get("VIDEOX_HOME", "/scr/ravenh/VideoX-Fun"), "config/wan2.1/wan_civitai.yaml"),
         output_dim: int = 16,
         input_range: str = "normal",
         input_mean: Sequence[float] = (0.5, 0.5, 0.5),

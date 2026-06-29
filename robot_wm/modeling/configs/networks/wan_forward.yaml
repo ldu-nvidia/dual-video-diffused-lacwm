@@ -1,6 +1,6 @@
 _target_: robot_wm.modeling.networks.wan_forward_model.WanForwardModel
-model_path: /scr/ravenh/wan_fun_1.3b_control
-config_path: /scr/ravenh/VideoX-Fun/config/wan2.1/wan_civitai.yaml
+model_path: ${oc.env:WAN_DIR,/scr/ravenh/wan_fun_1.3b_control}
+config_path: ${oc.env:VIDEOX_HOME,/scr/ravenh/VideoX-Fun}/config/wan2.1/wan_civitai.yaml
 latent_action_dim: 64
 lora_rank: 16
 lora_alpha: 32

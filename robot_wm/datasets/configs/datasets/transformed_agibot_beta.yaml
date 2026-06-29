@@ -1,5 +1,5 @@
 _target_: robot_wm.datasets.agibot.dataset.AgibotDataset
-csv_path: "/checkpoint/cortex/ravenhuang/agibot_sync/manifest_csv/task_episode_beta.csv"
+csv_path: "${oc.env:LACWM_DATA,/scr/ravenh/lacwm_data}/agibot/task_episode_beta.csv"
 seed: 1234
 infinite: true
 transform:

@@ -96,6 +96,6 @@ trainer:
 
 hydra:
   run:
-    dir: /scr/ravenh/lacwm_runs/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${oc.env:LACWM_RUNS,/scr/ravenh/lacwm_runs}/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: /scr/ravenh/lacwm_runs/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${oc.env:LACWM_RUNS,/scr/ravenh/lacwm_runs}/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

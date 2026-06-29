@@ -168,10 +168,10 @@ if __name__ == "__main__":
 
     # example usage
     dataset = DroidDataset(
-        "/storage/home/ravenhuang/h2r/robot_world_models/data/datasets/droid/h_all_episode_paths.csv",
+        "data/droid/episode_paths.csv",
         transform=transform,
         normalize_keys=["actions"],
-        statistic_manifest="/storage/home/ravenhuang/h2r/robot_world_models/data/datasets/droid/h_all_episode_paths.csv",
+        statistic_manifest="data/droid/episode_paths.csv",
     )
     N = dataset._get_length()
     print(f"{N = :,}")

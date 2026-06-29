@@ -1,6 +1,6 @@
 _target_: robot_wm.datasets.egodex.dataset.EgoDexDataset
-manifest:  "/home/ravenhuang/h2r/robot_world_models/data/datasets/egodex/egodex/train_paths.csv"
-statistic_manifest: "/home/ravenhuang/h2r/robot_world_models/data/datasets/egodex/egodex/all_episode_paths.csv"
+manifest: "${oc.env:LACWM_DATA,/scr/ravenh/lacwm_data}/egodex_cdn/manifest.csv"
+statistic_manifest: "${oc.env:LACWM_DATA,/scr/ravenh/lacwm_data}/egodex_cdn/manifest.csv"
 transform:
   _target_: robot_wm.datasets.agios.transform.AgiosTransform
   cameras: ["ego_centric_image"]

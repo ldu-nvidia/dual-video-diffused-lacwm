@@ -154,7 +154,7 @@ class DroidLeRobotDataset(Dataset):
 if __name__ == "__main__":
     import sys
 
-    root = sys.argv[1] if len(sys.argv) > 1 else "/scr/ravenh/lacwm_data/droid_lerobot"
+    root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ.get("LACWM_DATA", "/scr/ravenh/lacwm_data"), "droid_lerobot")
     tf = DroidTransform(
         cameras=["exterior_image_1_left", "exterior_image_2_left"],
         output_keys=["rgb", "actions", "mask"],

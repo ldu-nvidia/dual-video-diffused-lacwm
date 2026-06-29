@@ -8,7 +8,7 @@ transform:
 datasets:
   Droid:
     _target_: robot_wm.datasets.droid.lerobot_dataset.DroidLeRobotDataset
-    data_dir: /scr/ravenh/lacwm_data/droid_lerobot
+    data_dir: ${oc.env:LACWM_DATA,/scr/ravenh/lacwm_data}/droid_lerobot
     seed: ${seed}
     infinite: ${dataset.infinite}
     subsample_traj: 10000
@@ -29,7 +29,7 @@ datasets:
     normalize_keys: null
   EgoDex:
     _target_: robot_wm.datasets.egodex.dataset.EgoDexDataset
-    manifest: /scr/ravenh/lacwm_data/egodex_cdn/manifest.csv
+    manifest: ${oc.env:LACWM_DATA,/scr/ravenh/lacwm_data}/egodex_cdn/manifest.csv
     seed: ${seed}
     subsample_traj: 10000
     transform:
@@ -52,7 +52,7 @@ datasets:
     normalize_keys: null
   Agibot:
     _target_: robot_wm.datasets.agibot.dataset.AgibotDataset
-    manifest: /scr/ravenh/lacwm_data/agibot/manifest.csv
+    manifest: ${oc.env:LACWM_DATA,/scr/ravenh/lacwm_data}/agibot/manifest.csv
     seed: ${seed}
     infinite: ${dataset.infinite}
     subsample_traj: 10000
@@ -72,7 +72,7 @@ datasets:
       seed: ${seed}
   ABC:
     _target_: robot_wm.datasets.abc.dataset.ABCDataset
-    manifest: /scr/ravenh/lacwm_data/abc_pp/manifest.txt
+    manifest: ${oc.env:LACWM_DATA,/scr/ravenh/lacwm_data}/abc_pp/manifest.txt
     seed: ${seed}
     infinite: ${dataset.infinite}
     subsample_traj: 10000

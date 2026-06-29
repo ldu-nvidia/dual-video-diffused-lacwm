@@ -291,7 +291,7 @@ if __name__ == "__main__":
     )
     # example usage
     dataset = EgoDexDataset(
-        "/fsx-cortex-datacache/shared/datasets/egodex/manifest_files/pick_place_seen_episodes.csv",
+        "data/egodex/manifest.csv",
         transform=transform,
     )
     N = dataset._get_length()

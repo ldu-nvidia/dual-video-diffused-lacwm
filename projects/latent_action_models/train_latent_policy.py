@@ -351,7 +351,7 @@ class WrappedModel(nn.Module):
 
 @dataclass
 class CLIArgs:
-    snapshot_dir: str = "/home/ravenhuang/h2r/robot_world_models/projects/latent_action_models/data/experiments/32_aug_maniskill-finetune/2025-08-12/06-27-39/0/"
+    snapshot_dir: str = ""
     debug: bool = False
     no_wandb: bool = False
     batch_size: int = 8

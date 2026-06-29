@@ -18,7 +18,7 @@ def get_traj_ids(h5_path):
 
 def find_hdf5_files(
     root_dir,
-    output_csv="/home/ravenh/lacwm-dit/robot_wm/datasets/csv_files/libero.csv",
+    output_csv=os.path.join(os.path.dirname(os.path.abspath(__file__)), "csv_files", "libero.csv"),
 ):
     train_rows = []
     val_rows = []
