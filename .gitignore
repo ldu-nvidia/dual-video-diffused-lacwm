@@ -7,3 +7,6 @@ __pycache__/
 # wandb run artifacts (logs + media) -- never track
 wandb/
 projects/latent_action_models/wandb/
+
+# Python build/editable-install artifacts
+*.egg-info/
