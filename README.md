@@ -87,11 +87,9 @@ The manual steps here are what it automates.
 datasets, manifests, path repointing, validation):
 
 ```bash
-# copy already-preprocessed data from a box that has it (recommended for transfer):
-FETCH=rsync SOURCE_HOST=ravenh@38.213.24.3 ./setup_training.sh
-
-# or download raw data from the public sources, with per-dataset toggles + caps:
-FETCH=download AGIBOT_LIMIT=2000 EGODEX_PARTS=part2 ABC_ENABLE=0 ./setup_training.sh
+# download from the public sources, with per-dataset toggles + caps:
+./setup_training.sh
+AGIBOT_LIMIT=2000 EGODEX_PARTS=part2 ABC_ENABLE=0 ./setup_training.sh
 
 # just (re)generate manifests on data already in place:
 ./setup_training.sh manifests
@@ -116,8 +114,9 @@ Loaders read manifests of **absolute** paths, so they are regenerated per server
 `./setup_training.sh manifests` (never copy egodex/abc manifests between machines):
 - `egodex_cdn/manifest.csv` — one `*.hdf5` path per line (enumerated from the data)
 - `abc_pp/manifest.txt` — one `episode_*` dir per line (enumerated)
-- `agibot/manifest.csv` — `task_id,episode_id,dataset` (path-portable; the active run's
-  curated 5,671-episode subset is preserved, not regenerated, in `FETCH=rsync` mode)
+- `agibot/manifest.csv` — `task_id,episode_id,dataset` (path-portable; an existing curated
+  manifest, e.g. the active run's 5,671-episode subset, is preserved when present and
+  uncapped, otherwise regenerated from the downloaded tasks)
 - DROID needs no manifest — the loader globs `data/chunk-*/episode_*.parquet`
 
 ## Training

@@ -7,11 +7,9 @@
 # The active run trains on ABC + Agibot + DROID + EgoDex
 # (config transformed_multi_abc_agibot_droid_egodex).
 #
-# Two ways to get the data (FETCH below):
-#   rsync     — copy the ALREADY-PREPROCESSED data from a box that has it (you).
-#               Recommended for transfer: exact layout, no preprocessing. (default)
-#   download  — pull RAW data from the public sources. Each dataset has a toggle and
-#               a size limit. NOTE: some raw sources need a preprocessing/format step
+# Data (FETCH below):
+#   download  — pull data from the public sources (default). Each dataset has a toggle
+#               and a size limit. NOTE: some raw sources need a preprocessing/format step
 #               before training (flagged loudly per dataset, see "PREP" notes).
 #   skip      — data already in place; only (re)generate manifests.
 #
@@ -40,9 +38,7 @@ VIDEOX_DIR="$BASE/VideoX-Fun"
 REPO_DIR="${REPO_DIR:-$HOME/lacwm-dit}"
 CONDA_ENV="${CONDA_ENV:-lacwm-dit}"
 
-FETCH="${FETCH:-rsync}"                       # rsync | download | skip
-SOURCE_HOST="${SOURCE_HOST:-ravenh@38.213.24.3}"   # box that holds preprocessed data (rsync mode)
-SOURCE_BASE="${SOURCE_BASE:-/scr/ravenh}"
+FETCH="${FETCH:-download}"                    # download | skip
 
 # Per-dataset: enable (1/0) and a cap on episodes used (manifest is truncated to it; "all" = no cap).
 DROID_ENABLE="${DROID_ENABLE:-1}";   DROID_LIMIT="${DROID_LIMIT:-all}"
@@ -81,97 +77,75 @@ setup_env() {
 
 # ─── 2. Weights ───────────────────────────────────────────────────────────────
 fetch_weights() {
+  [ "$FETCH" = download ] || { log "weights: FETCH=$FETCH (using existing $WAN_DIR)"; return; }
   mkdir -p "$WAN_DIR"
-  if [ "$FETCH" = rsync ]; then
-    log "rsync Wan weights from $SOURCE_HOST"
-    rsync -ah --info=progress2 "$SOURCE_HOST:$SOURCE_BASE/wan_fun_1.3b_control/" "$WAN_DIR/"
-  elif [ "$FETCH" = download ]; then
-    log "hf download alibaba-pai/Wan2.1-Fun-1.3B-Control"
-    huggingface-cli download alibaba-pai/Wan2.1-Fun-1.3B-Control --local-dir "$WAN_DIR"
-    prep "null_prompt_umt5.pt is NOT in the official repo (a cached null umT5 embedding)."
-    prep "copy it from a box that has it:  scp $SOURCE_HOST:$SOURCE_BASE/wan_fun_1.3b_control/null_prompt_umt5.pt $WAN_DIR/"
-  fi
+  log "hf download alibaba-pai/Wan2.1-Fun-1.3B-Control"
+  huggingface-cli download alibaba-pai/Wan2.1-Fun-1.3B-Control --local-dir "$WAN_DIR"
+  prep "null_prompt_umt5.pt is NOT in the official repo (a cached null umT5 embedding) —"
+  prep "copy it into $WAN_DIR/ from a machine that has it (~18 KB)."
   [ -f "$WAN_DIR/Wan2.1_VAE.pth" ]      || warn "missing $WAN_DIR/Wan2.1_VAE.pth"
   [ -f "$WAN_DIR/null_prompt_umt5.pt" ] || warn "missing $WAN_DIR/null_prompt_umt5.pt (required)"
 }
 
-# ─── 3. Datasets ──────────────────────────────────────────────────────────────
-_rsync_ds() { rsync -ah --info=progress2 "$SOURCE_HOST:$SOURCE_BASE/lacwm_data/$1/" "$DATA_ROOT/$1/"; }
-
+# ─── 3. Datasets (download from public sources) ───────────────────────────────
 fetch_droid() {                                  # -> $DATA_ROOT/droid_lerobot {data,meta,videos}
   [ "$DROID_ENABLE" = 1 ] || { log "droid: disabled"; return; }
+  [ "$FETCH" = download ] || { log "droid: FETCH=$FETCH (using existing data)"; return; }
   mkdir -p "$DATA_ROOT/droid_lerobot"
-  case "$FETCH" in
-    rsync) log "rsync droid_lerobot"; _rsync_ds droid_lerobot ;;
-    download)
-      log "hf download lerobot/droid_1.0.1 (meta + $DROID_FILES data shards + videos)"
-      local inc=(--include "meta/*")
-      for i in $(seq 0 $((DROID_FILES-1))); do inc+=(--include "data/chunk-000/file-$(printf %03d $i).parquet"); done
-      inc+=(--include "videos/*")
-      huggingface-cli download lerobot/droid_1.0.1 --repo-type dataset --local-dir "$DATA_ROOT/droid_lerobot" "${inc[@]}"
-      prep "lerobot/droid_1.0.1 is LeRobot v3.0 (data/chunk-000/file-*.parquet). The loader"
-      prep "(DroidLeRobotDataset) expects v2.1 (data/chunk-*/episode_*.parquet). Convert to v2.1"
-      prep "or update the loader before training on this download. (rsync mode gives v2.1 directly.)" ;;
-    skip) : ;;
-  esac
+  log "hf download lerobot/droid_1.0.1 (meta + $DROID_FILES data shards + videos)"
+  local inc=(--include "meta/*")
+  for i in $(seq 0 $((DROID_FILES-1))); do inc+=(--include "data/chunk-000/file-$(printf %03d $i).parquet"); done
+  inc+=(--include "videos/*")
+  huggingface-cli download lerobot/droid_1.0.1 --repo-type dataset --local-dir "$DATA_ROOT/droid_lerobot" "${inc[@]}"
+  prep "lerobot/droid_1.0.1 is LeRobot v3.0 (data/chunk-000/file-*.parquet). The loader"
+  prep "(DroidLeRobotDataset) expects v2.1 (data/chunk-*/episode_*.parquet). Convert to v2.1"
+  prep "or update the loader before training on this download."
 }
 
 fetch_agibot() {                                 # -> $DATA_ROOT/agibot {observations,proprio_stats,parameters,task_info}
   [ "$AGIBOT_ENABLE" = 1 ] || { log "agibot: disabled"; return; }
+  [ "$FETCH" = download ] || { log "agibot: FETCH=$FETCH (using existing data)"; return; }
   mkdir -p "$DATA_ROOT/agibot"
-  case "$FETCH" in
-    rsync) log "rsync agibot"; _rsync_ds agibot ;;
-    download)
-      log "hf download agibot-world/AgiBotWorld-Alpha (tasks=$AGIBOT_TASKS) -> matches our layout"
-      local inc=(--include "task_info/*")
-      if [ "$AGIBOT_TASKS" = all ]; then
-        inc+=(--include "observations/*" --include "proprio_stats/*" --include "parameters/*")
-      else
-        # first N task ids (sorted) across the three per-task trees
-        local tasks; tasks=$(python - "$AGIBOT_TASKS" <<'PY'
+  log "hf download agibot-world/AgiBotWorld-Alpha (tasks=$AGIBOT_TASKS) -> matches our layout"
+  local inc=(--include "task_info/*")
+  if [ "$AGIBOT_TASKS" = all ]; then
+    inc+=(--include "observations/*" --include "proprio_stats/*" --include "parameters/*")
+  else
+    # first N task ids (sorted) across the three per-task trees
+    local tasks; tasks=$(python - "$AGIBOT_TASKS" <<'PY'
 import sys; from huggingface_hub import HfApi
 n=int(sys.argv[1]); api=HfApi()
 ts=sorted(i.path.split("/")[-1] for i in api.list_repo_tree("agibot-world/AgiBotWorld-Alpha","observations",repo_type="dataset"))
 print(" ".join(ts[:n]))
 PY
 )
-        for t in $tasks; do inc+=(--include "observations/$t/*" --include "proprio_stats/$t/*" --include "parameters/$t/*"); done
-      fi
-      huggingface-cli download agibot-world/AgiBotWorld-Alpha --repo-type dataset --local-dir "$DATA_ROOT/agibot" "${inc[@]}"
-      prep "Agibot loader reads *_aligned.json camera params; if Alpha ships only the un-aligned"
-      prep "variants, run your alignment preprocessing before training." ;;
-    skip) : ;;
-  esac
+    for t in $tasks; do inc+=(--include "observations/$t/*" --include "proprio_stats/$t/*" --include "parameters/$t/*"); done
+  fi
+  huggingface-cli download agibot-world/AgiBotWorld-Alpha --repo-type dataset --local-dir "$DATA_ROOT/agibot" "${inc[@]}"
+  prep "Agibot loader reads *_aligned.json camera params; if Alpha ships only the un-aligned"
+  prep "variants, run your alignment preprocessing before training."
 }
 
 fetch_egodex() {                                 # -> $DATA_ROOT/egodex_cdn/<part>/<task>/<n>.hdf5
   [ "$EGODEX_ENABLE" = 1 ] || { log "egodex: disabled"; return; }
+  [ "$FETCH" = download ] || { log "egodex: FETCH=$FETCH (using existing data)"; return; }
   mkdir -p "$DATA_ROOT/egodex_cdn"
-  case "$FETCH" in
-    rsync) log "rsync egodex_cdn"; _rsync_ds egodex_cdn ;;
-    download)
-      for p in $EGODEX_PARTS; do
-        log "egodex: download + unzip $p (Apple CDN, ~300GB each for part1-5)"
-        curl -L "https://ml-site.cdn-apple.com/datasets/egodex/${p}.zip" -o "$DATA_ROOT/egodex_cdn/${p}.zip"
-        unzip -q -o "$DATA_ROOT/egodex_cdn/${p}.zip" -d "$DATA_ROOT/egodex_cdn/" && rm -f "$DATA_ROOT/egodex_cdn/${p}.zip"
-      done ;;
-    skip) : ;;
-  esac
+  for p in $EGODEX_PARTS; do
+    log "egodex: download + unzip $p (Apple CDN, ~300GB each for part1-5)"
+    curl -L "https://ml-site.cdn-apple.com/datasets/egodex/${p}.zip" -o "$DATA_ROOT/egodex_cdn/${p}.zip"
+    unzip -q -o "$DATA_ROOT/egodex_cdn/${p}.zip" -d "$DATA_ROOT/egodex_cdn/" && rm -f "$DATA_ROOT/egodex_cdn/${p}.zip"
+  done
 }
 
 fetch_abc() {                                    # -> $DATA_ROOT/abc_pp/<task>/episode_*/{*.mp4,states.npz}
   [ "$ABC_ENABLE" = 1 ] || { log "abc: disabled"; return; }
-  case "$FETCH" in
-    rsync) log "rsync abc_pp"; mkdir -p "$DATA_ROOT/abc_pp"; _rsync_ds abc_pp ;;
-    download)
-      log "hf download XDOF/ABC-130k (raw train split) -> $DATA_ROOT/abc_raw"
-      mkdir -p "$DATA_ROOT/abc_raw"
-      huggingface-cli download XDOF/ABC-130k --repo-type dataset --local-dir "$DATA_ROOT/abc_raw" --include "data/train/*" "meta/*"
-      prep "ABC-130k is raw. Preprocess it into abc_pp/<task>/episode_*/ (top.mp4,left_wrist.mp4,"
-      prep "right_wrist.mp4,states.npz) with robot_wm/datasets/abc/preprocessing/abc_batch_preprocess.py"
-      prep "  python -m robot_wm.datasets.abc.preprocessing.abc_batch_preprocess --src $DATA_ROOT/abc_raw --dst $DATA_ROOT/abc_pp" ;;
-    skip) : ;;
-  esac
+  [ "$FETCH" = download ] || { log "abc: FETCH=$FETCH (using existing data)"; return; }
+  log "hf download XDOF/ABC-130k (raw train split) -> $DATA_ROOT/abc_raw"
+  mkdir -p "$DATA_ROOT/abc_raw"
+  huggingface-cli download XDOF/ABC-130k --repo-type dataset --local-dir "$DATA_ROOT/abc_raw" --include "data/train/*" "meta/*"
+  prep "ABC-130k is raw. Preprocess it into abc_pp/<task>/episode_*/ (top.mp4,left_wrist.mp4,"
+  prep "right_wrist.mp4,states.npz) with robot_wm/datasets/abc/preprocessing/abc_batch_preprocess.py"
+  prep "  python -m robot_wm.datasets.abc.preprocessing.abc_batch_preprocess --src $DATA_ROOT/abc_raw --dst $DATA_ROOT/abc_pp"
 }
 
 fetch_datasets() { fetch_droid; fetch_agibot; fetch_egodex; fetch_abc; }
@@ -192,9 +166,9 @@ make_manifests() {
   fi
 
   if [ "$AGIBOT_ENABLE" = 1 ] && [ -d "$DATA_ROOT/agibot/observations" ]; then
-    # Preserve a curated/portable manifest if rsync brought one and no cap is requested.
-    if [ -f "$DATA_ROOT/agibot/manifest.csv" ] && [ "$AGIBOT_LIMIT" = all ] && [ "$FETCH" = rsync ]; then
-      log "  agibot : $(( $(wc -l < "$DATA_ROOT/agibot/manifest.csv") - 1 )) episodes (preserved curated manifest)"
+    # Preserve a curated/portable manifest if one is already present and no cap is requested.
+    if [ -f "$DATA_ROOT/agibot/manifest.csv" ] && [ "$AGIBOT_LIMIT" = all ] && [ "$FETCH" = skip ]; then
+      log "  agibot : $(( $(wc -l < "$DATA_ROOT/agibot/manifest.csv") - 1 )) episodes (preserved existing manifest)"
     else
       { echo "task_id,episode_id,dataset"
         for t in "$DATA_ROOT/agibot/observations"/*/; do
