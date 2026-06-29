@@ -3,3 +3,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# wandb run artifacts (logs + media) -- never track
+wandb/
+projects/latent_action_models/wandb/
