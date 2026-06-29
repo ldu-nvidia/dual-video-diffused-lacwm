@@ -141,12 +141,14 @@ fetch_egodex() {                                 # -> $DATA_ROOT/egodex_cdn/<par
 fetch_abc() {                                    # -> $DATA_ROOT/abc_pp/<task>/episode_*/{*.mp4,states.npz}
   [ "$ABC_ENABLE" = 1 ] || { log "abc: disabled"; return; }
   [ "$FETCH" = download ] || { log "abc: FETCH=$FETCH (using existing data)"; return; }
-  log "hf download XDOF/ABC-130k (raw train split) -> $DATA_ROOT/abc_raw"
+  # XDOF/ABC-130k ships raw episode.mcap per episode (data/train/<task>/episode_*/episode.mcap).
+  log "hf download XDOF/ABC-130k raw mcap (~130k episodes, large) -> $DATA_ROOT/abc_raw"
   mkdir -p "$DATA_ROOT/abc_raw"
-  huggingface-cli download XDOF/ABC-130k --repo-type dataset --local-dir "$DATA_ROOT/abc_raw" --include "data/train/*" "meta/*"
-  prep "ABC-130k is raw. Preprocess it into abc_pp/<task>/episode_*/ (top.mp4,left_wrist.mp4,"
-  prep "right_wrist.mp4,states.npz) with robot_wm/datasets/abc/preprocessing/abc_batch_preprocess.py"
-  prep "  python -m robot_wm.datasets.abc.preprocessing.abc_batch_preprocess --src $DATA_ROOT/abc_raw --dst $DATA_ROOT/abc_pp"
+  huggingface-cli download XDOF/ABC-130k --repo-type dataset --local-dir "$DATA_ROOT/abc_raw" --include "data/train/*"
+  # Preprocess mcap -> abc_pp/<task>/<ep>/{top,left_wrist,right_wrist}.mp4 + states.npz
+  log "abc: preprocessing mcap -> abc_pp (parallel, idempotent; set ABC_NPROC to tune)"
+  ABC_RAW="$DATA_ROOT/abc_raw/data/train" ABC_PP="$DATA_ROOT/abc_pp" \
+    python -m robot_wm.datasets.abc.preprocessing.abc_batch_preprocess
 }
 
 fetch_datasets() { fetch_droid; fetch_agibot; fetch_egodex; fetch_abc; }

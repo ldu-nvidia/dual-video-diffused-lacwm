@@ -35,5 +35,9 @@ imageio==2.37.0
 imageio-ffmpeg==0.6.0
 matplotlib
 
+# ABC mcap preprocessing (robot_wm/datasets/abc/preprocessing/)
+mcap==1.4.0
+mcap-protobuf-support==0.5.4
+
 # evaluation (projects/latent_action_models/scripts/evaluate_wm.py)
 lpips

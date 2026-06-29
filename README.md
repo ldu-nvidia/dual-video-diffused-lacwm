@@ -112,7 +112,7 @@ Set `BASE` to relocate everything off `/scr/ravenh` and the script repoints the 
 | DROID | [cadene/droid](https://huggingface.co/datasets/cadene/droid) | `droid_lerobot/{data,meta,videos}`, `data/chunk-*/episode_*.parquet` | LeRobot **v2.1**, loads directly. (`lerobot/droid_1.0.1` is **v3.0** file-packed parquet and is *not* loadable as-is.) `DROID_LIMIT` → `ceil(limit/1000)` chunks |
 | Agibot | [agibot-world/AgiBotWorld-Alpha](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Alpha) | `agibot/{observations,proprio_stats,parameters,task_info}/<task>/<ep>` | layout matches directly; loader uses `*_aligned.json` camera params (may need an alignment prep step) |
 | EgoDex | [apple/ml-egodex](https://github.com/apple/ml-egodex) (zips on Apple's CDN) | `egodex_cdn/<part>/<task>/<n>.hdf5` | direct, no preprocessing; the active run used `part2.zip` |
-| ABC | [XDOF/ABC-130k](https://huggingface.co/datasets/XDOF/ABC-130k) | `abc_pp/<task>/episode_*/{top,left_wrist,right_wrist}.mp4 + states.npz` | HF is **raw** — preprocess with `robot_wm/datasets/abc/preprocessing/abc_batch_preprocess.py` |
+| ABC | [XDOF/ABC-130k](https://huggingface.co/datasets/XDOF/ABC-130k) | `abc_pp/<task>/episode_*/{top,left_wrist,right_wrist}.mp4 + states.npz` | HF ships raw `episode.mcap`; the setup script auto-runs the mcap→`abc_pp` preprocessor (`abc/preprocessing/abc_batch_preprocess.py`, needs `mcap`+`mcap-protobuf-support`). Heavy (~130k episodes). |
 
 ### Manifests
 
