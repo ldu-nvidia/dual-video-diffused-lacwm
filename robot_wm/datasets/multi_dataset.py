@@ -10,11 +10,8 @@ import torch
 import torch.nn.functional as F
 
 from robot_wm.datasets.base import Dataset
-from robot_wm.datasets.droid.dataset import DroidDataset
-from robot_wm.datasets.droid.transform import DroidTransform
 
 Morphology_Mapping = {
-    "DroidDataset": 0,
     "MPKDataset": 0,
     "Hot3dDataset": 1,
     "EgoDexDataset": 2,
@@ -64,8 +61,8 @@ class MultiDataset(Dataset):
     A dataset that contains multiple datasets such as the droid dataset and the egodex dataset, it needs to take in args for each dataset and then combine them, an example is:
     datasets:
         droid:
-            _target_: robot_wm.datasets.droid.dataset.DroidDataset
-            manifest: /path/to/droid/manifest
+            _target_: robot_wm.datasets.droid.lerobot_dataset.DroidLeRobotDataset
+            data_dir: /path/to/droid_lerobot
             seed: 0
             infinite: True
             transform: None
@@ -229,35 +226,3 @@ class MultiDataset(Dataset):
                 transform.load_state_dict(state_dict["_transform"][dataset_name])
 
 
-if __name__ == "__main__":
-    transform = DroidTransform(
-        cameras=["exterior_image_1_left", "exterior_image_2_left"],
-        output_keys=["rgb", "actions"],
-        sample_size=9,
-        chunk_size=5,
-    )
-    droiddataset = DroidDataset(
-        "data/droid/episode_paths.csv",
-        transform=transform,
-        normalize_keys=["actions"],
-        statistic_manifest="data/droid/episode_paths.csv",
-    )
-
-    # example usage
-    dataset = MultiDataset(
-        {
-            "droid": droiddataset,
-        },
-        padding_dim=67,
-    )
-    N = dataset._get_length()
-    print(f"{N = :,}")
-    # select a random episode
-    idx = np.random.choice(N)
-    episode = dataset._get_sample(idx)
-    import pdb
-
-    pdb.set_trace()
-    episode_path = str(dataset._paths[idx])
-    print(f"{idx = }")
-    print(f"{str(episode_path) = }")

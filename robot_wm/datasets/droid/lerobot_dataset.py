@@ -1,8 +1,7 @@
 """DROID loader for the LeRobot v2.1 format (e.g. ``cadene/droid``).
 
-Reads per-episode parquet (state/action) + per-camera mp4 and presents the same
-``episode_data`` structure as :class:`robot_wm.datasets.droid.tfds_dataset` so it
-can reuse :class:`DroidTransform`.
+Reads per-episode parquet (state/action) + per-camera mp4 and presents an
+``episode_data`` structure compatible with :class:`DroidTransform`.
 
 LeRobot ``cadene/droid`` layout::
 

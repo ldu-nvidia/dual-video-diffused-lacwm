@@ -1,5 +1,0 @@
-_target_: robot_wm.datasets.droid.dataset.DroidDataset
-manifest: ???
-seed: 1
-infinite: false
-to_numpy: true
