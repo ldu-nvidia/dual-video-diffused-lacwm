@@ -1,9 +1,0 @@
-_target_: robot_wm.inference.actor.planning.cem.CEM
-config:
-  n_particles: 15
-  iterations: 30
-  pred_horizon_s: 1
-  elite_frac: 0.2
-  var_scale: 0.01
-  cost:
-    _target_: robot_wm.inference.actor.cost.visual_based_latents_cost.L2VisualLatentsCost
