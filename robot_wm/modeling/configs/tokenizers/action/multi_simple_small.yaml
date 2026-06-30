@@ -1,5 +1,0 @@
-_target_: robot_wm.modeling.tokenizers.action.simple.MultiSimpleActionTokenizer
-input_dim: ???
-output_dim: ???
-token_dim: ???
-num_morphologies: ???
