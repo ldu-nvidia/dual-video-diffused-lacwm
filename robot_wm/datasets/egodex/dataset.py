@@ -175,7 +175,10 @@ class EgoDexDataset(Dataset):
 
             if len(frames) == 0:
                 logger.warning(f"Failed to get sample at index {index}")
-                return self._get_sample(np.random.randint(0, len(self)))
+                new_index = int(
+                    torch.randint(0, len(self), (1,), generator=self._gen).item()
+                )
+                return self._get_sample(new_index)
 
             frames = np.stack(frames)
         else:

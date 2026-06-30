@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 import h5py
 import numpy as np
+import torch
 
 from robot_wm.datasets.agibot.transform import AgibotTransform
 from robot_wm.datasets.base import Dataset
@@ -62,10 +63,19 @@ class AgibotDataset(Dataset):
         """
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"Manifest file not found: {csv_path}")
-        with open(csv_path, mode="r") as f:
-            reader = csv.reader(f, delimiter=" ")
-            next(reader)  # Skip the header line
-            task_episode_pairs = [row[0].split(",") for row in reader]
+        with open(csv_path, mode="r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f, skipinitialspace=True)
+            header = [value.strip() for value in next(reader)]
+            if header != ["task_id", "episode_id", "dataset"]:
+                raise ValueError(f"invalid AgiBot manifest header: {header}")
+            task_episode_pairs = []
+            for line_number, row in enumerate(reader, 2):
+                values = [value.strip() for value in row]
+                if len(values) != 3 or any(not value for value in values):
+                    raise ValueError(
+                        f"invalid AgiBot manifest row {line_number}: {row}"
+                    )
+                task_episode_pairs.append(values)
         return task_episode_pairs
 
     @staticmethod
@@ -198,7 +208,11 @@ class AgibotDataset(Dataset):
         try:
             return self.__get_sample(index)
         except Exception as e:
-            new_index = np.random.choice(self._get_length())
+            new_index = int(
+                torch.randint(
+                    0, self._get_length(), (1,), generator=self._gen
+                ).item()
+            )
             logger.warning(f"{index = } failed; using {new_index = }; {e = }")
             return self._get_sample(new_index)
 

@@ -1,11 +1,19 @@
 # References:
 #     https://github.com/pytorch/examples/blob/5dfeb46902baf444010f2f54bcf4dfbea109ae4d/distributed/ddp-tutorial-series/multinode.py
 #     https://github.com/pytorch/torchtitan/blob/b345557a37d7d8804e3b1cf8e9e0a36e46e689e9/torchtitan/train.py
+import io
+import json
 import logging
+import os
+import random
+import signal
 import time
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import partial
+from numbers import Integral
 from pathlib import Path
 
 import imageio
@@ -45,13 +53,13 @@ class Metrics:
     warmup: int = 100
     best_val_loss: float = float("inf")
 
-    def update(self):
+    def update(self, microbatches: int = 1):
         current_time = time.time()
         step_time = current_time - self.last_step_time
         self.last_step_time = current_time
         self.time_since_log += step_time
 
-        samples = self.batch_size * self.world_size
+        samples = self.batch_size * self.world_size * microbatches
         self.samples_since_log += samples
         self.total_observations += samples
 
@@ -121,8 +129,26 @@ class Trainer:
         self.viz_path = Path(config["visualization"]["viz_path"])
         self.save_every = config["saving"]["save_every"]
         self.save_path = Path(config["saving"]["save_path"])
+        self.gradient_accumulation_steps = self._parse_gradient_accumulation_steps(
+            config
+        )
         self._start_iter = 0
         self._curr_iter = 0
+        self.resumed = False
+        self._resume_rng_state = None
+        self._checkpoint_stop_requested = False
+        self._checkpoint_stop_signal = None
+        request_path = os.environ.get("LACWM_CHECKPOINT_REQUEST_FILE")
+        ack_path = os.environ.get("LACWM_CHECKPOINT_ACK_FILE")
+        self.checkpoint_request_path = Path(request_path) if request_path else None
+        self.checkpoint_ack_path = Path(ack_path) if ack_path else None
+        self.completion_path = self.save_path.parent / "training_complete.json"
+        self._previous_signal_handlers = {}
+        # The guarded launcher supplies a digest over the immutable run
+        # configuration, data fingerprints, runtime, and assets.  Storing it in
+        # every checkpoint prevents an unrelated snapshot with compatible tensor
+        # shapes from being silently resumed under this run's identity.
+        self.run_identity_sha256 = os.environ.get("LACWM_RUN_IDENTITY_SHA256")
 
         # daniel: I hate this but no better solution in reasonable time
         if hasattr(model, "custom_to"):
@@ -162,10 +188,7 @@ class Trainer:
             viz_data_loader = [viz_data_loader]
         self.val_data_loaders = val_data_loader
         self.viz_data_loaders = viz_data_loader
-        self._val_data_loader_iters = [iter(dl) for dl in self.val_data_loaders]
-        self._viz_data_loader_iters = [iter(dl) for dl in self.viz_data_loaders]
         self.batch_size = data_loader.batch_size
-        self._data_loader_iter = iter(data_loader)
 
         # AMP and Grad Clipping
         self.dtype = self._get_torch_dtype(config["dtype"])
@@ -197,6 +220,30 @@ class Trainer:
             )
             logger.info(f"loaded model state from {config['load_path']}")
 
+        # Worker processes are started explicitly by start_data_loaders() only
+        # after train.py assigns a rank-local RNG stream. This also avoids
+        # silently constructing an iterator before restored loader state exists.
+        self._data_loader_iter = None
+        self._val_data_loader_iters = None
+        self._viz_data_loader_iters = None
+
+    @staticmethod
+    def _parse_gradient_accumulation_steps(config) -> int:
+        value = config.get("gradient_accumulation_steps", 1)
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+            raise ValueError(
+                "gradient_accumulation_steps must be a positive integer, "
+                f"got {value!r}"
+            )
+        return int(value)
+
+    def start_data_loaders(self):
+        if self._data_loader_iter is not None:
+            raise RuntimeError("data-loader iterators have already been started")
+        self._data_loader_iter = iter(self.data_loader)
+        self._val_data_loader_iters = [iter(dl) for dl in self.val_data_loaders]
+        self._viz_data_loader_iters = [iter(dl) for dl in self.viz_data_loaders]
+
     def _get_torch_dtype(self, dtype_str):
         if dtype_str == "float32":
             return torch.float32
@@ -209,16 +256,95 @@ class Trainer:
         else:
             raise Exception("Unknown torch dtype")
 
-    def _build_snapshot(self):
+    def _capture_rng_state(self):
+        numpy_state = np.random.get_state()
+        return {
+            "python": random.getstate(),
+            "numpy": {
+                "bit_generator": numpy_state[0],
+                "state": torch.from_numpy(numpy_state[1].copy()),
+                "position": int(numpy_state[2]),
+                "has_gauss": int(numpy_state[3]),
+                "cached_gaussian": float(numpy_state[4]),
+            },
+            "torch_cpu": torch.get_rng_state(),
+            "torch_cuda": torch.cuda.get_rng_state(self.local_rank),
+        }
+
+    def _restore_rng_state(self, state):
+        random.setstate(state["python"])
+        numpy_state = state["numpy"]
+        np.random.set_state(
+            (
+                numpy_state["bit_generator"],
+                numpy_state["state"].cpu().numpy(),
+                numpy_state["position"],
+                numpy_state["has_gauss"],
+                numpy_state["cached_gaussian"],
+            )
+        )
+        torch.set_rng_state(state["torch_cpu"].cpu())
+        torch.cuda.set_rng_state(state["torch_cuda"].cpu(), device=self.local_rank)
+
+    def restore_resumed_rng_state(self):
+        """Undo RNG consumed by iterator/W&B reconstruction after checkpoint load."""
+        if self._resume_rng_state is None:
+            raise RuntimeError("no resumed RNG state is available")
+        self._restore_rng_state(self._resume_rng_state)
+
+    def _gather_rank_states(self):
+        local_state = {
+            "rng": self._capture_rng_state(),
+            "data_loader": self.data_loader.state_dict(),
+            "val_data_loaders": [loader.state_dict() for loader in self.val_data_loaders],
+            "viz_data_loaders": [loader.state_dict() for loader in self.viz_data_loaders],
+        }
+        if not dist.is_initialized() or self.world_size == 1:
+            return [local_state]
+
+        # ``all_gather_object`` internally serializes its input with torch.save.
+        # Passing a nested state containing tensors directly can hit PyTorch's
+        # legacy-storage deserializer (UntypedStorage has no ``dtype``). Serialize
+        # the tensor-bearing state once ourselves, then gather plain bytes; the
+        # collective's outer serialization no longer contains tensor storages.
+        buffer = io.BytesIO()
+        torch.save(local_state, buffer)
+        local_payload = buffer.getvalue()
+        payloads = [None] * self.world_size
+        torch.distributed.all_gather_object(payloads, local_payload)
+
+        states = []
+        for rank, payload in enumerate(payloads):
+            if not isinstance(payload, bytes):
+                raise RuntimeError(
+                    f"rank-state collective returned {type(payload).__name__} "
+                    f"for rank {rank}, expected bytes"
+                )
+            states.append(
+                torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True)
+            )
+        return states
+
+    def _build_snapshot(self, rank_states):
         snapshot = {
+            "snapshot_schema_version": 2,
             "model": self.model.module.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "lr_scheduler": self.lr_scheduler.state_dict(),
-            "data_loader": self.data_loader.state_dict(),
             "_start_iter": self._curr_iter + 1,
             "_total_observations": self.metrics.total_observations,
             "best_val_loss": self.metrics.best_val_loss,
+            "best_val_losses": {
+                key: value
+                for key, value in vars(self.metrics).items()
+                if key.startswith("best_val_loss_")
+            },
+            "gradient_accumulation_steps": self.gradient_accumulation_steps,
+            "world_size": self.world_size,
+            "rank_states": rank_states,
         }
+        if self.run_identity_sha256 is not None:
+            snapshot["run_identity_sha256"] = self.run_identity_sha256
 
         if self.use_amp:
             snapshot["scaler"] = self.scaler.state_dict()
@@ -228,20 +354,149 @@ class Trainer:
 
         return snapshot
 
-    def _save_snapshot(self, is_best=False, dataset_name=None):
+    def _checkpoint_signal_handler(self, signum, _frame):
+        """Only record intent here; checkpointing from a signal handler is unsafe."""
+        self._checkpoint_stop_requested = True
+        self._checkpoint_stop_signal = int(signum)
+
+    def _install_checkpoint_signal_handlers(self):
+        self._previous_signal_handlers = {}
+        for signum in (getattr(signal, "SIGUSR1", None), signal.SIGTERM):
+            if signum is None:
+                continue
+            self._previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, self._checkpoint_signal_handler)
+
+    def _restore_checkpoint_signal_handlers(self):
+        for signum, handler in self._previous_signal_handlers.items():
+            signal.signal(signum, handler)
+        self._previous_signal_handlers = {}
+
+    def _checkpoint_stop_requested_across_ranks(self):
+        """Agree on a stop request at a boundary shared by every training rank."""
+        local_requested = self._checkpoint_stop_requested
+        if (
+            self.is_main_process
+            and self.checkpoint_request_path is not None
+            and self.checkpoint_request_path.is_file()
+        ):
+            local_requested = True
+
+        if dist.is_initialized() and self.world_size > 1:
+            collective_device = (
+                self.local_rank
+                if str(torch.distributed.get_backend()).lower() == "nccl"
+                else "cpu"
+            )
+            vote = torch.tensor(
+                [int(local_requested)],
+                dtype=torch.int32,
+                device=collective_device,
+            )
+            torch.distributed.all_reduce(vote, op=torch.distributed.ReduceOp.MAX)
+            local_requested = bool(vote.item())
+
+        if local_requested:
+            self._checkpoint_stop_requested = True
+        return local_requested
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _write_checkpoint_ack(self, *, checkpoint_written: bool, next_iter: int):
+        if not self.is_main_process or self.checkpoint_ack_path is None:
+            return
+        self._atomic_write_json(
+            self.checkpoint_ack_path,
+            {
+                "schema_version": 1,
+                "status": "checkpointed_for_reschedule",
+                "checkpoint_written": checkpoint_written,
+                "next_iter": int(next_iter),
+                "max_iter": int(self.max_iter),
+                "run_identity_sha256": self.run_identity_sha256,
+                "slurm_attempt_id": os.environ.get("LACWM_SLURM_ATTEMPT_ID"),
+                "snapshot": str(self.save_path.resolve(strict=False)),
+                "signal": self._checkpoint_stop_signal,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    def _write_completion_marker(self):
         if not self.is_main_process:
             return
+        self._atomic_write_json(
+            self.completion_path,
+            {
+                "schema_version": 1,
+                "status": "completed",
+                "completed_updates": int(self.max_iter),
+                "max_iter": int(self.max_iter),
+                "run_identity_sha256": self.run_identity_sha256,
+                "snapshot": str(self.save_path.resolve(strict=False)),
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
-        snapshot = self._build_snapshot()
-        save_path = self.save_path
-        if is_best:
-            suffix = (
-                f".{dataset_name}.best.pt" if dataset_name is not None else ".best.pt"
-            )
-            save_path = save_path.with_suffix(suffix)
-        elif self._curr_iter % 10000 == 0:
-            save_path = save_path.with_suffix(f".{self._curr_iter}.pt")
-        torch.save(snapshot, save_path)
+    def _save_snapshot(self, is_best=False, dataset_name=None):
+        # Every rank participates so rank-local stochastic state is resumable.
+        rank_states = self._gather_rank_states()
+        error = None
+        if self.is_main_process:
+            try:
+                snapshot = self._build_snapshot(rank_states)
+                if is_best:
+                    suffix = (
+                        f".{dataset_name}.best.pt"
+                        if dataset_name is not None
+                        else ".best.pt"
+                    )
+                    self._atomic_save_snapshot(
+                        snapshot, self.save_path.with_suffix(suffix)
+                    )
+                else:
+                    # The live resume file is updated at every save cadence.
+                    # Milestone archives are additional copies, never replacements.
+                    self._atomic_save_snapshot(snapshot, self.save_path)
+                    if self._curr_iter % 10000 == 0:
+                        archive = self.save_path.with_suffix(f".{self._curr_iter}.pt")
+                        self._atomic_save_snapshot(snapshot, archive)
+            except Exception as exc:  # synchronize failure before any rank tears down
+                error = f"{type(exc).__name__}: {exc}"
+
+        if dist.is_initialized() and self.world_size > 1:
+            result = [error]
+            torch.distributed.broadcast_object_list(result, src=0)
+            error = result[0]
+        if error is not None:
+            raise RuntimeError(f"checkpoint save failed on rank 0: {error}")
+
+    def _atomic_save_snapshot(self, snapshot, save_path):
+        # Write on the destination filesystem and atomically replace the live
+        # snapshot.  A preemption or ENOSPC must not leave a corrupt resume file.
+        tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
+        torch.save(snapshot, tmp_path)
+        with tmp_path.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, save_path)
+        directory_fd = os.open(save_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
         logger.info(f"Saved iteration {self._curr_iter:,} to {save_path}")
 
     def _load_model_snapshot(self, load_path, exclude_keys=None, share_spatial_attention=False):
@@ -310,6 +565,32 @@ class Trainer:
     def _load_snapshot(self):
         map_loc = f"cuda:{self.local_rank}"
         snapshot = torch.load(self.save_path, map_location=map_loc, weights_only=True)
+        if snapshot.get("snapshot_schema_version") != 2:
+            raise RuntimeError(
+                "unsupported resume checkpoint schema; exact distributed resume "
+                "requires snapshot_schema_version=2"
+            )
+        checkpoint_identity = snapshot.get("run_identity_sha256")
+        if checkpoint_identity is not None and self.run_identity_sha256 is None:
+            raise RuntimeError(
+                "checkpoint is bound to a guarded run identity, but "
+                "LACWM_RUN_IDENTITY_SHA256 is unset"
+            )
+        if self.run_identity_sha256 is not None and checkpoint_identity != self.run_identity_sha256:
+            raise RuntimeError(
+                "checkpoint/run identity mismatch: "
+                f"checkpoint={checkpoint_identity!r}, "
+                f"expected={self.run_identity_sha256!r}"
+            )
+        checkpoint_accumulation_steps = int(
+            snapshot.get("gradient_accumulation_steps", 1)
+        )
+        if checkpoint_accumulation_steps != self.gradient_accumulation_steps:
+            raise RuntimeError(
+                "checkpoint gradient-accumulation mismatch: "
+                f"checkpoint={checkpoint_accumulation_steps}, "
+                f"current={self.gradient_accumulation_steps}"
+            )
         self.model.module.load_state_dict(snapshot["model"])
 
         self.optimizer.load_state_dict(snapshot["optimizer"])
@@ -318,6 +599,8 @@ class Trainer:
 
         if "best_val_loss" in snapshot:
             self.metrics.best_val_loss = snapshot["best_val_loss"]
+        for key, value in snapshot.get("best_val_losses", {}).items():
+            setattr(self.metrics, key, value)
         if self.use_amp and "scaler" in snapshot:
             self.scaler.load_state_dict(snapshot["scaler"])
         if "wandb_run_id" in snapshot:
@@ -329,11 +612,33 @@ class Trainer:
         # not load properly. It seem like there should be a better solution than
         # reloading the snapshot to the cpu.
         cpu_snapshot = torch.load(self.save_path, map_location="cpu", weights_only=True)
-        try:
-            self.data_loader.load_state_dict(cpu_snapshot["data_loader"])
-        except Exception as e:
-            logger.warning(f"Skipping data_loader state on resume (num_workers changed?): {e}")
+        rank_states = cpu_snapshot.get("rank_states")
+        saved_world_size = int(cpu_snapshot.get("world_size", -1))
+        if not isinstance(rank_states, list) or saved_world_size != self.world_size:
+            raise RuntimeError(
+                "checkpoint lacks compatible per-rank RNG/data-loader state: "
+                f"saved_world_size={saved_world_size}, current_world_size={self.world_size}"
+            )
+        if len(rank_states) != self.world_size:
+            raise RuntimeError(
+                f"checkpoint has {len(rank_states)} rank states for world size {self.world_size}"
+            )
+        rank_state = rank_states[self.global_rank]
+        self.data_loader.load_state_dict(rank_state["data_loader"])
+        val_states = rank_state.get("val_data_loaders", [])
+        viz_states = rank_state.get("viz_data_loaders", [])
+        if len(val_states) != len(self.val_data_loaders) or len(viz_states) != len(self.viz_data_loaders):
+            raise RuntimeError(
+                "checkpoint validation/visualization loader count differs from current config"
+            )
+        for loader, state in zip(self.val_data_loaders, val_states):
+            loader.load_state_dict(state)
+        for loader, state in zip(self.viz_data_loaders, viz_states):
+            loader.load_state_dict(state)
+        self._resume_rng_state = rank_state["rng"]
+        self._restore_rng_state(self._resume_rng_state)
         self._start_iter = snapshot["_start_iter"]
+        self.resumed = True
         logger.info(f"Resuming from iteration {self._start_iter:,}")
 
     def _log(self, metrics):
@@ -380,6 +685,23 @@ class Trainer:
             error_if_nonfinite=self.error_if_nonfinite,
         )
 
+    def _require_finite_losses(self, loss):
+        """Fail every rank together before backward if any rank is non-finite."""
+        values = [loss]
+        if hasattr(self.model.module, "aux_losses"):
+            values.extend(self.model.module.aux_losses.values())
+        local_finite = torch.stack(
+            [torch.isfinite(value).all() for value in values]
+        ).all().to(device=loss.device, dtype=torch.int32)
+        if dist.is_initialized():
+            torch.distributed.all_reduce(
+                local_finite, op=torch.distributed.ReduceOp.MIN
+            )
+        if local_finite.item() != 1:
+            raise FloatingPointError(
+                "non-finite loss or auxiliary metric on at least one distributed rank"
+            )
+
     def _to_device(self, batch):
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
@@ -394,31 +716,69 @@ class Trainer:
         return batch
 
     def _step(self):
-        batch = next(self._data_loader_iter)
-        batch = self._to_device(batch)
+        loss_sums = {}
+        loss_counts = defaultdict(int)
+
+        for microbatch_index in range(self.gradient_accumulation_steps):
+            batch = next(self._data_loader_iter)
+            batch = self._to_device(batch)
+            is_final_microbatch = (
+                microbatch_index + 1 == self.gradient_accumulation_steps
+            )
+            sync_context = (
+                nullcontext()
+                if is_final_microbatch
+                else self.model.no_sync()
+            )
+
+            # DDP requires the forward pass to be inside no_sync() as well as
+            # backward. Dividing every microbatch loss gives the gradient of the
+            # mean over the complete accumulation window (loaders use fixed-size
+            # microbatches).
+            with sync_context:
+                if self.use_amp:
+                    with torch.autocast(device_type="cuda", dtype=self.dtype):
+                        loss = self.model(**batch)
+                    self._require_finite_losses(loss)
+                    self.scaler.scale(
+                        loss / self.gradient_accumulation_steps
+                    ).backward()
+                else:
+                    loss = self.model(**batch)
+                    self._require_finite_losses(loss)
+                    (loss / self.gradient_accumulation_steps).backward()
+
+            microbatch_losses = {"loss": loss.detach()}
+            if hasattr(self.model.module, "aux_losses"):
+                microbatch_losses.update(self.model.module.aux_losses)
+            for key, value in microbatch_losses.items():
+                detached = value.detach()
+                if key not in loss_sums:
+                    loss_sums[key] = detached.clone()
+                else:
+                    loss_sums[key].add_(detached)
+                loss_counts[key] += 1
 
         if self.use_amp:
-            with torch.autocast(device_type="cuda", dtype=self.dtype):
-                loss = self.model(**batch)
-            self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
-            self._clip_grad_norm()
+        self._clip_grad_norm()
+        if self.use_amp:
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
-            loss = self.model(**batch)
-            loss.backward()
-            self._clip_grad_norm()
             self.optimizer.step()
 
         self.optimizer.zero_grad()
         self.lr_scheduler.step()
-        self.metrics.update()
+        self.metrics.update(microbatches=self.gradient_accumulation_steps)
 
-        # Collect all losses as tensors
-        losses = {"loss": loss.detach()}  # Keep as tensor
-        if hasattr(self.model.module, "aux_losses"):
-            losses.update(self.model.module.aux_losses)
+        # Report the mean raw loss over the full accumulation window. Auxiliary
+        # keys that are conditional on a morphology are averaged over the
+        # microbatches in which that key was emitted rather than treating absence
+        # as a zero loss.
+        losses = {
+            key: value / loss_counts[key] for key, value in loss_sums.items()
+        }
 
         # Reduce all losses across processes
         if dist.is_initialized():
@@ -625,41 +985,80 @@ class Trainer:
 
     def train(self):
         self.model.train()
+        self._install_checkpoint_signal_handlers()
+        try:
+            # A request can arrive while a requeued segment is starting. Do not
+            # fabricate a checkpoint that would claim update zero was completed.
+            if self._checkpoint_stop_requested_across_ranks():
+                self._write_checkpoint_ack(
+                    checkpoint_written=self.save_path.is_file(),
+                    next_iter=self._start_iter,
+                )
+                return "rescheduled"
 
-        for self._curr_iter in range(self._start_iter, self.max_iter):
-            losses = self._step()
+            for self._curr_iter in range(self._start_iter, self.max_iter):
+                losses = self._step()
 
-            is_last = self._curr_iter + 1 == self.max_iter
+                is_last = self._curr_iter + 1 == self.max_iter
 
-            # log metrics
-            if self._curr_iter % self.log_every == 0 or is_last:
-                metrics = self.metrics.get_train_metrics(self._curr_iter, losses)
-                metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
-                self._log(metrics)
-                self.metrics.reset_throughput_counters()
+                # log metrics
+                if self._curr_iter % self.log_every == 0 or is_last:
+                    metrics = self.metrics.get_train_metrics(self._curr_iter, losses)
+                    metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
+                    self._log(metrics)
+                    self.metrics.reset_throughput_counters()
 
-            # save snapshot
-            if self._curr_iter % self.save_every == 0 or is_last:
-                self._save_snapshot()
+                # Finish scheduled validation/visualization before a signal save;
+                # their RNG and loader side effects are part of exact continuation.
+                if self._curr_iter % self.val_every == 0 or is_last:
+                    val_losses = self._validate()
+                    # Track and save best validation loss per dataset
+                    for key, value in val_losses.items():
+                        if key.endswith("/loss"):
+                            dataset_name = key.split("/")[0]
+                            best_key = f"best_val_loss_{dataset_name}"
+                            previous_best = getattr(
+                                self.metrics, best_key, float("inf")
+                            )
+                            if value < previous_best:
+                                setattr(self.metrics, best_key, value)
+                                self._save_snapshot(
+                                    is_best=True, dataset_name=dataset_name
+                                )
+                                logger.info(
+                                    f"New best for {dataset_name}: {value:.4f}"
+                                )
 
-            # run validation
-            if self._curr_iter % self.val_every == 0 or is_last:
-                val_losses = self._validate()
-                # Track and save best validation loss per dataset
-                for key, value in val_losses.items():
-                    if key.endswith("/loss"):
-                        dataset_name = key.split("/")[0]
-                        best_key = f"best_val_loss_{dataset_name}"
-                        previous_best = getattr(self.metrics, best_key, float("inf"))
-                        if value < previous_best:
-                            setattr(self.metrics, best_key, value)
-                            self._save_snapshot(is_best=True, dataset_name=dataset_name)
-                            logger.info(f"New best for {dataset_name}: {value:.4f}")
+                    val_metrics = self.metrics.get_val_metrics(
+                        self._curr_iter, val_losses
+                    )
+                    self._log(val_metrics)
 
-                val_metrics = self.metrics.get_val_metrics(self._curr_iter, val_losses)
-                self._log(val_metrics)
+                # save visualizations
+                if self.viz_data_loaders is not None:
+                    if self._curr_iter % self.viz_every == 0 or is_last:
+                        self._viz()
 
-            # save visualizations
-            if self.viz_data_loaders is not None:
-                if self._curr_iter % self.viz_every == 0 or is_last:
-                    self._viz()
+                # Save after validation/visualization so the live checkpoint's RNG
+                # state exactly matches the next uninterrupted training iteration.
+                saved_this_iteration = self._curr_iter % self.save_every == 0 or is_last
+                if saved_this_iteration:
+                    self._save_snapshot()
+
+                if self._checkpoint_stop_requested_across_ranks() and not is_last:
+                    if not saved_this_iteration:
+                        self._save_snapshot()
+                    self._write_checkpoint_ack(
+                        checkpoint_written=True,
+                        next_iter=self._curr_iter + 1,
+                    )
+                    logger.warning(
+                        "Checkpointed iteration %s for scheduler resubmission",
+                        self._curr_iter,
+                    )
+                    return "rescheduled"
+
+            self._write_completion_marker()
+            return "completed"
+        finally:
+            self._restore_checkpoint_signal_handlers()

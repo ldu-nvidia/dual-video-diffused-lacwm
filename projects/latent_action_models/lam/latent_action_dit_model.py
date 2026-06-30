@@ -13,7 +13,6 @@
 
 import logging
 import os
-import warnings
 from typing import Any, Mapping, Sequence
 
 import torch
@@ -24,7 +23,6 @@ from diffusers.training_utils import compute_density_for_timestep_sampling
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 
-from lam.loss_scheduler import CustomLossScheduler
 from robot_wm.modeling.modules.positional_embedding import PositionalEmbedding
 from robot_wm.modeling.networks.st_inverse_model import STInverseModel
 from robot_wm.modeling.networks.wan_forward_model import WanForwardModel
@@ -39,7 +37,6 @@ class LatentActionDiTModel(nn.Module):
         self,
         rgb_tokenizer: WanVAETokenizer,
         forward_model: WanForwardModel,
-        loss_scheduler: CustomLossScheduler,
         config: DictConfig,
         rgb_pos_embed: PositionalEmbedding = None,
         inverse_model: STInverseModel = None,
@@ -76,7 +73,6 @@ class LatentActionDiTModel(nn.Module):
         self.action_decoder = action_decoder
         self.action_pos_embed = action_pos_embed
         self.forward_model = forward_model
-        self.loss_scheduler = loss_scheduler
         self.config = config
         self.morphology_tokens = morphology_tokens
 
@@ -106,15 +102,23 @@ class LatentActionDiTModel(nn.Module):
         self.viz_num_steps = viz_num_steps
 
         self.text_dim, self.clip_seq_len, self.clip_dim = text_dim, clip_seq_len, clip_dim
-        # cached null-prompt umT5 embedding -> [L, text_dim]
-        try:
-            null = torch.load(null_prompt_path, map_location="cpu").float()
-            if null.ndim == 3:
-                null = null[0]
-            logger.info(f"loaded null prompt embedding {tuple(null.shape)} from {null_prompt_path}")
-        except Exception as e:  # noqa
-            warnings.warn(f"null prompt not found ({e}); using a single zero token")
-            null = torch.zeros(1, text_dim)
+        # Cached null-prompt umT5 embedding -> [L, text_dim].  A zero fallback
+        # silently changes the conditioning distribution, so official training
+        # fails closed if this prepared asset is missing or malformed.
+        null = torch.load(null_prompt_path, map_location="cpu", weights_only=True)
+        if not isinstance(null, torch.Tensor):
+            raise TypeError(f"null prompt is not a tensor: {null_prompt_path}")
+        if null.ndim == 3 and null.shape[0] == 1:
+            null = null[0]
+        if null.ndim != 2 or null.shape[-1] != text_dim or null.shape[0] < 1:
+            raise ValueError(
+                f"invalid null prompt shape {tuple(null.shape)} at {null_prompt_path}; "
+                f"expected [L, {text_dim}]"
+            )
+        null = null.float()
+        if not torch.isfinite(null).all():
+            raise ValueError(f"null prompt contains non-finite values: {null_prompt_path}")
+        logger.info(f"loaded null prompt embedding {tuple(null.shape)} from {null_prompt_path}")
         self.register_buffer("null_prompt", null, persistent=False)
 
         self.aux_losses = {}
@@ -129,7 +133,6 @@ class LatentActionDiTModel(nn.Module):
         if self.action_pos_embed is not None:
             self.action_pos_embed.init_weights()
         self.forward_model.init_weights()
-        self.loss_scheduler.reset()
         if self.action_decoder is not None:
             self.action_decoder.init_weights(init_std=0.02)
 
@@ -197,6 +200,35 @@ class LatentActionDiTModel(nn.Module):
         hist = z_future.new_zeros(N, K, D)                   # history latent frames -> zero control
         return torch.cat([hist, pooled], dim=1)              # [N, Fp, D]
 
+    def _future_action_chunks(self, actions: torch.Tensor) -> torch.Tensor:
+        """Actions aligned to last-history -> each future-frame transition.
+
+        Dataset transforms store action chunk ``i`` for the transition from
+        sampled frame ``i`` to sampled frame ``i + 1``.  With five history
+        frames, the first predicted transition therefore uses chunk 4, not 5.
+        """
+        if self.num_history_frames < 1:
+            raise ValueError("at least one history frame is required")
+        start = self.num_history_frames - 1
+        stop = start + self.num_future_frames
+        if actions.shape[1] < stop:
+            raise ValueError(
+                f"need action chunks through index {stop - 1}, got shape {tuple(actions.shape)}"
+            )
+        return actions[:, start:stop]
+
+    def _future_target_mask(self, mask: torch.Tensor | None) -> torch.Tensor | None:
+        """Validity of the target future frames for each aligned transition."""
+        if mask is None:
+            return None
+        start = self.num_history_frames
+        stop = start + self.num_future_frames
+        if mask.shape[1] < stop:
+            raise ValueError(
+                f"need target-frame mask through index {stop - 1}, got shape {tuple(mask.shape)}"
+            )
+        return mask[:, start:stop]
+
     # ---------------------------------------------------- diffusion conditioning
     def _build_context(self, batch_size: int, device, dtype):
         null = self.null_prompt.to(device=device, dtype=dtype)
@@ -232,34 +264,110 @@ class LatentActionDiTModel(nn.Module):
         action_z = rearrange(zhat, "N T A D -> N T (A D)")
         return self.action_decoder(action_z, morphology_index, tokenized_rgb)
 
-    def _action_decoding_loss(self, decoded_actions, actions, loss_type="l1", loss_mask=None):
-        if decoded_actions.ndim == 3:
+    def _action_decoding_terms(self, decoded_actions, actions, loss_type="l1", loss_mask=None):
+        """Return a transition-weighted loss numerator and denominator.
+
+        Action dimensionality differs substantially by morphology.  Averaging
+        dimensions first gives every valid robot transition equal weight instead
+        of weighting batches by decoder width or by how many morphologies happen
+        to be represented.
+        """
+        if decoded_actions.ndim == 3 and actions.ndim == 4:
             actions = rearrange(actions, "N T A D -> N T (A D)")
         assert decoded_actions.shape == actions.shape, f"{decoded_actions.shape} != {actions.shape}"
         fn = F.l1_loss if loss_type == "l1" else F.mse_loss
-        loss = fn(input=decoded_actions, target=actions, reduction="none")
-        if loss_mask is not None:
-            loss = loss * loss_mask.view(*loss_mask.shape, 1)
-        return loss.mean()
+        per_transition = fn(input=decoded_actions, target=actions, reduction="none").mean(dim=-1)
+        weights = (
+            loss_mask.to(device=per_transition.device, dtype=per_transition.dtype)
+            if loss_mask is not None
+            else torch.ones_like(per_transition)
+        )
+        return (per_transition * weights).sum(), weights.sum()
+
+    def _action_decoding_loss(self, decoded_actions, actions, loss_type="l1", loss_mask=None):
+        numerator, denominator = self._action_decoding_terms(
+            decoded_actions, actions, loss_type=loss_type, loss_mask=loss_mask
+        )
+        return numerator / denominator.clamp(min=1.0)
+
+    def _component_major_action_target(
+        self,
+        action: torch.Tensor,
+        morph_id: str,
+        decoded_width: int,
+    ) -> torch.Tensor:
+        """Match SplitMultiMLP's component-major decoder concatenation.
+
+        Raw chunks are ``[low_level_step, action_component]``. SplitMultiMLP
+        emits every low-level step for EE, then joint state, then camera. A
+        direct row-major flatten would silently scramble those targets.
+        """
+        if action.ndim != 4:
+            raise ValueError(f"expected [B,T,A,D] actions, got {tuple(action.shape)}")
+        _, _, chunk_size, action_width = action.shape
+        split_type = getattr(self.action_decoder, "split_type", None)
+        if not isinstance(split_type, Mapping):
+            raise TypeError("multi-morphology action decoder lacks split_type metadata")
+        morph_splits = split_type.get(str(morph_id))
+        component_order = split_type.get("action_type_split")
+        if not isinstance(morph_splits, Mapping) or not isinstance(component_order, Mapping):
+            raise KeyError(f"missing split metadata for morphology {morph_id}")
+
+        parts = []
+        source_start = 0
+        expected_decoded_width = 0
+        for component in component_order:
+            if component not in morph_splits:
+                continue
+            component_width = int(morph_splits[component])
+            if component_width % chunk_size:
+                raise ValueError(
+                    f"morphology {morph_id} component {component} width "
+                    f"{component_width} is not divisible by chunk size {chunk_size}"
+                )
+            per_step_width = component_width // chunk_size
+            source_stop = source_start + per_step_width
+            if source_stop > action_width:
+                raise ValueError(
+                    f"morphology {morph_id} target needs {source_stop} per-step values, "
+                    f"but action width is {action_width}"
+                )
+            parts.append(action[..., source_start:source_stop].reshape(*action.shape[:2], -1))
+            source_start = source_stop
+            expected_decoded_width += component_width
+        if expected_decoded_width != decoded_width or not parts:
+            raise ValueError(
+                f"morphology {morph_id} split width {expected_decoded_width} "
+                f"does not match decoder width {decoded_width}"
+            )
+        return torch.cat(parts, dim=-1)
 
     def _multi_action_decoding_loss(self, decoded_actions, actions, loss_type="l1", loss_mask=None):
-        total = 0.0
+        total_numerator = actions.new_zeros(())
+        total_denominator = actions.new_zeros(())
         for morph_id in decoded_actions.keys():
             mask = decoded_actions[morph_id]["mask"]
             if not mask.any():
                 continue
             decoded_action = decoded_actions[morph_id]["actions"]
             action = actions[mask]
-            B, T, A, D = action.shape
             _, _, AE = decoded_action.shape
-            morphology_dim = AE // A
-            total += self._action_decoding_loss(
+            target = self._component_major_action_target(action, str(morph_id), AE)
+            numerator, denominator = self._action_decoding_terms(
                 decoded_actions=decoded_action,
-                actions=action[..., :morphology_dim],
+                actions=target,
                 loss_type=loss_type,
-                loss_mask=loss_mask[mask],
+                loss_mask=loss_mask[mask] if loss_mask is not None else None,
             )
-        return total
+            total_numerator = total_numerator + numerator
+            total_denominator = total_denominator + denominator
+            self.aux_losses[f"act_decoding_loss/morph_{morph_id}"] = (
+                numerator / denominator.clamp(min=1.0)
+            ).detach()
+            self.aux_losses[f"action_target_abs_mean/morph_{morph_id}"] = (
+                target.detach().float().abs().mean()
+            )
+        return total_numerator / total_denominator.clamp(min=1.0)
 
     def _build_loss_mask(self, rgb: torch.Tensor, mask: torch.Tensor, latents_shape) -> torch.Tensor:
         """Latent-space validity mask [N,1,Fp,1,w] for the flow loss, combining:
@@ -337,16 +445,23 @@ class LatentActionDiTModel(nn.Module):
         # m is [N,1,Fp,1,w] and broadcasts over channels+height; expand_as so the denominator
         # counts the actual number of supervised scalar elements (not 1/(C*h) of them).
         m = m.expand_as(se)
-        flow_loss = (se * m).sum() / m.sum().clamp(min=1.0)
+        reduce_dims = tuple(range(1, se.ndim))
+        per_sample_denominator = m.sum(dim=reduce_dims)
+        if (per_sample_denominator <= 0).any():
+            raise RuntimeError("flow loss received a sample with no valid future pixels")
+        per_sample_loss = (se * m).sum(dim=reduce_dims) / per_sample_denominator
+        # Every episode gets equal weight even when one dataset supplies one
+        # valid view and another supplies three. Equal per-rank batch sizes make
+        # DDP's gradient averaging the exact global per-sample mean.
+        flow_loss = per_sample_loss.mean()
         total_loss = flow_loss
         self.aux_losses["flow_loss"] = flow_loss.detach().clone()
 
-        # --- action decoding: supervise the num_future latent actions against the
-        #     future GT action chunks (actions[:, num_history:]) ---
+        # --- action decoding: supervise each inferred last-history -> future
+        #     transition against its aligned GT action chunk. ---
         if actions is not None and self.action_decoder is not None:
-            fut = self.num_history_frames
-            gt_actions = actions[:, fut:]
-            gt_mask = mask[:, fut:] if mask is not None else None
+            gt_actions = self._future_action_chunks(actions)
+            gt_mask = self._future_target_mask(mask)
             ahat = self._forward_action_decoder(
                 z_future, tokenized_rgb=self.rgb_pos_embed(future_tokens),
                 morphology_index=morphology_index,
@@ -364,21 +479,18 @@ class LatentActionDiTModel(nn.Module):
             total_loss = total_loss + self.config.get("action_decoding_weight", 0.5) * act_loss
             self.aux_losses["act_decoding_loss"] = act_loss.detach().clone()
 
-        # Safety guard: a non-finite loss would poison every weight via the backward pass.
-        # Zero this batch's contribution (without detaching from the graph) and log which
-        # stage first went non-finite, so the source can be fixed rather than silently masked.
+        # Preserve a non-finite loss so the Trainer's cross-rank finite check can
+        # make every rank fail together before backward. Replacing it with zero
+        # would allow a corrupt sample/rank to be hidden by DDP's finite gradients.
         if not torch.isfinite(total_loss):
             fin = lambda t: bool(torch.isfinite(t).all())
-            logger.warning(
+            logger.error(
                 "non-finite loss; finite stages: latents=%s z_control=%s v_pred=%s flow=%s "
                 "(rgb range [%.3f, %.3f], morph=%s)",
                 fin(latents), fin(z_control), fin(v_pred), fin(flow_loss),
                 float(rgb.min()), float(rgb.max()),
                 morphology_index.tolist() if morphology_index is not None else None,
             )
-            anchor = next(self.forward_model.action_to_control.parameters())
-            total_loss = anchor.sum() * 0.0
-        self.aux_losses = {k: torch.nan_to_num(v) for k, v in self.aux_losses.items()}
 
         return total_loss
 
@@ -418,14 +530,14 @@ class LatentActionDiTModel(nn.Module):
         side = torch.clamp(side * 0.5 + 0.5, 0.0, 1.0)
         return side
 
-    # --------------------------------------------------------------- state dict
-    def state_dict(self, *args, **kwargs):
-        sd = super().state_dict(*args, **kwargs)
-        sd["loss_scheduler"] = self.loss_scheduler.state_dict()
-        return sd
-
-    def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False):
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, Any],
+        strict: bool = True,
+        assign: bool = False,
+    ):
+        """Accept snapshots made before the unused loss scheduler was removed."""
         if "loss_scheduler" in state_dict:
-            self.loss_scheduler.load_state_dict(state_dict["loss_scheduler"])
-            del state_dict["loss_scheduler"]
-        return super().load_state_dict(state_dict=state_dict, strict=strict, assign=assign)
+            state_dict = dict(state_dict)
+            state_dict.pop("loss_scheduler")
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)

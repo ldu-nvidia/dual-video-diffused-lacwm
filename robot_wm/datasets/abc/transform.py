@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 ABC_RGB_CAMERAS = ["top", "left_wrist", "right_wrist"]
 
 
+def _thwc_to_tchw(x):
+    return x.permute(0, 3, 1, 2)
+
+
+def _divide_255(x):
+    return x / 255.0
+
+
 class ABCTransform(Transform):
     def __init__(
         self,
@@ -43,8 +51,8 @@ class ABCTransform(Transform):
         self._wrist_mask_prob = wrist_mask_prob
         self._num_views = num_views
         tfs = [
-            transforms.Lambda(lambda x: x.permute(0, 3, 1, 2)),  # T,H,W,C -> T,C,H,W
-            transforms.Lambda(lambda x: x / 255.0),
+            transforms.Lambda(_thwc_to_tchw),  # T,H,W,C -> T,C,H,W
+            transforms.Lambda(_divide_255),
         ]
         if resize_to is not None:
             tfs.append(transforms.Resize(resize_to))
@@ -102,3 +110,9 @@ class ABCTransform(Transform):
 
         out = {"rgb": rgb, "actions": actions, "mask": mask}
         return {k: out[k] for k in self._output_keys if k in out}
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"_gen": self._gen.get_state()}
+
+    def load_state_dict(self, state_dict):
+        self._gen.set_state(state_dict["_gen"])

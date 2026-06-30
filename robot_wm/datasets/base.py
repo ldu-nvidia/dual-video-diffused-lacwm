@@ -18,6 +18,45 @@ import robot_wm.utils.distributed as dist
 
 logger = logging.getLogger(__name__)
 NORMALIZABLE_KEYS = ["state", "actions"]
+_PICKLED_GENERATORS_KEY = "__robot_wm_torch_generator_states__"
+
+
+def _state_without_torch_generators(instance) -> dict:
+    """Pickle CPU RNGs by value instead of through torch shared storage.
+
+    Python's ``spawn`` pickler applies PyTorch's tensor reducers to the temporary
+    tensor returned by ``Generator.get_state()``. That tensor can be destroyed
+    before ``fork_exec`` consumes its file descriptor, allowing the descriptor
+    number to be reused by the spawn control pipe and producing duplicate
+    ``fds_to_keep`` entries. Plain bytes have no descriptor lifetime and preserve
+    the exact generator stream.
+    """
+    state = instance.__dict__.copy()
+    if _PICKLED_GENERATORS_KEY in state:
+        raise RuntimeError(f"reserved pickle key already exists: {_PICKLED_GENERATORS_KEY}")
+    generator_states = {}
+    for name, value in list(state.items()):
+        if isinstance(value, torch.Generator):
+            generator_states[name] = {
+                "device": str(value.device),
+                "state": value.get_state().cpu().numpy().tobytes(),
+            }
+            del state[name]
+    state[_PICKLED_GENERATORS_KEY] = generator_states
+    return state
+
+
+def _restore_torch_generators(instance, state: dict) -> None:
+    state = state.copy()
+    generator_states = state.pop(_PICKLED_GENERATORS_KEY, {})
+    instance.__dict__.update(state)
+    for name, payload in generator_states.items():
+        generator = torch.Generator(device=payload["device"])
+        generator_state = torch.from_numpy(
+            np.frombuffer(payload["state"], dtype=np.uint8).copy()
+        )
+        generator.set_state(generator_state)
+        setattr(instance, name, generator)
 
 
 def _h5py_to_dict(
@@ -107,6 +146,17 @@ class Dataset(ABC, IterableDataset, Stateful):
 
         self._start_idx = 0
         self._gen = torch.Generator()
+        # Capture distributed identity in the parent process. DataLoader workers
+        # use the spawn context and therefore do not inherit an initialized NCCL
+        # process group, but they still need deterministic per-rank sharding.
+        self._process_id = dist.get_global_rank() if dist.is_initialized() else 0
+        self._num_processes = dist.get_world_size() if dist.is_initialized() else 1
+
+    def __getstate__(self):
+        return _state_without_torch_generators(self)
+
+    def __setstate__(self, state):
+        _restore_torch_generators(self, state)
 
     @property
     @abstractmethod
@@ -125,10 +175,7 @@ class Dataset(ABC, IterableDataset, Stateful):
         self._gen.manual_seed(self._seed)
 
         # shard dataset across processes
-        process_id, num_processes = 0, 1
-        if dist.is_initialized():
-            process_id = dist.get_global_rank()
-            num_processes = dist.get_world_size()
+        process_id, num_processes = self._process_id, self._num_processes
 
         N = self._get_length()
         total = int(math.ceil(N / num_processes)) * num_processes
@@ -238,6 +285,12 @@ class Dataset(ABC, IterableDataset, Stateful):
 
 
 class Transform(ABC, Stateful):
+    def __getstate__(self):
+        return _state_without_torch_generators(self)
+
+    def __setstate__(self, state):
+        _restore_torch_generators(self, state)
+
     @abstractmethod
     def __call__(self, episode: dict[str, Any]) -> dict[str, Any]:
         pass

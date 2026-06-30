@@ -18,6 +18,7 @@ dataset: &ds
   seed: ${seed}
   infinite: true
   img_augment: True
+  emit_crop_rgb: false
   transform:
     sample_size: 13
     chunk_size: 5
@@ -87,14 +88,6 @@ model:
       "2": {target: robot_wm.modeling.tokenizers.action.decoder.ActionXattenDecoder, input_dim: "${model.action_decoder.input_dim}", hidden_dim: 1024, output_dim: 785, rgb_latent_dim: "${model.rgb_tokenizer.output_dim}"}
       "6": {target: robot_wm.modeling.tokenizers.action.decoder.ActionXattenDecoder, input_dim: "${model.action_decoder.input_dim}", hidden_dim: 1024, output_dim: 215, rgb_latent_dim: "${model.rgb_tokenizer.output_dim}"}
       "9": {target: robot_wm.modeling.tokenizers.action.decoder.ActionXattenDecoder, input_dim: "${model.action_decoder.input_dim}", hidden_dim: 1024, output_dim: 115, rgb_latent_dim: "${model.rgb_tokenizer.output_dim}"}
-  loss_scheduler:
-    pretrain_steps: 0
-    warmup_steps: 100
-    total_steps: ${trainer.config.max_iter}
-    ae_only_steps: 80_001
-    action_decode_steps: 80_000
-    losses: ["teacher-forcing"]
-    seed: ${seed}
   config:
     action_decoding_weight: 0.1
     action_decoding_loss_type: "l1"

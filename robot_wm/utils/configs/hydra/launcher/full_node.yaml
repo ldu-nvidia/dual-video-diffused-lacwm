@@ -1,3 +1,7 @@
+# Legacy Submitit profile. It is not used by the guarded Wan-DiT production
+# path: tools/slurm/submit_8xb200.sh requests one Slurm task, and that task uses
+# torchrun to create eight local ranks. Do not combine this eight-task profile
+# with tools/launch_8xb200.sh.
 defaults:
     - submitit_slurm
 

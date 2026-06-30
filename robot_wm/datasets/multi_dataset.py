@@ -84,6 +84,7 @@ class MultiDataset(Dataset):
         infinite: bool = True,
         padding_dim: int = 0,
         img_augment: bool = False,
+        emit_crop_rgb: bool = True,
     ):
         super().__init__(seed=seed, infinite=infinite, transform=transform)
         self.datasets = datasets
@@ -95,6 +96,9 @@ class MultiDataset(Dataset):
         logger.info(f"MultiDataset: total {self.cumulative_lengths[-1]:,} episodes")
         self.padding_dim = padding_dim
         self.img_augment = img_augment
+        self.emit_crop_rgb = emit_crop_rgb
+        self._augment_gen = torch.Generator()
+        self._augment_initialized = False
         self.augment = torch.nn.Sequential(
             K.ColorJitter(
                 brightness=0.4,
@@ -183,16 +187,30 @@ class MultiDataset(Dataset):
         episode["decode_camera"] = getattr(dataset, "decode_camera", True)
 
         if self.img_augment and "rgb" in episode:
-            original_rgb = episode["rgb"].clone()
+            original_rgb = episode["rgb"]
             # rgb is normalized to [-1,1] (mean=std=0.5). kornia ColorJitter/RandomGamma assume
             # [0,1] input (they clamp to [0,1]), so augment in [0,1] -- i.e. BEFORE normalization --
             # then re-normalize back to [-1,1]. (Augmenting the normalized [-1,1] tensor directly
             # collapses the range to [0,1] and feeds the VAE out-of-distribution data.)
-            rgb01 = ((original_rgb + 1.0) * 0.5).clamp(0.0, 1.0)
-            episode["rgb"] = self.augment(rgb01) * 2.0 - 1.0
-            episode["crop_rgb"] = random_crop_resize_same(
-                self.rot_augment(self.augment(rgb01)) * 2.0 - 1.0
-            )
+            if not self._augment_initialized:
+                worker = torch.utils.data.get_worker_info()
+                worker_id = worker.id if worker is not None else 0
+                self._augment_gen.manual_seed(
+                    self._seed + 1_000_003 * self._process_id + 9_176 * worker_id
+                )
+                self._augment_initialized = True
+            # Kornia samples from the worker-global CPU RNG. Isolate it behind a
+            # stateful generator so checkpointed loader workers can resume the
+            # exact augmentation stream.
+            with torch.random.fork_rng(devices=[]):
+                torch.set_rng_state(self._augment_gen.get_state())
+                rgb01 = ((original_rgb + 1.0) * 0.5).clamp(0.0, 1.0)
+                episode["rgb"] = self.augment(rgb01) * 2.0 - 1.0
+                if self.emit_crop_rgb:
+                    episode["crop_rgb"] = random_crop_resize_same(
+                        self.rot_augment(self.augment(rgb01)) * 2.0 - 1.0
+                    )
+                self._augment_gen.set_state(torch.get_rng_state())
             # mediapy.write_video(
             #     f"augmented_video_cropped_{index}.mp4",
             #     episode["crop_rgb"].permute(0, 2, 3, 1).numpy(),
@@ -209,20 +227,27 @@ class MultiDataset(Dataset):
         output = {
             "_start_idx": self._start_idx,
             "_gen": self._gen.get_state(),
-            "_transform": {},
+            "_augment_gen": self._augment_gen.get_state(),
+            "_augment_initialized": self._augment_initialized,
+            "_datasets": {},
         }
         for dataset_name, dataset in self.datasets.items():
-            transform = dataset._transform
-            if transform is not None:
-                output["_transform"][dataset_name] = transform.state_dict()
+            # Child dataset state includes its retry RNG and transform RNG. The
+            # retry generator is consumed only on decode/sample failures, but it
+            # must still continue exactly after a checkpoint.
+            output["_datasets"][dataset_name] = dataset.state_dict()
         return output
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self._start_idx = state_dict["_start_idx"]
         self._gen.set_state(state_dict["_gen"])
+        if "_augment_gen" in state_dict:
+            self._augment_gen.set_state(state_dict["_augment_gen"])
+            self._augment_initialized = bool(
+                state_dict.get("_augment_initialized", True)
+            )
+        child_states = state_dict.get("_datasets")
+        if not isinstance(child_states, dict) or set(child_states) != set(self.datasets):
+            raise RuntimeError("checkpoint child-dataset state does not match MultiDataset")
         for dataset_name, dataset in self.datasets.items():
-            transform = dataset._transform
-            if transform is not None:
-                transform.load_state_dict(state_dict["_transform"][dataset_name])
-
-
+            dataset.load_state_dict(child_states[dataset_name])

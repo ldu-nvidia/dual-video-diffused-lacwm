@@ -25,13 +25,6 @@ action_pos_embed:
 action_decoder:
 forward_model:
   latent_action_dim: ${..latent_action_dim}
-loss_scheduler:
-  _target_: lam.loss_scheduler.CustomLossScheduler
-  pretrain_steps: ???
-  warmup_steps: ???
-  total_steps: ???
-  seed: ???
-  losses: ["teacher-forcing"]
 config:
   action_decoding_weight: 0.1
   action_decoding_loss_type: l1

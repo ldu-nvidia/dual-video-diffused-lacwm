@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import decord
 import numpy as np
+import torch
 
 from robot_wm.datasets.abc.transform import ABCTransform
 from robot_wm.datasets.base import Dataset
@@ -98,7 +99,11 @@ class ABCDataset(Dataset):
                 return self.__get_sample(index)
             except Exception as e:
                 logger.warning(f"ABCDataset sample {index} failed ({e}); retrying another")
-                index = int(np.random.randint(0, self._get_length()))
+                index = int(
+                    torch.randint(
+                        0, self._get_length(), (1,), generator=self._gen
+                    ).item()
+                )
         return self.__get_sample(index)
 
     def __getitem__(self, index):

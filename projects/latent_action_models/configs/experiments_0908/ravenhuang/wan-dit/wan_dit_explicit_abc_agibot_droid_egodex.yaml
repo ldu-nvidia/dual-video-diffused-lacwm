@@ -19,6 +19,7 @@ dataset: &ds
   seed: ${seed}
   infinite: true
   img_augment: True
+  emit_crop_rgb: false  # the Wan models do not consume this duplicate image tensor
   transform:
     sample_size: 13
     chunk_size: 5
@@ -64,12 +65,6 @@ model:
     _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
     num_embeddings: 10
     embedding_dim: 64
-  loss_scheduler:
-    pretrain_steps: 0
-    warmup_steps: 10_000
-    total_steps: ${trainer.config.max_iter}
-    losses: ["teacher-forcing"]
-    seed: ${seed}
   config:
     flow_loss_on_future_only: true
 
@@ -85,6 +80,7 @@ wandb: {project: lacwm}
 trainer:
   config:
     max_iter: 60_000
+    gradient_accumulation_steps: 1
     logging: {log_every: 50}
     saving: {save_every: 1000}
     validation: {val_every: 1000, n_val_samples: 25}

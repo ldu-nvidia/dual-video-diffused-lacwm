@@ -1,17 +1,15 @@
-# Wan-DiT latent-action world model env. Create from the repo root:
+# Conda convenience environment. The canonical B200 path is
+# tools/env/create_b200_env.sh, which also pins and validates VideoX-Fun.
+# Create this alternative from the repo root:
 #   conda env create -f environment.yaml
 #   conda activate lacwm-dit
-# (installs cu128 PyTorch + requirements.txt + this package). Adjust the cu128
-# index URL if your server uses a different CUDA.
+# (installs the same pinned B200 requirements + this package).
 name: lacwm-dit
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
+  - python=3.10.20
   - pip
   - pip:
-      - --extra-index-url https://download.pytorch.org/whl/cu128
-      - torch==2.7.1
-      - torchvision==0.22.1
-      - -r requirements.txt
+      - -r requirements-b200-lock.txt
       - -e .

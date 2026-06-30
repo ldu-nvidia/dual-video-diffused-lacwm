@@ -18,12 +18,5 @@ action_encoder:
   morph_dim: ${..latent_action_dim}
   hidden: 512
   num_layers: 3
-loss_scheduler:
-  _target_: lam.loss_scheduler.CustomLossScheduler
-  pretrain_steps: ???
-  warmup_steps: ???
-  total_steps: ???
-  seed: ???
-  losses: ["teacher-forcing"]
 config:
   flow_loss_on_future_only: true

@@ -7,11 +7,12 @@
 # The active run trains on ABC + Agibot + DROID + EgoDex
 # (config transformed_multi_abc_agibot_droid_egodex).
 #
-# Data (FETCH below):
-#   download  — pull data from the public sources (default). Each dataset has a toggle
-#               and a size limit. NOTE: some raw sources need a preprocessing/format step
-#               before training (flagged loudly per dataset, see "PREP" notes).
-#   skip      — data already in place; only (re)generate manifests.
+# Data is opt-in. The default is FETCH=skip with every dataset disabled, so a
+# bare invocation cannot start a multi-terabyte transfer. Downloads require:
+#   FETCH=download ALLOW_DATA_DOWNLOAD=1 <DATASET>_ENABLE=1
+# plus a finite per-dataset limit. ABC additionally requires an exact file plan;
+# AgiBot archive download is blocked until extraction/alignment is handled outside
+# this script and the extracted tree is supplied with FETCH=skip.
 #
 # Public sources:
 #   DROID   https://huggingface.co/datasets/cadene/droid   (LeRobot v2.1, matches the loader;
@@ -21,8 +22,13 @@
 #   EgoDex  https://github.com/apple/ml-egodex  (zips on Apple's CDN)
 #
 # Usage:
-#   ./setup_training.sh                 # all: env + fetch + manifests + repoint + validate
-#   ./setup_training.sh datasets        # just fetch the enabled datasets
+#   ./setup_training.sh                 # safe default: no dataset download; fails validation if assets are absent
+#   ./setup_training.sh env
+#   FETCH=download WAN_ASSET_DEVICE=cuda:0 ./setup_training.sh weights
+#   FETCH=download ALLOW_DATA_DOWNLOAD=1 DROID_ENABLE=1 DROID_LIMIT=10000 \
+#     ./setup_training.sh datasets
+#   FETCH=skip DROID_ENABLE=1 EGODEX_ENABLE=1 AGIBOT_ENABLE=1 ABC_ENABLE=1 \
+#     ./setup_training.sh manifests
 #   ./setup_training.sh manifests       # (re)generate manifests for present data
 #   ./setup_training.sh validate
 #
@@ -32,206 +38,378 @@
 set -euo pipefail
 
 # ─────────────────────────────── CONFIG ──────────────────────────────────────
-BASE="${BASE:-/scr/ravenh}"                  # holds data + weights + VideoX-Fun
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+BASE="${BASE:-/mnt/data2/${USER}/lacwm_runtime}" # large data, weights, runtimes, and outputs
 # These four are EXPORTED so the configs + module defaults (which read them via
-# ${oc.env:VAR,default} / os.environ.get) resolve to this server. Defaults = /scr/ravenh.
-export LACWM_DATA="${LACWM_DATA:-$BASE/lacwm_data}"       # datasets
-export LACWM_RUNS="${LACWM_RUNS:-$BASE/lacwm_runs}"       # training outputs (run dirs)
+# ${oc.env:VAR,default} / os.environ.get) resolve to this server.
+export LACWM_DATA="${LACWM_DATA:-$BASE/data}"             # datasets
+export LACWM_RUNS="${LACWM_RUNS:-$BASE/runs}"             # training outputs (run dirs)
 export WAN_DIR="${WAN_DIR:-$BASE/wan_fun_1.3b_control}"   # Wan2.1-Fun weights + null prompt
-export VIDEOX_HOME="${VIDEOX_HOME:-$BASE/VideoX-Fun}"     # VideoX-Fun library
+export VIDEOX_HOME="${VIDEOX_HOME:-$BASE/VideoX-Fun-1d6d9c3}" # pinned VideoX-Fun checkout
 DATA_ROOT="$LACWM_DATA"; VIDEOX_DIR="$VIDEOX_HOME"        # internal aliases
-REPO_DIR="${REPO_DIR:-$HOME/lacwm-dit}"
-CONDA_ENV="${CONDA_ENV:-lacwm-dit}"
+REPO_DIR="${REPO_DIR:-$SCRIPT_DIR}"
+ENV_DIR="${ENV_DIR:-$BASE/envs/lacwm-b200-py310}"
+PYTHON_BIN="${LACWM_PYTHON:-$ENV_DIR/bin/python}"
 
-FETCH="${FETCH:-download}"                    # download | skip
+FETCH="${FETCH:-skip}"                        # download | skip
+ALLOW_DATA_DOWNLOAD="${ALLOW_DATA_DOWNLOAD:-0}"
 
-# Per-dataset: enable (1/0) and a cap on episodes used (manifest is truncated to it; "all" = no cap).
-DROID_ENABLE="${DROID_ENABLE:-1}";   DROID_LIMIT="${DROID_LIMIT:-all}"
-AGIBOT_ENABLE="${AGIBOT_ENABLE:-1}"; AGIBOT_LIMIT="${AGIBOT_LIMIT:-all}"
-EGODEX_ENABLE="${EGODEX_ENABLE:-1}"; EGODEX_LIMIT="${EGODEX_LIMIT:-all}"
-ABC_ENABLE="${ABC_ENABLE:-1}";       ABC_LIMIT="${ABC_LIMIT:-all}"
+# Per-dataset opt-in and finite active counts. "all" is intentionally rejected.
+DROID_ENABLE="${DROID_ENABLE:-0}";   DROID_LIMIT="${DROID_LIMIT:-10000}"
+AGIBOT_ENABLE="${AGIBOT_ENABLE:-0}"; AGIBOT_LIMIT="${AGIBOT_LIMIT:-5671}"
+EGODEX_ENABLE="${EGODEX_ENABLE:-0}"; EGODEX_LIMIT="${EGODEX_LIMIT:-10000}"
+ABC_ENABLE="${ABC_ENABLE:-0}";       ABC_LIMIT="${ABC_LIMIT:-10000}"
 
-# download volume knobs (avoid pulling everything):
-AGIBOT_TASKS="${AGIBOT_TASKS:-all}"           # number of Alpha task dirs to fetch ("all" = 36)
-EGODEX_PARTS="${EGODEX_PARTS:-part2}"         # space-sep: part1..part5 test extra (active run used part2)
-# DROID volume derives from DROID_LIMIT: ceil(limit/1000) chunks of cadene/droid (all = 93 chunks)
+# Download/preparation controls. These have no broad defaults.
+EGODEX_PARTS="${EGODEX_PARTS:-}"               # explicit space-separated part1..part5/test/extra
+EGODEX_SHA256_PLAN="${EGODEX_SHA256_PLAN:-}"   # lines: <part> <sha256>, required for downloads
+ABC_DOWNLOAD_PLAN="${ABC_DOWNLOAD_PLAN:-}"     # exact HF paths, one episode.mcap per line
+ABC_SUCCESS_MANIFEST="${ABC_SUCCESS_MANIFEST:-$DATA_ROOT/abc_pp/manifest.success.txt}"
+REBUILD_AGIBOT_MANIFEST="${REBUILD_AGIBOT_MANIFEST:-0}"
+DELETE_ARCHIVES_AFTER_EXTRACT="${DELETE_ARCHIVES_AFTER_EXTRACT:-0}"
+VALIDATE_WORKERS="${VALIDATE_WORKERS:-16}"
+MANIFEST_HELPER="$REPO_DIR/tools/build_training_manifests.py"
+DATA_VALIDATOR="$REPO_DIR/tools/validate_training_data.py"
 # ──────────────────────────────────────────────────────────────────────────────
 
 log()  { printf '\033[1;32m[setup]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n'  "$*"; }
 prep() { printf '\033[1;36m[PREP]\033[0m %s\n'  "$*"; }
 die()  { printf '\033[1;31m[fail]\033[0m %s\n'  "$*" >&2; exit 1; }
-cap()  { if [ "$2" = all ]; then cat; else head -n "$2"; fi; }   # truncate stdin to a limit
+
+require_positive_int() {
+  local name="$1" value="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive finite integer (got '$value')"
+}
+
+require_bool() {
+  local name="$1" value="$2"
+  [ "$value" = 0 ] || [ "$value" = 1 ] || die "$name must be 0 or 1 (got '$value')"
+}
+
+enabled_dataset_count() {
+  echo $((DROID_ENABLE + AGIBOT_ENABLE + EGODEX_ENABLE + ABC_ENABLE))
+}
+
+validate_config() {
+  local action="${1:-all}" part
+  case "$FETCH" in download|skip) ;; *) die "FETCH must be 'download' or 'skip'" ;; esac
+  require_bool DROID_ENABLE "$DROID_ENABLE"
+  require_bool AGIBOT_ENABLE "$AGIBOT_ENABLE"
+  require_bool EGODEX_ENABLE "$EGODEX_ENABLE"
+  require_bool ABC_ENABLE "$ABC_ENABLE"
+  require_bool ALLOW_DATA_DOWNLOAD "$ALLOW_DATA_DOWNLOAD"
+  require_bool REBUILD_AGIBOT_MANIFEST "$REBUILD_AGIBOT_MANIFEST"
+  require_bool DELETE_ARCHIVES_AFTER_EXTRACT "$DELETE_ARCHIVES_AFTER_EXTRACT"
+  require_positive_int DROID_LIMIT "$DROID_LIMIT"
+  require_positive_int AGIBOT_LIMIT "$AGIBOT_LIMIT"
+  require_positive_int EGODEX_LIMIT "$EGODEX_LIMIT"
+  require_positive_int ABC_LIMIT "$ABC_LIMIT"
+  require_positive_int VALIDATE_WORKERS "$VALIDATE_WORKERS"
+  [ -s "$MANIFEST_HELPER" ] || die "missing manifest helper: $MANIFEST_HELPER"
+  [ -s "$DATA_VALIDATOR" ] || die "missing data validator: $DATA_VALIDATOR"
+
+  if [ "$action" = all ] || [ "$action" = validate ]; then
+    [ "$DROID_ENABLE" = 1 ] && [ "$EGODEX_ENABLE" = 1 ] && \
+      [ "$AGIBOT_ENABLE" = 1 ] && [ "$ABC_ENABLE" = 1 ] || die \
+      "production validation requires all four datasets enabled"
+    [ "$DROID_LIMIT" = 10000 ] && [ "$EGODEX_LIMIT" = 10000 ] && \
+      [ "$AGIBOT_LIMIT" = 5671 ] && [ "$ABC_LIMIT" = 10000 ] || die \
+      "production limits must be DROID=10000, EGODEX=10000, AGIBOT=5671, ABC=10000"
+  fi
+
+  if [ "$FETCH" = download ] && { [ "$action" = all ] || [ "$action" = datasets ]; }; then
+    [ "$(enabled_dataset_count)" -gt 0 ] || die \
+      "FETCH=download requires at least one explicit <DATASET>_ENABLE=1"
+    require_download_ack
+    [ "$AGIBOT_ENABLE" = 0 ] || die \
+      "AgiBot automatic download is blocked pending an external archive extraction and camera-alignment plan"
+    if [ "$EGODEX_ENABLE" = 1 ]; then
+      [ -n "$EGODEX_PARTS" ] || die "EGODEX_PARTS must explicitly list one or more parts"
+      [ -s "$EGODEX_SHA256_PLAN" ] || die \
+        "EGODEX_SHA256_PLAN with expected archive hashes is required"
+      for part in $EGODEX_PARTS; do
+        case "$part" in part1|part2|part3|part4|part5|test|extra) ;; *) die "unsupported EgoDex part '$part'" ;; esac
+      done
+    fi
+    if [ "$ABC_ENABLE" = 1 ]; then
+      [ -n "$ABC_DOWNLOAD_PLAN" ] || die \
+        "ABC_DOWNLOAD_PLAN is required before any download begins"
+      [ -s "$ABC_DOWNLOAD_PLAN" ] || die "ABC download plan is missing or empty: $ABC_DOWNLOAD_PLAN"
+    fi
+  fi
+}
+
+require_download_ack() {
+  [ "$ALLOW_DATA_DOWNLOAD" = 1 ] || die \
+    "dataset downloads are disabled; set ALLOW_DATA_DOWNLOAD=1 after reviewing limits and storage"
+}
+
+require_runtime() {
+  [ -x "$PYTHON_BIN" ] || die \
+    "training Python is missing at $PYTHON_BIN; run '$0 env' first or set LACWM_PYTHON"
+}
 
 # ─── 1. Environment ───────────────────────────────────────────────────────────
 setup_env() {
-  log "conda env '$CONDA_ENV' + package install"
-  command -v conda >/dev/null || die "conda not found"
-  source "$(conda info --base)/etc/profile.d/conda.sh"
-  conda env list | grep -qE "^\s*$CONDA_ENV\s" || conda create -y -n "$CONDA_ENV" python=3.10
-  conda activate "$CONDA_ENV"
-  pip install --upgrade pip
-  pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128 || \
-    warn "torch install failed — install a build matching your CUDA, then re-run"
-  pip install -r "$REPO_DIR/requirements.txt"
-  pip install -e "$REPO_DIR"
-  [ -d "$VIDEOX_DIR/.git" ] || git clone https://github.com/aigc-apps/VideoX-Fun.git "$VIDEOX_DIR"
+  log "creating pinned PyTorch/CUDA 12.8 B200 environment at $ENV_DIR"
+  LACWM_BASE="$BASE" ENV_DIR="$ENV_DIR" VIDEOX_HOME="$VIDEOX_HOME" \
+    "$REPO_DIR/tools/env/create_b200_env.sh"
 }
 
 # ─── 2. Weights ───────────────────────────────────────────────────────────────
 fetch_weights() {
   [ "$FETCH" = download ] || { log "weights: FETCH=$FETCH (using existing $WAN_DIR)"; return; }
-  mkdir -p "$WAN_DIR"
-  log "hf download alibaba-pai/Wan2.1-Fun-1.3B-Control"
-  huggingface-cli download alibaba-pai/Wan2.1-Fun-1.3B-Control --local-dir "$WAN_DIR"
-  prep "null_prompt_umt5.pt is NOT in the official repo (a cached null umT5 embedding) —"
-  prep "copy it into $WAN_DIR/ from a machine that has it (~18 KB)."
-  [ -f "$WAN_DIR/Wan2.1_VAE.pth" ]      || warn "missing $WAN_DIR/Wan2.1_VAE.pth"
-  [ -f "$WAN_DIR/null_prompt_umt5.pt" ] || warn "missing $WAN_DIR/null_prompt_umt5.pt (required)"
+  [ -n "${WAN_ASSET_DEVICE:-}" ] || die \
+    "FETCH=download weights requires an explicit WAN_ASSET_DEVICE (for example cuda:0 or cpu)"
+  log "preparing pinned Wan assets and cached null prompt"
+  LACWM_BASE="$BASE" ENV_DIR="$ENV_DIR" WAN_DIR="$WAN_DIR" VIDEOX_HOME="$VIDEOX_HOME" \
+    "$REPO_DIR/tools/env/prepare_wan_assets.sh" --device "$WAN_ASSET_DEVICE"
 }
 
 # ─── 3. Datasets (download from public sources) ───────────────────────────────
 fetch_droid() {                                  # -> $DATA_ROOT/droid_lerobot {data,meta,videos}
   [ "$DROID_ENABLE" = 1 ] || { log "droid: disabled"; return; }
   [ "$FETCH" = download ] || { log "droid: FETCH=$FETCH (using existing data)"; return; }
+  require_download_ack
+  require_runtime
   mkdir -p "$DATA_ROOT/droid_lerobot"
   # cadene/droid is LeRobot v2.1 (data/chunk-*/episode_*.parquet + per-episode mp4 with the
   # exact camera names the loader uses) -> loads directly, no conversion. ~1000 episodes/chunk.
-  local nchunks
-  if [ "$DROID_LIMIT" = all ]; then nchunks=93; else nchunks=$(( (DROID_LIMIT + 999) / 1000 )); fi
+  local nchunks=$(( (DROID_LIMIT + 999) / 1000 ))
   log "hf download cadene/droid (v2.1): meta + $nchunks chunk(s) (~$((nchunks * 1000)) episodes)"
-  local inc=(--include "meta/*") i c
+  local patterns=("meta/*") i c
   for i in $(seq 0 $((nchunks - 1))); do
-    c=$(printf %03d "$i"); inc+=(--include "data/chunk-$c/*" --include "videos/chunk-$c/*")
+    c=$(printf %03d "$i"); patterns+=("data/chunk-$c/*" "videos/chunk-$c/*")
   done
-  huggingface-cli download cadene/droid --repo-type dataset --local-dir "$DATA_ROOT/droid_lerobot" "${inc[@]}"
+  "$PYTHON_BIN" - "$DATA_ROOT/droid_lerobot" "${patterns[@]}" <<'PY'
+from huggingface_hub import snapshot_download
+import sys
+
+snapshot_download(
+    repo_id="cadene/droid",
+    repo_type="dataset",
+    revision="c8fbc029c9786fd4377ea20d9535e86d88199c0f",
+    local_dir=sys.argv[1],
+    allow_patterns=sys.argv[2:],
+)
+PY
 }
 
 fetch_agibot() {                                 # -> $DATA_ROOT/agibot {observations,proprio_stats,parameters,task_info}
   [ "$AGIBOT_ENABLE" = 1 ] || { log "agibot: disabled"; return; }
   [ "$FETCH" = download ] || { log "agibot: FETCH=$FETCH (using existing data)"; return; }
-  mkdir -p "$DATA_ROOT/agibot"
-  log "hf download agibot-world/AgiBotWorld-Alpha (tasks=$AGIBOT_TASKS) -> matches our layout"
-  local inc=(--include "task_info/*")
-  if [ "$AGIBOT_TASKS" = all ]; then
-    inc+=(--include "observations/*" --include "proprio_stats/*" --include "parameters/*")
-  else
-    # first N task ids (sorted) across the three per-task trees
-    local tasks; tasks=$(python - "$AGIBOT_TASKS" <<'PY'
-import sys; from huggingface_hub import HfApi
-n=int(sys.argv[1]); api=HfApi()
-ts=sorted(i.path.split("/")[-1] for i in api.list_repo_tree("agibot-world/AgiBotWorld-Alpha","observations",repo_type="dataset"))
-print(" ".join(ts[:n]))
-PY
-)
-    for t in $tasks; do inc+=(--include "observations/$t/*" --include "proprio_stats/$t/*" --include "parameters/$t/*"); done
-  fi
-  huggingface-cli download agibot-world/AgiBotWorld-Alpha --repo-type dataset --local-dir "$DATA_ROOT/agibot" "${inc[@]}"
-  prep "Agibot loader reads *_aligned.json camera params; if Alpha ships only the un-aligned"
-  prep "variants, run your alignment preprocessing before training."
+  require_download_ack
+  die "AgiBot automatic download is blocked: the public release may require archive extraction and camera-alignment preprocessing. Prepare an extracted tree containing observations/, proprio_stats/, parameters/, and *_aligned.json files; then run with FETCH=skip AGIBOT_ENABLE=1. The strict validator will verify it before launch."
 }
 
 fetch_egodex() {                                 # -> $DATA_ROOT/egodex_cdn/<part>/<task>/<n>.hdf5
   [ "$EGODEX_ENABLE" = 1 ] || { log "egodex: disabled"; return; }
   [ "$FETCH" = download ] || { log "egodex: FETCH=$FETCH (using existing data)"; return; }
+  require_download_ack
+  [ -n "$EGODEX_PARTS" ] || die "EGODEX_PARTS must explicitly list one or more parts"
+  [ -s "$EGODEX_SHA256_PLAN" ] || die "EGODEX_SHA256_PLAN is missing or empty"
+  command -v curl >/dev/null || die "curl not found"
+  command -v unzip >/dev/null || die "unzip not found"
+  command -v sha256sum >/dev/null || die "sha256sum not found"
   mkdir -p "$DATA_ROOT/egodex_cdn"
+  local p archive partial expected_hash actual_hash
   for p in $EGODEX_PARTS; do
+    case "$p" in part1|part2|part3|part4|part5|test|extra) ;; *) die "unsupported EgoDex part '$p'" ;; esac
     log "egodex: download + unzip $p (Apple CDN, ~300GB each for part1-5)"
-    curl -L "https://ml-site.cdn-apple.com/datasets/egodex/${p}.zip" -o "$DATA_ROOT/egodex_cdn/${p}.zip"
-    unzip -q -o "$DATA_ROOT/egodex_cdn/${p}.zip" -d "$DATA_ROOT/egodex_cdn/" && rm -f "$DATA_ROOT/egodex_cdn/${p}.zip"
+    archive="$DATA_ROOT/egodex_cdn/${p}.zip"
+    partial="${archive}.partial"
+    expected_hash="$(awk -v part="$p" '$1 == part {print $2}' "$EGODEX_SHA256_PLAN")"
+    [[ "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]] || die \
+      "EGODEX_SHA256_PLAN must contain exactly one valid SHA-256 for $p"
+    curl --fail --show-error --location "https://ml-site.cdn-apple.com/datasets/egodex/${p}.zip" -o "$partial"
+    actual_hash="$(sha256sum "$partial" | awk '{print $1}')"
+    [ "${actual_hash,,}" = "${expected_hash,,}" ] || die \
+      "EgoDex $p checksum mismatch: $actual_hash != $expected_hash"
+    unzip -tq "$partial" >/dev/null || die "downloaded EgoDex archive failed integrity check: $partial"
+    mv -f "$partial" "$archive"
+    unzip -q -o "$archive" -d "$DATA_ROOT/egodex_cdn/"
+    if [ "$DELETE_ARCHIVES_AFTER_EXTRACT" = 1 ]; then
+      rm -f -- "$archive"
+    fi
   done
 }
 
 fetch_abc() {                                    # -> $DATA_ROOT/abc_pp/<task>/episode_*/{*.mp4,states.npz}
   [ "$ABC_ENABLE" = 1 ] || { log "abc: disabled"; return; }
   [ "$FETCH" = download ] || { log "abc: FETCH=$FETCH (using existing data)"; return; }
-  # XDOF/ABC-130k ships raw episode.mcap per episode (data/train/<task>/episode_*/episode.mcap).
-  log "hf download XDOF/ABC-130k raw mcap (~130k episodes, large) -> $DATA_ROOT/abc_raw"
+  require_download_ack
+  require_runtime
+  [ -n "$ABC_DOWNLOAD_PLAN" ] || die \
+    "ABC_DOWNLOAD_PLAN is required; provide exactly ABC_LIMIT HF episode.mcap paths, one per line"
+  [ -s "$ABC_DOWNLOAD_PLAN" ] || die "ABC download plan is missing or empty: $ABC_DOWNLOAD_PLAN"
   mkdir -p "$DATA_ROOT/abc_raw"
-  huggingface-cli download XDOF/ABC-130k --repo-type dataset --local-dir "$DATA_ROOT/abc_raw" --include "data/train/*"
+  log "abc: selectively downloading $ABC_LIMIT planned MCAP episodes -> $DATA_ROOT/abc_raw"
+  "$PYTHON_BIN" - "$ABC_DOWNLOAD_PLAN" "$ABC_LIMIT" "$DATA_ROOT/abc_raw" <<'PY'
+import re
+import sys
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+plan_path, expected, local_dir = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+patterns = [line.strip() for line in plan_path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("#")]
+valid = re.compile(r"^data/train/[^/]+/episode_[^/]+/episode\.mcap$")
+bad = [path for path in patterns if not valid.fullmatch(path)]
+if bad:
+    raise SystemExit(f"invalid ABC plan paths (first 5): {bad[:5]}")
+if len(patterns) != expected:
+    raise SystemExit(f"ABC plan has {len(patterns)} paths; expected exactly {expected}")
+if len(set(patterns)) != len(patterns):
+    raise SystemExit("ABC plan contains duplicate paths")
+snapshot_download(
+    repo_id="XDOF/ABC-130k",
+    repo_type="dataset",
+    revision="fad18a5f891a47e665756d4cab2a67a7a080d8bb",
+    local_dir=local_dir,
+    allow_patterns=patterns,
+)
+
+active_plan = Path(local_dir) / "plan.active.txt"
+temporary = active_plan.with_suffix(active_plan.suffix + ".tmp")
+temporary.write_text(
+    "".join(str((Path(local_dir) / item).resolve()) + "\n" for item in patterns),
+    encoding="utf-8",
+)
+temporary.replace(active_plan)
+PY
   # Preprocess mcap -> abc_pp/<task>/<ep>/{top,left_wrist,right_wrist}.mp4 + states.npz
-  log "abc: preprocessing mcap -> abc_pp (parallel, idempotent; set ABC_NPROC to tune)"
+  log "abc: preprocessing planned MCAPs; success provenance stays in $ABC_SUCCESS_MANIFEST"
   ABC_RAW="$DATA_ROOT/abc_raw/data/train" ABC_PP="$DATA_ROOT/abc_pp" \
-    python -m robot_wm.datasets.abc.preprocessing.abc_batch_preprocess
+    ABC_INPUT_MANIFEST="$DATA_ROOT/abc_raw/plan.active.txt" ABC_MANIFEST="$ABC_SUCCESS_MANIFEST" \
+    "$PYTHON_BIN" -m robot_wm.datasets.abc.preprocessing.abc_batch_preprocess
 }
 
-fetch_datasets() { fetch_droid; fetch_agibot; fetch_egodex; fetch_abc; }
+fetch_datasets() {
+  if [ "$(enabled_dataset_count)" -eq 0 ]; then
+    [ "$FETCH" = skip ] && { log "no datasets enabled; nothing to fetch"; return; }
+    die "FETCH=download requires at least one explicit <DATASET>_ENABLE=1"
+  fi
+  [ "$FETCH" = skip ] || require_download_ack
+  fetch_droid
+  fetch_agibot
+  fetch_egodex
+  fetch_abc
+}
 
-# ─── 4. Manifests (regenerated for THIS server; capped by *_LIMIT) ────────────
+# ─── 4. Manifests (atomic, finite, complete assets only) ─────────────────────
 make_manifests() {
-  log "Regenerating manifests under $DATA_ROOT"
+  require_runtime
+  [ "$(enabled_dataset_count)" -gt 0 ] || die "no datasets enabled; set at least one <DATASET>_ENABLE=1"
+  log "Building finite manifests under $DATA_ROOT"
 
-  if [ "$EGODEX_ENABLE" = 1 ] && [ -d "$DATA_ROOT/egodex_cdn" ]; then
-    find "$DATA_ROOT/egodex_cdn" -name '*.hdf5' | sort | cap - "$EGODEX_LIMIT" > "$DATA_ROOT/egodex_cdn/manifest.csv"
-    log "  egodex : $(wc -l < "$DATA_ROOT/egodex_cdn/manifest.csv") episodes (limit=$EGODEX_LIMIT)"
+  if [ "$EGODEX_ENABLE" = 1 ]; then
+    [ -n "$EGODEX_PARTS" ] || die \
+      "EGODEX_PARTS must list the extracted parts used by the runtime manifest"
+    local egodex_args=() p
+    for p in $EGODEX_PARTS; do
+      case "$p" in part1|part2|part3|part4|part5|test|extra) ;; *) die "unsupported EgoDex part '$p'" ;; esac
+      egodex_args+=(--include-root "$DATA_ROOT/egodex_cdn/$p")
+    done
+    "$PYTHON_BIN" "$MANIFEST_HELPER" egodex \
+      --root "$DATA_ROOT/egodex_cdn" \
+      --output "$DATA_ROOT/egodex_cdn/manifest.csv" \
+      --limit "$EGODEX_LIMIT" \
+      "${egodex_args[@]}"
   fi
 
-  if [ "$ABC_ENABLE" = 1 ] && [ -d "$DATA_ROOT/abc_pp" ]; then
-    find "$DATA_ROOT/abc_pp" -mindepth 2 -maxdepth 2 -type d -name 'episode_*' | sort | cap - "$ABC_LIMIT" \
-      > "$DATA_ROOT/abc_pp/manifest.txt"
-    log "  abc    : $(wc -l < "$DATA_ROOT/abc_pp/manifest.txt") episodes (limit=$ABC_LIMIT)"
+  if [ "$ABC_ENABLE" = 1 ]; then
+    [ -s "$ABC_SUCCESS_MANIFEST" ] || die \
+      "ABC preprocessing success manifest is missing/empty: $ABC_SUCCESS_MANIFEST (partial directories are never enumerated)"
+    "$PYTHON_BIN" "$MANIFEST_HELPER" abc \
+      --success-manifest "$ABC_SUCCESS_MANIFEST" \
+      --output "$DATA_ROOT/abc_pp/manifest.txt" \
+      --limit "$ABC_LIMIT"
   fi
 
-  if [ "$AGIBOT_ENABLE" = 1 ] && [ -d "$DATA_ROOT/agibot/observations" ]; then
-    # Preserve a curated/portable manifest if one is already present and no cap is requested.
-    if [ -f "$DATA_ROOT/agibot/manifest.csv" ] && [ "$AGIBOT_LIMIT" = all ] && [ "$FETCH" = skip ]; then
-      log "  agibot : $(( $(wc -l < "$DATA_ROOT/agibot/manifest.csv") - 1 )) episodes (preserved existing manifest)"
+  if [ "$AGIBOT_ENABLE" = 1 ]; then
+    if [ "$REBUILD_AGIBOT_MANIFEST" = 1 ]; then
+      prep "AgiBot manifest rebuild requires an already extracted tree and aligned camera JSONs."
+      "$PYTHON_BIN" "$MANIFEST_HELPER" agibot \
+        --root "$DATA_ROOT/agibot" \
+        --output "$DATA_ROOT/agibot/manifest.csv" \
+        --limit "$AGIBOT_LIMIT" \
+        --dataset-id scr
     else
-      { echo "task_id,episode_id,dataset"
-        for t in "$DATA_ROOT/agibot/observations"/*/; do
-          [ -d "$t" ] || continue; tid=$(basename "$t")
-          for e in "$t"*/; do [ -d "$e" ] && echo "${tid},$(basename "$e"),scr"; done
-        done | cap - "$AGIBOT_LIMIT"
-      } > "$DATA_ROOT/agibot/manifest.csv"
-      log "  agibot : $(( $(wc -l < "$DATA_ROOT/agibot/manifest.csv") - 1 )) episodes (enumerated, limit=$AGIBOT_LIMIT)"
+      [ -s "$DATA_ROOT/agibot/manifest.csv" ] || die \
+        "AgiBot manifest missing/empty. Supply the curated extracted/aligned manifest, or set REBUILD_AGIBOT_MANIFEST=1 after preparation."
+      log "agibot: preserving curated manifest; strict validation will enforce cap=$AGIBOT_LIMIT and aligned assets"
     fi
   fi
 
-  if [ "$DROID_ENABLE" = 1 ] && [ -d "$DATA_ROOT/droid_lerobot/data" ]; then
-    log "  droid  : $(find "$DATA_ROOT/droid_lerobot/data" -name 'episode_*.parquet' 2>/dev/null | wc -l) v2.1 episodes (no manifest; loader globs them)"
+  if [ "$DROID_ENABLE" = 1 ]; then
+    [ -d "$DATA_ROOT/droid_lerobot/data" ] || die "DROID data directory missing: $DATA_ROOT/droid_lerobot/data"
+    log "droid: no manifest; strict validation will inspect the loader glob with cap=$DROID_LIMIT"
   fi
 }
 
 # ─── 5. Write a sourceable env file (configs read these vars at train time) ───
 write_env() {
   local f="$REPO_DIR/.lacwm_env"
-  cat > "$f" <<EOF
-# Source before training/eval so configs resolve to this server's paths.
-# (Only needed if BASE != /scr/ravenh; otherwise the config defaults already match.)
-export LACWM_DATA="$LACWM_DATA"
-export LACWM_RUNS="$LACWM_RUNS"
-export WAN_DIR="$WAN_DIR"
-export VIDEOX_HOME="$VIDEOX_HOME"
-EOF
+  {
+    printf '%s\n' '# Source before training/evaluation so configs resolve to this server paths.'
+    printf 'export LACWM_DATA=%q\n' "$LACWM_DATA"
+    printf 'export LACWM_RUNS=%q\n' "$LACWM_RUNS"
+    printf 'export WAN_DIR=%q\n' "$WAN_DIR"
+    printf 'export VIDEOX_HOME=%q\n' "$VIDEOX_HOME"
+    printf 'export LACWM_PYTHON=%q\n' "$PYTHON_BIN"
+    printf 'export LACWM_BASE=%q\n' "$BASE"
+  } > "$f"
   log "wrote $f  (run 'source $f' before launching training)"
 }
 
-# ─── 6. Validate + launch hint ────────────────────────────────────────────────
+# ─── 6. Strict validation gate + launch hint ─────────────────────────────────
 validate() {
-  log "Validating"
-  local ok=1
-  for f in "$WAN_DIR/Wan2.1_VAE.pth" "$WAN_DIR/diffusion_pytorch_model.safetensors" \
-           "$WAN_DIR/null_prompt_umt5.pt" "$VIDEOX_DIR/config/wan2.1/wan_civitai.yaml"; do
-    [ -e "$f" ] && echo "  ok  $f" || { echo "  MISSING  $f"; ok=0; }
-  done
-  [ "$EGODEX_ENABLE" = 1 ] && { [ -f "$DATA_ROOT/egodex_cdn/manifest.csv" ] && echo "  ok  egodex manifest" || { echo "  MISSING egodex manifest"; ok=0; }; }
-  [ "$ABC_ENABLE" = 1 ]    && { [ -f "$DATA_ROOT/abc_pp/manifest.txt" ]     && echo "  ok  abc manifest"    || { echo "  MISSING abc manifest"; ok=0; }; }
-  [ "$AGIBOT_ENABLE" = 1 ] && { [ -f "$DATA_ROOT/agibot/manifest.csv" ]     && echo "  ok  agibot manifest" || { echo "  MISSING agibot manifest"; ok=0; }; }
-  [ "$DROID_ENABLE" = 1 ]  && { [ -d "$DATA_ROOT/droid_lerobot/data" ]      && echo "  ok  droid data"      || { echo "  MISSING droid data"; ok=0; }; }
-  [ "$ok" = 1 ] && log "Validation passed." || warn "Validation found gaps (see above + any [PREP] notes)."
+  require_runtime
+  log "Validating exact runtime/assets, manifests, fields, views, and production counts"
+  VIDEOX_HOME="$VIDEOX_HOME" \
+  PYTHONPATH="$REPO_DIR/tools/env/videox_shim:$VIDEOX_HOME:$REPO_DIR/projects/latent_action_models:$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" "$REPO_DIR/tools/env/verify_b200_runtime.py" --wan-dir "$WAN_DIR"
+
+  [ "$(enabled_dataset_count)" -gt 0 ] || die \
+    "no datasets enabled; explicitly set the datasets that must pass the launch gate"
+
+  local datasets=() validator_args=(--data-root "$DATA_ROOT" --workers "$VALIDATE_WORKERS")
+  if [ "$DROID_ENABLE" = 1 ]; then
+    datasets+=(droid)
+    validator_args+=(--droid-cap "$DROID_LIMIT" --droid-expected "$DROID_LIMIT")
+  fi
+  if [ "$EGODEX_ENABLE" = 1 ]; then
+    datasets+=(egodex)
+    validator_args+=(--egodex-cap "$EGODEX_LIMIT" --egodex-expected "$EGODEX_LIMIT")
+  fi
+  if [ "$AGIBOT_ENABLE" = 1 ]; then
+    datasets+=(agibot)
+    # The Hydra loader cap is 10k; the curated official corpus contains 5,671.
+    validator_args+=(--agibot-cap 10000 --agibot-expected "$AGIBOT_LIMIT")
+  fi
+  if [ "$ABC_ENABLE" = 1 ]; then
+    datasets+=(abc)
+    validator_args+=(--abc-cap "$ABC_LIMIT" --abc-expected "$ABC_LIMIT")
+  fi
+
+  "$PYTHON_BIN" "$DATA_VALIDATOR" "${validator_args[@]}" --datasets "${datasets[@]}" || die \
+    "strict training-data preflight failed; no training launch should proceed"
+  log "Strict validation passed."
   cat <<EOF
 
-Launch (from $REPO_DIR/projects/latent_action_models):
-  source $REPO_DIR/.lacwm_env          # if BASE != /scr/ravenh (else optional)
-  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \\
-  torchrun --standalone --nproc_per_node=8 train.py \\
-    +experiments_0908=ravenhuang/wan-dit/wan_dit_abc_agibot_droid_egodex.yaml \\
-    data_loader.batch_size=16
-  (smoke: +experiments_0908=ravenhuang/wan-dit/wan_dit_smoke.yaml)
+Next gates:
+  source $REPO_DIR/.lacwm_env
+  source $ENV_DIR/bin/activate
+  source $REPO_DIR/tools/env/activate_b200.sh
+  Review $REPO_DIR/tools/README.md, then run the real-data gradient smoke and
+  guarded tools/launch_8xb200.sh dry run. Do not bypass those launch gates.
 EOF
 }
 
-case "${1:-all}" in
+ACTION="${1:-all}"
+validate_config "$ACTION"
+
+case "$ACTION" in
   all)       setup_env; fetch_weights; fetch_datasets; make_manifests; write_env; validate ;;
   env)       setup_env ;;
   weights)   fetch_weights ;;

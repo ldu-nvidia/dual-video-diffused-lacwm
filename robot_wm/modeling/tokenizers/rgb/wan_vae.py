@@ -76,6 +76,17 @@ class WanVAETokenizer(RGBTokenizer):
         for p in self.model.parameters():
             p.requires_grad = False
 
+    def train(self, mode: bool = True):
+        """Keep the frozen VAE deterministic when the parent model trains.
+
+        ``nn.Module.train()`` recurses into every child.  Without this override,
+        ``Trainer.train()`` would undo the explicit ``self.model.eval()`` above
+        even though the VAE parameters remain frozen.
+        """
+        super().train(mode)
+        self.model.eval()
+        return self
+
     @property
     def scale_factors(self) -> Sequence[int]:
         return (self.spatial_ratio, self.spatial_ratio)

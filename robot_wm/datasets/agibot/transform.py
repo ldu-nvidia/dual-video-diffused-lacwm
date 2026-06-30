@@ -21,6 +21,10 @@ from robot_wm.datasets.utils import _get_T_delta, quat_to_rot_mat, rot_mat_to_ro
 
 logger = logging.getLogger(__name__)
 
+
+def _identity(x):
+    return x
+
 AGIBOT_RGB_CAMERAS = [
     "head_color",
     # "hand_right_color",
@@ -262,12 +266,12 @@ class AgibotTransform(Transform):
                 (
                     transforms.Resize(tuple(int(x) for x in resize_to))
                     if resize_to is not None
-                    else transforms.Lambda(lambda x: x)
+                    else transforms.Lambda(_identity)
                 ),  # resize
                 (
                     transforms.Normalize(mean=mean, std=std, inplace=True)
                     if mean is not None
-                    else transforms.Lambda(lambda x: x)
+                    else transforms.Lambda(_identity)
                 ),  # normalize
             ]
         )

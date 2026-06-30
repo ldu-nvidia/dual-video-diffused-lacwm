@@ -17,6 +17,7 @@ dataset: &ds
   seed: ${seed}
   infinite: true
   img_augment: True
+  emit_crop_rgb: false
   transform:
     sample_size: 13
     chunk_size: 5
@@ -67,12 +68,6 @@ model:
     _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
     num_embeddings: 10
     embedding_dim: 64
-  loss_scheduler:
-    pretrain_steps: 0
-    warmup_steps: 100
-    total_steps: ${trainer.config.max_iter}
-    losses: ["teacher-forcing"]
-    seed: ${seed}
   config:
     flow_loss_on_future_only: true
 

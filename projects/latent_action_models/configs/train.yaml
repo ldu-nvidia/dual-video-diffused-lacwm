@@ -9,7 +9,9 @@ defaults:
   - wandb@wandb: default
   - override hydra/job_logging: custom
   - override hydra/output: custom
-  - override hydra/launcher: full_node
+  # Launch distribution explicitly with torchrun.  Keeping Hydra's built-in
+  # launcher avoids an implicit dependency on hydra-submitit/Slurm for local
+  # and single-node DGX B200 runs.
 
 name: ???
 seed: 1234
@@ -52,6 +54,10 @@ trainer:
   viz_data_loader: ${viz_data_loader}
   config:
     max_iter: ???
+    # Number of physical microbatches whose gradients form one optimizer update.
+    # Experiments that need accumulation override this; one preserves the
+    # historical one-batch-per-update behavior.
+    gradient_accumulation_steps: 1
     logging:
       log_every: 50
     saving:

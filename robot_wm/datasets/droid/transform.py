@@ -18,6 +18,30 @@ from robot_wm.datasets.utils import _get_T_delta, euler_to_rot_6d, random_wrist_
 
 logger = logging.getLogger(__name__)
 
+
+def _divide_255(x):
+    return x / 255.0
+
+
+def _multiply_255(x):
+    return x * 255.0
+
+
+def _thwc_to_tchw(x):
+    return x.permute(0, 3, 1, 2)
+
+
+def _tchw_to_thwc(x):
+    return x.permute(0, 2, 3, 1)
+
+
+def _identity(x):
+    return x
+
+
+def _clamp_01(x):
+    return x.clamp(0, 1)
+
 DROID_RGB_CAMERAS = [
     "wrist_image_left",
     "exterior_image_1_left",
@@ -146,14 +170,14 @@ class DroidTransform(Transform):
 
         self._rgb_transform = transforms.Compose(
             [
-                transforms.Lambda(lambda x: x / 255.0),
-                transforms.Lambda(lambda x: x.permute(0, 3, 1, 2)),  # (T, C, H, W)
+                transforms.Lambda(_divide_255),
+                transforms.Lambda(_thwc_to_tchw),  # (T, C, H, W)
                 transforms.Resize(tuple(int(x) for x in resize_to))
                 if resize_to is not None
-                else transforms.Lambda(lambda x: x),  # resize
+                else transforms.Lambda(_identity),  # resize
                 transforms.Normalize(mean=mean, std=std, inplace=True)
                 if mean is not None
-                else transforms.Lambda(lambda x: x.clamp(0, 1)),  # normalize
+                else transforms.Lambda(_clamp_01),  # normalize
             ]
         )
         self._state_transform = transforms.Identity()
@@ -359,18 +383,14 @@ class DroidTransform(Transform):
                 H_c, W_c = int(H * ratio), int(W * ratio)
                 tf_crop_then_resize_to_original = transforms.Compose(
                     [
-                        transforms.Lambda(
-                            lambda x: x.permute(0, 3, 1, 2)
-                        ),  # (T, C, H, W)
-                        transforms.Lambda(lambda x: x / 255.0),  # normalize to [0, 1]
+                        transforms.Lambda(_thwc_to_tchw),  # (T, C, H, W)
+                        transforms.Lambda(_divide_255),  # normalize to [0, 1]
                         transforms.RandomCrop(
                             (H_c, W_c)
                         ),  # , generator=self._gen), no generator arg
                         transforms.Resize((H, W)),  # resize to original size
-                        transforms.Lambda(lambda x: x * 255.0),  # rescale to [0, 255]
-                        transforms.Lambda(
-                            lambda x: x.permute(0, 2, 3, 1)
-                        ),  # (T, H, W, C)
+                        transforms.Lambda(_multiply_255),  # rescale to [0, 255]
+                        transforms.Lambda(_tchw_to_thwc),  # (T, H, W, C)
                     ]
                 )
                 rgb_np = tf_crop_then_resize_to_original(

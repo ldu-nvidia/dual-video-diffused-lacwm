@@ -37,7 +37,7 @@ class ExplicitActionDiTModel(LatentActionDiTModel):
         """Encode the future GT action chunks directly into the latent action.
         Returns (z_future, z_control, future_tokens=None); no action-decoding supervision."""
         assert actions is not None, "ExplicitActionDiTModel requires GT actions"
-        fut = actions[:, self.num_history_frames:]              # [N, num_future, chunk, action_dim]
+        fut = self._future_action_chunks(actions)               # [N, num_future, chunk, action_dim]
         if self.morphology_tokens is not None and morphology_index is not None:
             morph_emb = self.morphology_tokens(morphology_index)  # [N, morph_dim]
         else:

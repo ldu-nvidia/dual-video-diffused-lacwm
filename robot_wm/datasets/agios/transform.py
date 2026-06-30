@@ -18,6 +18,22 @@ from robot_wm.datasets.utils import _get_T_delta, gram_schmidt
 
 logger = logging.getLogger(__name__)
 
+
+def _divide_255(x):
+    return x / 255.0
+
+
+def _thwc_to_tchw(x):
+    return x.permute(0, 3, 1, 2)
+
+
+def _identity(x):
+    return x
+
+
+def _clamp_01(x):
+    return x.clamp(0, 1)
+
 AGIOS_RGB_CAMERAS = [
     "ego_centric_image",
     "wrist_image_left",
@@ -160,16 +176,16 @@ class AgiosTransform(DroidTransform):
         self._num_views = num_views
         self._rgb_transform = transforms.Compose(
             [
-                transforms.Lambda(lambda x: x / 255.0),
-                transforms.Lambda(lambda x: x.permute(0, 3, 1, 2)),  # (T, C, H, W)
+                transforms.Lambda(_divide_255),
+                transforms.Lambda(_thwc_to_tchw),  # (T, C, H, W)
                 ResizeThenCenterCrop(
                     target_height=resize_to[0], target_width=resize_to[1]
                 )
                 if resize_to is not None
-                else transforms.Lambda(lambda x: x),  # resize
+                else transforms.Lambda(_identity),  # resize
                 transforms.Normalize(mean=mean, std=std, inplace=True)
                 if mean is not None
-                else transforms.Lambda(lambda x: x.clamp(0, 1)),  # normalize
+                else transforms.Lambda(_clamp_01),  # normalize
             ]
         )
 

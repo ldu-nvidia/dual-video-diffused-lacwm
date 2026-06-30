@@ -46,9 +46,13 @@ Two variants share the same skeleton:
   width-stacked per frame (180×960).
 - **Latent actions**: exactly `num_future` (8) actions, one per future transition, from
   a 9-frame window `[last history frame | 8 future frames]`. A learnable MLP
-  (`action_pool`) pools the per-latent-frame actions into the control channel.
+  (`action_pool`) pools the per-latent-frame actions into the control channel. Because
+  dataset action chunk `i` moves sampled frame `i` to `i+1`, supervision/explicit
+  conditioning uses chunks 4–11 for the five-history/eight-future layout.
 - **Masked flow loss**: masked/missing camera views (constant pixels) and zero-padded
   frames (short trajectories) are kept as *inputs* but excluded from supervision.
+  The masked pixel mean is computed per sample before batch averaging, so a
+  three-view robot does not automatically receive three times EgoDex's weight.
 - **Flow matching**: `noisy=(1-σ)x+σ·noise`, `target=noise-x`, logit-normal timesteps,
   `FlowMatchEulerDiscreteScheduler`. Text conditioning is a cached null umT5 embedding
   (no T5 in the train loop).
@@ -59,114 +63,171 @@ Two variants share the same skeleton:
 
 ## Setup
 
-Built and run on `ravenh@38.213.24.3` (8×B200), conda env `lacwm-dit`.
+The supported training stack is native **PyTorch 2.7.1 + CUDA 12.8**, launched
+with `torchrun`/NCCL DDP. The 1.3B backbone fits on each B200 and only the LoRA and
+robot-conditioning modules are trainable, so Megatron tensor/pipeline parallelism
+would add conversion and communication complexity without solving a memory problem.
 
-To provision a **new server** in one shot (env + weights + VideoX-Fun + datasets +
-manifests + validation), use [`setup_training.sh`](setup_training.sh) — see **Data** below.
-The manual steps here are what it automates.
+Create the exact environment, activate the pinned VideoX-Fun overlay, and prepare
+the official Wan assets from the repo root:
 
-1. **Environment** — Python 3.10 + PyTorch 2.7.1 (cu128). One-shot from the repo root:
+```bash
+tools/env/create_b200_env.sh
+source /mnt/data2/$USER/lacwm_runtime/envs/lacwm-b200-py310/bin/activate
+source tools/env/activate_b200.sh
+tools/env/prepare_wan_assets.sh --device cuda:0
+python tools/env/verify_b200_runtime.py --expected-gpus 8 --require-b200 \
+  --wan-dir "$WAN_DIR"
+```
+
+The scripts pin Python packages, VideoX-Fun commit
+`1d6d9c3e1540968466937129fef4b288041e06de`, and Wan model revision
+`ce96ebd52b1134d2c8a903ceb491ab27aa1e5b7c`. Large environments, model assets,
+data, and outputs default to `/mnt/data2/$USER/lacwm_runtime`; override
+`LACWM_BASE` to use another `/mnt/data1` or `/mnt/data2` volume. If the host does
+not already provide Python 3.10.20, the environment script checksum-verifies and
+installs pinned `uv` 0.10.9 under that runtime volume, then uses it to provision
+the exact Python patch release without changing shell profiles.
+
+`environment.yaml` remains a Conda convenience definition, but the B200 scripts
+above are the canonical, fully validated path. To use the Conda alternative:
+
+1. **Environment** — Python 3.10.20 + PyTorch 2.7.1 (cu128):
    ```bash
-   conda env create -f environment.yaml   # env "lacwm-dit": cu128 torch + requirements.txt + this package
+   conda env create -f environment.yaml
    conda activate lacwm-dit
+   export LACWM_BASE=/mnt/data2/$USER/lacwm_runtime
+   export VIDEOX_HOME=$LACWM_BASE/VideoX-Fun-1d6d9c3
+   VIDEOX_HOME="$VIDEOX_HOME" tools/env/prepare_videox_fun.sh
+   source tools/env/activate_b200.sh
+   ENV_DIR="$CONDA_PREFIX" tools/env/prepare_wan_assets.sh --device cuda:0
+   python tools/env/verify_b200_runtime.py --expected-gpus 8 --require-b200 \
+     --wan-dir "$WAN_DIR"
    ```
-   or manually:
-   ```bash
-   conda create -n lacwm-dit python=3.10 && conda activate lacwm-dit
-   pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
-   pip install -r requirements.txt && pip install -e .
-   ```
-2. **VideoX-Fun** (provides `videox_fun.models.*`): cloned at `/scr/ravenh/VideoX-Fun`.
-   Import the submodules directly (e.g. `from videox_fun.models.wan_vae import
-   AutoencoderKLWan`) to avoid the librosa-heavy package `__init__`.
+2. **VideoX-Fun** supplies `videox_fun.models.*`; use the pinned checkout and
+   namespace overlay prepared by the commands above.
 3. **Weights** — `alibaba-pai/Wan2.1-Fun-1.3B-Control` (VideoX-Fun single-file format)
-   at `/scr/ravenh/wan_fun_1.3b_control/` (DiT `safetensors`, `Wan2.1_VAE.pth`, umT5/CLIP).
-   The cached null-prompt embedding is `null_prompt_umt5.pt` in that dir.
-4. **Data** — the 4 datasets under `/scr/ravenh/lacwm_data/` (`abc_pp`, `agibot`,
+   under `$WAN_DIR`. `prepare_wan_assets.sh` generates the cached
+   `null_prompt_umt5.pt`; the 11 GB text encoder is not loaded during training.
+4. **Data** — the 4 datasets under `$LACWM_DATA` (`abc_pp`, `agibot`,
    `droid_lerobot`, `egodex_cdn`). The active run uses 35,671 episodes (DROID 10k,
    EgoDex 10k, ABC 10k, Agibot 5,671). See **Data** below for sources + the setup script.
 
 ## Data
 
-`setup_training.sh` provisions a fresh server end-to-end (env, weights, VideoX-Fun,
-datasets, manifests, path repointing, validation):
+`setup_training.sh` provisions the environment, manifests, paths, and validation,
+but dataset downloads are deliberately opt-in. A bare invocation uses `FETCH=skip`
+with every dataset disabled and cannot start a multi-terabyte transfer.
 
 ```bash
-# download from the public sources, with per-dataset toggles + caps:
-./setup_training.sh
-AGIBOT_LIMIT=2000 EGODEX_PARTS=part2 ABC_ENABLE=0 ./setup_training.sh
+# Explicit finite DROID download (10 chunks, approximately 10k episodes):
+FETCH=download ALLOW_DATA_DOWNLOAD=1 DROID_ENABLE=1 DROID_LIMIT=10000 \
+  ./setup_training.sh datasets
 
-# just (re)generate manifests on data already in place:
-./setup_training.sh manifests
+# Build manifests for already prepared data, then run the strict launch gate:
+FETCH=skip DROID_ENABLE=1 EGODEX_ENABLE=1 EGODEX_PARTS=part2 AGIBOT_ENABLE=1 ABC_ENABLE=1 \
+  ./setup_training.sh manifests
+FETCH=skip DROID_ENABLE=1 EGODEX_ENABLE=1 AGIBOT_ENABLE=1 ABC_ENABLE=1 \
+  ./setup_training.sh validate
+
+# Run the validator directly (read-only; exits nonzero on any gap):
+python tools/validate_training_data.py --data-root "$LACWM_DATA"
 ```
 
-Each dataset has `<DS>_ENABLE` (1/0) and `<DS>_LIMIT` (episodes kept in the manifest;
-`all` = no cap), plus download-volume knobs (`AGIBOT_TASKS`, `EGODEX_PARTS`; DROID volume
-follows `DROID_LIMIT` → `ceil(limit/1000)` chunks).
+Each dataset has `<DS>_ENABLE` (default `0`) and a required positive finite
+`<DS>_LIMIT`; `all` is rejected. DROID volume follows `DROID_LIMIT` →
+`ceil(limit/1000)` chunks. EgoDex additionally requires explicit `EGODEX_PARTS`;
+downloads also require an `EGODEX_SHA256_PLAN` with one trusted `<part> <sha256>`
+line per archive because the upstream project does not publish checksums.
+ABC requires `ABC_DOWNLOAD_PLAN`, containing exactly `ABC_LIMIT` Hugging Face
+`episode.mcap` paths. Automatic AgiBot download is blocked because archive extraction
+and generation of `*_aligned.json` camera parameters need an explicit external plan;
+provide an extracted/aligned tree and use `FETCH=skip`.
 
 ### Paths (no hardcoded locations)
 
-All filesystem locations are env-driven — the configs read them via `${oc.env:VAR,default}`
-and the Python defaults via `os.environ.get(VAR, default)`, with defaults matching `/scr/ravenh`:
+All filesystem locations are environment-driven. `source tools/env/activate_b200.sh`
+sets the canonical defaults:
 
 | Var | Default | What |
 |---|---|---|
-| `LACWM_DATA` | `/scr/ravenh/lacwm_data` | dataset root |
-| `LACWM_RUNS` | `/scr/ravenh/lacwm_runs` | training outputs (run dirs) |
-| `WAN_DIR` | `/scr/ravenh/wan_fun_1.3b_control` | Wan weights + null prompt |
-| `VIDEOX_HOME` | `/scr/ravenh/VideoX-Fun` | VideoX-Fun library |
+| `LACWM_DATA` | `/mnt/data2/$USER/lacwm_runtime/data` | dataset root |
+| `LACWM_RUNS` | `/mnt/data2/$USER/lacwm_runtime/runs` | training outputs |
+| `WAN_DIR` | `/mnt/data2/$USER/lacwm_runtime/wan_fun_1.3b_control` | Wan weights + null prompt |
+| `VIDEOX_HOME` | `/mnt/data2/$USER/lacwm_runtime/VideoX-Fun-1d6d9c3` | pinned VideoX-Fun |
 
 To relocate, set `BASE` (or the individual vars) when running `setup_training.sh`; it writes
-`.lacwm_env` with the exports — `source .lacwm_env` before launching training/eval. On a box
-that already uses `/scr/ravenh`, nothing is needed (defaults match).
+`.lacwm_env` with the exports. Source that file before training/evaluation.
 
-### Sources & expected layout (under `$LACWM_DATA`, default `/scr/ravenh/lacwm_data`)
+### Sources & expected layout (under `$LACWM_DATA`)
 
 | Dataset | Source | On-disk layout (what the loader reads) | Notes |
 |---|---|---|---|
 | DROID | [cadene/droid](https://huggingface.co/datasets/cadene/droid) | `droid_lerobot/{data,meta,videos}`, `data/chunk-*/episode_*.parquet` | LeRobot **v2.1**, loads directly. (`lerobot/droid_1.0.1` is **v3.0** file-packed parquet and is *not* loadable as-is.) `DROID_LIMIT` → `ceil(limit/1000)` chunks |
-| Agibot | [agibot-world/AgiBotWorld-Alpha](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Alpha) | `agibot/{observations,proprio_stats,parameters,task_info}/<task>/<ep>` | layout matches directly; loader uses `*_aligned.json` camera params (may need an alignment prep step) |
+| Agibot | [agibot-world/AgiBotWorld-Alpha](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Alpha) | `agibot/{observations,proprio_stats,parameters,task_info}/<task>/<ep>` | must be extracted before use; loader requires `*_aligned.json` camera params. Automatic setup download is blocked until that external preparation is complete |
 | EgoDex | [apple/ml-egodex](https://github.com/apple/ml-egodex) (zips on Apple's CDN) | `egodex_cdn/<part>/<task>/<n>.hdf5` | direct, no preprocessing; the active run used `part2.zip` |
-| ABC | [XDOF/ABC-130k](https://huggingface.co/datasets/XDOF/ABC-130k) | `abc_pp/<task>/episode_*/{top,left_wrist,right_wrist}.mp4 + states.npz` | HF ships raw `episode.mcap`; the setup script auto-runs the mcap→`abc_pp` preprocessor (`abc/preprocessing/abc_batch_preprocess.py`, needs `mcap`+`mcap-protobuf-support`). Heavy (~130k episodes). |
+| ABC | [XDOF/ABC-130k](https://huggingface.co/datasets/XDOF/ABC-130k) | `abc_pp/<task>/episode_*/{top,left_wrist,right_wrist}.mp4 + states.npz` | HF ships raw `episode.mcap`; setup downloads only paths explicitly listed in `ABC_DOWNLOAD_PLAN`, then runs the mcap→`abc_pp` preprocessor |
 
 ### Manifests
 
 Loaders read manifests of **absolute** paths, so they are regenerated per server by
 `./setup_training.sh manifests` (never copy egodex/abc manifests between machines):
 - `egodex_cdn/manifest.csv` — one `*.hdf5` path per line (enumerated from the data)
-- `abc_pp/manifest.txt` — one `episode_*` dir per line (enumerated)
+- `abc_pp/manifest.success.txt` — atomic preprocessing provenance containing only
+  episodes with `states.npz` and all three MP4s
+- `abc_pp/manifest.txt` — finite runtime manifest derived only from the success
+  manifest; partial `episode_*` directories are never enumerated
 - `agibot/manifest.csv` — `task_id,episode_id,dataset` (path-portable; an existing curated
-  manifest, e.g. the active run's 5,671-episode subset, is preserved when present and
-  uncapped, otherwise regenerated from the downloaded tasks)
+  manifest, e.g. the active run's 5,671-episode subset, is preserved by default;
+  `REBUILD_AGIBOT_MANIFEST=1` requires a complete extracted/aligned tree)
 - DROID needs no manifest — the loader globs `data/chunk-*/episode_*.parquet`
 
 ## Training
 
-Launch scripts live in `/scr/ravenh/`. From `projects/latent_action_models/`:
+Use the fail-closed wrappers in `tools/`; see `tools/README.md` for every option.
+First validate gradients on one idle GPU with real samples from all four datasets:
 
 ```bash
-# smoke test (tiny, single GPU)
-/scr/ravenh/run_wan_smoke.sh
-
-# full latent-action run (8 GPU, batch per-GPU = first arg)
-/scr/ravenh/run_wan_full.sh 16
-# == torchrun --standalone --nproc_per_node=8 train.py \
-#      +experiments_0908=ravenhuang/wan-dit/wan_dit_abc_agibot_droid_egodex.yaml \
-#      data_loader.batch_size=16
-
-# explicit action-conditioned variant
-/scr/ravenh/run_wan_explicit_smoke.sh
-# full: +experiments_0908=ravenhuang/wan-dit/wan_dit_explicit_abc_agibot_droid_egodex.yaml
+tools/run_gradient_smoke.sh \
+  --gpu 0 --variant latent --data-mode real \
+  --python "$LACWM_PYTHON" --wan-dir "$WAN_DIR" \
+  --videox-home "$VIDEOX_HOME" --data-root "$LACWM_DATA" \
+  --run-root "$LACWM_RUNS" --wandb-mode disabled --execute
 ```
 
-Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. If the NVLink fabric is flaky,
-add `NCCL_P2P_DISABLE=1` (LoRA grads are small, so the PCIe fallback is cheap). To run on
-fewer GPUs, e.g. with a dead device: `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 ...
---nproc_per_node=7`. Resume a crashed run with `--resume` (loads `snapshot.pt`).
+Then run the strict data validator and preview the full command. The wrapper requires
+eight idle B200s, exact runtime/assets, a clean Git tree, a recent fingerprint-bound
+data report, and a real-data gradient report from the same commit. Before the long run
+it executes both an eight-rank NCCL probe and three real-data accumulated DDP
+optimizer/scheduler updates using the production physical microbatch and loader settings:
 
-Outputs (checkpoints, val losses, viz mp4s) land in `/scr/ravenh/lacwm_runs/<name>/<date>/`.
-Metrics log to wandb project `lacwm`. Validation/viz run every 1000 iters; viz renders a
-`[ground-truth | predicted]` future-frame strip via the flow-matching sampler.
+```bash
+mkdir -p "$LACWM_RUNS"
+python tools/validate_training_data.py --data-root "$LACWM_DATA" --workers 16 --json \
+  > "$LACWM_RUNS/data_validation.json"
+
+tools/launch_8xb200.sh \
+  --gpus 0,1,2,3,4,5,6,7 --variant latent \
+  --python "$LACWM_PYTHON" --wan-dir "$WAN_DIR" \
+  --videox-home "$VIDEOX_HOME" --data-root "$LACWM_DATA" \
+  --run-root "$LACWM_RUNS" --run-name lacwm_latent_v1 \
+  --smoke-report /path/to/gradient_report.json \
+  --data-validation-report "$LACWM_RUNS/data_validation.json" \
+  --wandb-mode offline --wandb-project lacwm
+# Add --execute only after reviewing the dry run.
+```
+
+Resume an interrupted wrapper-owned run with the same arguments plus
+`--resume --execute`; atomic `snapshot.pt` replacement prevents a partial checkpoint from
+becoming the live resume file.
+
+For shared Slurm clusters with shorter wall-time slots, use
+`tools/slurm/submit_8xb200.sh`. The Trainer retains the configured periodic checkpoint
+cadence and additionally performs an exact-state checkpoint when Slurm gives advance
+notice. The batch job self-requeues only after the durable checkpoint ACK, then selects
+`--resume` automatically on the next allocation. See
+[`tools/slurm/README.md`](tools/slurm/README.md); the run directory must be on storage
+shared by every eligible B200 node.
 
 ## Layout (Wan-DiT additions)
 
@@ -195,4 +256,6 @@ top of each file above for the precise tensor shapes and conditioning layout.
   `num_future == (Fp-K)·temporal_ratio` so the learnable action pool aligns to latent frames.
 - `dataset.img_augment` — on for train, off for val/viz; augmentation is applied in `[0,1]`
   before re-normalizing to `[-1,1]`.
-- `data_loader.batch_size` — per-GPU; the full run uses 16 on B200.
+- `data_loader.batch_size` — physical per-GPU microbatch; the 80 GiB latent profile
+  uses 4 with `trainer.config.gradient_accumulation_steps=4`. Across eight ranks the
+  effective global batch remains `4 × 4 × 8 = 128` samples per optimizer update.
