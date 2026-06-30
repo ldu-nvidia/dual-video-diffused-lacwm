@@ -1,6 +1,0 @@
-# @package hydra
-run:
-  dir: ${oc.env:CORTEX_SHARE_DIR}/${oc.env:USER}/experiments/robot-actions/${now:%Y-%m-%d}_${now:%H-%M-%S}_${name}
-sweep:
-  dir: ${oc.env:CORTEX_SHARE_DIR}/${oc.env:USER}/experiments/robot-actions/${now:%Y-%m-%d}_${now:%H-%M-%S}_${name}
-  subdir: ${hydra.job.num}

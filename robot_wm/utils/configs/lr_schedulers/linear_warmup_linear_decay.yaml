@@ -1,7 +1,0 @@
-_target_: torch.optim.lr_scheduler.LambdaLR
-_partial_: true
-lr_lambda:
-  _target_: robot_wm.utils.lr_schedulers.linear_warmup_linear_decay
-  _partial_: true
-  warmup_steps: ???
-  total_steps: ???
