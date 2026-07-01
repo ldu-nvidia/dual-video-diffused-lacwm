@@ -10,9 +10,9 @@
 # Data is opt-in. The default is FETCH=skip with every dataset disabled, so a
 # bare invocation cannot start a multi-terabyte transfer. Downloads require:
 #   FETCH=download ALLOW_DATA_DOWNLOAD=1 <DATASET>_ENABLE=1
-# plus a finite per-dataset limit. ABC additionally requires an exact file plan;
-# AgiBot archive download is blocked until extraction/alignment is handled outside
-# this script and the extracted tree is supplied with FETCH=skip.
+# plus a finite per-dataset limit. ABC and AgiBot additionally require exact,
+# reviewed file plans. AgiBot's plan pins each official archive by SHA-256; the
+# preparer extracts genuine aligned camera/base streams and refuses synthesis.
 #
 # Public sources:
 #   DROID   https://huggingface.co/datasets/cadene/droid   (LeRobot v2.1, matches the loader;
@@ -27,6 +27,9 @@
 #   FETCH=download WAN_ASSET_DEVICE=cuda:0 ./setup_training.sh weights
 #   FETCH=download ALLOW_DATA_DOWNLOAD=1 DROID_ENABLE=1 DROID_LIMIT=10000 \
 #     ./setup_training.sh datasets
+#   FETCH=download ALLOW_DATA_DOWNLOAD=1 AGIBOT_ENABLE=1 AGIBOT_LIMIT=5671 \
+#     AGIBOT_ARCHIVE_PLAN=/path/to/agibot_archives.plan \
+#     AGIBOT_EPISODE_PLAN=/path/to/agibot_episodes.csv ./setup_training.sh datasets
 #   FETCH=skip DROID_ENABLE=1 EGODEX_ENABLE=1 AGIBOT_ENABLE=1 ABC_ENABLE=1 \
 #     ./setup_training.sh manifests
 #   ./setup_training.sh manifests       # (re)generate manifests for present data
@@ -65,11 +68,16 @@ EGODEX_PARTS="${EGODEX_PARTS:-}"               # explicit space-separated part1.
 EGODEX_SHA256_PLAN="${EGODEX_SHA256_PLAN:-}"   # lines: <part> <sha256>, required for downloads
 ABC_DOWNLOAD_PLAN="${ABC_DOWNLOAD_PLAN:-}"     # exact HF paths, one episode.mcap per line
 ABC_SUCCESS_MANIFEST="${ABC_SUCCESS_MANIFEST:-$DATA_ROOT/abc_pp/manifest.success.txt}"
+AGIBOT_ARCHIVE_PLAN="${AGIBOT_ARCHIVE_PLAN:-}" # lines: <section> <HF .tar path> <sha256>
+AGIBOT_EPISODE_PLAN="${AGIBOT_EPISODE_PLAN:-}" # exact task_id,episode_id[,dataset] CSV
+AGIBOT_RAW_ROOT="${AGIBOT_RAW_ROOT:-$DATA_ROOT/agibot_raw}"
+AGIBOT_SUCCESS_MANIFEST="${AGIBOT_SUCCESS_MANIFEST:-$DATA_ROOT/agibot/manifest.success.csv}"
 REBUILD_AGIBOT_MANIFEST="${REBUILD_AGIBOT_MANIFEST:-0}"
 DELETE_ARCHIVES_AFTER_EXTRACT="${DELETE_ARCHIVES_AFTER_EXTRACT:-0}"
 VALIDATE_WORKERS="${VALIDATE_WORKERS:-16}"
 MANIFEST_HELPER="$REPO_DIR/tools/build_training_manifests.py"
 DATA_VALIDATOR="$REPO_DIR/tools/validate_training_data.py"
+AGIBOT_PREPARER="$REPO_DIR/tools/prepare_agibot.py"
 # ──────────────────────────────────────────────────────────────────────────────
 
 log()  { printf '\033[1;32m[setup]\033[0m %s\n' "$*"; }
@@ -108,6 +116,7 @@ validate_config() {
   require_positive_int VALIDATE_WORKERS "$VALIDATE_WORKERS"
   [ -s "$MANIFEST_HELPER" ] || die "missing manifest helper: $MANIFEST_HELPER"
   [ -s "$DATA_VALIDATOR" ] || die "missing data validator: $DATA_VALIDATOR"
+  [ -s "$AGIBOT_PREPARER" ] || die "missing AgiBot preparer: $AGIBOT_PREPARER"
 
   if [ "$action" = all ] || [ "$action" = validate ]; then
     [ "$DROID_ENABLE" = 1 ] && [ "$EGODEX_ENABLE" = 1 ] && \
@@ -122,8 +131,16 @@ validate_config() {
     [ "$(enabled_dataset_count)" -gt 0 ] || die \
       "FETCH=download requires at least one explicit <DATASET>_ENABLE=1"
     require_download_ack
-    [ "$AGIBOT_ENABLE" = 0 ] || die \
-      "AgiBot automatic download is blocked pending an external archive extraction and camera-alignment plan"
+    if [ "$AGIBOT_ENABLE" = 1 ]; then
+      [ -n "$AGIBOT_ARCHIVE_PLAN" ] || die \
+        "AGIBOT_ARCHIVE_PLAN is required before any AgiBot download"
+      [ -s "$AGIBOT_ARCHIVE_PLAN" ] || die \
+        "AgiBot archive plan is missing or empty: $AGIBOT_ARCHIVE_PLAN"
+      [ -n "$AGIBOT_EPISODE_PLAN" ] || die \
+        "AGIBOT_EPISODE_PLAN is required before any AgiBot download"
+      [ -s "$AGIBOT_EPISODE_PLAN" ] || die \
+        "AgiBot episode plan is missing or empty: $AGIBOT_EPISODE_PLAN"
+    fi
     if [ "$EGODEX_ENABLE" = 1 ]; then
       [ -n "$EGODEX_PARTS" ] || die "EGODEX_PARTS must explicitly list one or more parts"
       [ -s "$EGODEX_SHA256_PLAN" ] || die \
@@ -196,11 +213,99 @@ snapshot_download(
 PY
 }
 
-fetch_agibot() {                                 # -> $DATA_ROOT/agibot {observations,proprio_stats,parameters,task_info}
+fetch_agibot() {                                 # -> $DATA_ROOT/agibot {observations,proprio_stats,parameters}
   [ "$AGIBOT_ENABLE" = 1 ] || { log "agibot: disabled"; return; }
   [ "$FETCH" = download ] || { log "agibot: FETCH=$FETCH (using existing data)"; return; }
   require_download_ack
-  die "AgiBot automatic download is blocked: the public release may require archive extraction and camera-alignment preprocessing. Prepare an extracted tree containing observations/, proprio_stats/, parameters/, and *_aligned.json files; then run with FETCH=skip AGIBOT_ENABLE=1. The strict validator will verify it before launch."
+  require_runtime
+  [ -s "$AGIBOT_ARCHIVE_PLAN" ] || die \
+    "AGIBOT_ARCHIVE_PLAN is required (section, exact HF .tar path, SHA-256 per line)"
+  [ -s "$AGIBOT_EPISODE_PLAN" ] || die \
+    "AGIBOT_EPISODE_PLAN is required (exact task_id,episode_id[,dataset] CSV)"
+  PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" - "$AGIBOT_EPISODE_PLAN" "$AGIBOT_LIMIT" "$AGIBOT_ARCHIVE_PLAN" <<'PY'
+import sys
+from pathlib import Path
+from tools.prepare_agibot import (
+    parse_archive_plan,
+    parse_episode_plan,
+    verify_official_archive_plan,
+)
+
+episodes = parse_episode_plan(Path(sys.argv[1]), expected_dataset_id="scr")
+expected = int(sys.argv[2])
+if len(episodes) != expected:
+    raise SystemExit(
+        f"AgiBot episode plan has {len(episodes)} entries; expected exactly AGIBOT_LIMIT={expected}"
+    )
+verify_official_archive_plan(parse_archive_plan(Path(sys.argv[3])))
+PY
+  mkdir -p "$AGIBOT_RAW_ROOT" "$DATA_ROOT"
+  log "agibot: downloading only checksummed archives in $AGIBOT_ARCHIVE_PLAN"
+  "$PYTHON_BIN" - "$AGIBOT_ARCHIVE_PLAN" "$AGIBOT_RAW_ROOT" <<'PY'
+import re
+import sys
+from pathlib import Path, PurePosixPath
+from huggingface_hub import snapshot_download
+
+plan, destination = Path(sys.argv[1]), sys.argv[2]
+sections = {"observations", "parameters", "proprio_stats"}
+sha = re.compile(r"[0-9a-fA-F]{64}")
+paths = []
+seen_sections = set()
+for line_number, raw in enumerate(plan.read_text(encoding="utf-8").splitlines(), 1):
+    value = raw.strip()
+    if not value or value.startswith("#"):
+        continue
+    fields = value.split()
+    if len(fields) != 3:
+        raise SystemExit(f"{plan}:{line_number}: expected section, HF tar path, SHA-256")
+    section, path, digest = fields
+    pure = PurePosixPath(path)
+    if section not in sections or pure.is_absolute() or ".." in pure.parts:
+        raise SystemExit(f"{plan}:{line_number}: unsafe section/path")
+    if pure.parts[0] != section or pure.suffix != ".tar" or not sha.fullmatch(digest):
+        raise SystemExit(f"{plan}:{line_number}: invalid section/path/checksum")
+    paths.append(pure.as_posix())
+    seen_sections.add(section)
+if not paths or len(paths) != len(set(paths)) or seen_sections != sections:
+    raise SystemExit("AgiBot plan must contain unique archives covering all three sections")
+snapshot_download(
+    repo_id="agibot-world/AgiBotWorld-Alpha",
+    repo_type="dataset",
+    revision="128665c9e0244c45d1cbe5c13f5a4706afd24f27",
+    local_dir=destination,
+    allow_patterns=paths,
+    token=True,
+)
+PY
+  prep "agibot: verifying hashes, safely extracting, and deep-qualifying genuine motion streams"
+  "$PYTHON_BIN" "$AGIBOT_PREPARER" \
+    --root "$DATA_ROOT/agibot" \
+    --archive-root "$AGIBOT_RAW_ROOT" \
+    --archive-plan "$AGIBOT_ARCHIVE_PLAN" \
+    --episode-plan "$AGIBOT_EPISODE_PLAN" \
+    --limit "$AGIBOT_LIMIT" \
+    --manifest "$DATA_ROOT/agibot/manifest.csv" \
+    --success-manifest "$AGIBOT_SUCCESS_MANIFEST" \
+    --report "$DATA_ROOT/agibot/preparation_report.json" \
+    --execute
+  if [ "$DELETE_ARCHIVES_AFTER_EXTRACT" = 1 ]; then
+    "$PYTHON_BIN" - "$AGIBOT_ARCHIVE_PLAN" "$AGIBOT_RAW_ROOT" <<'PY'
+import sys
+from pathlib import Path, PurePosixPath
+plan, root = Path(sys.argv[1]), Path(sys.argv[2]).resolve()
+for raw in plan.read_text(encoding="utf-8").splitlines():
+    value = raw.strip()
+    if not value or value.startswith("#"):
+        continue
+    relative = PurePosixPath(value.split()[1])
+    path = root.joinpath(*relative.parts).resolve()
+    if not path.is_relative_to(root):
+        raise SystemExit(f"refusing unsafe archive deletion: {path}")
+    path.unlink()
+PY
+  fi
 }
 
 fetch_egodex() {                                 # -> $DATA_ROOT/egodex_cdn/<part>/<task>/<n>.hdf5
@@ -328,12 +433,7 @@ make_manifests() {
 
   if [ "$AGIBOT_ENABLE" = 1 ]; then
     if [ "$REBUILD_AGIBOT_MANIFEST" = 1 ]; then
-      prep "AgiBot manifest rebuild requires an already extracted tree and aligned camera JSONs."
-      "$PYTHON_BIN" "$MANIFEST_HELPER" agibot \
-        --root "$DATA_ROOT/agibot" \
-        --output "$DATA_ROOT/agibot/manifest.csv" \
-        --limit "$AGIBOT_LIMIT" \
-        --dataset-id scr
+      die "REBUILD_AGIBOT_MANIFEST cannot certify an existing unbound tree. Use the checksummed AGIBOT_ARCHIVE_PLAN + exact AGIBOT_EPISODE_PLAN flow with a new output root."
     else
       [ -s "$DATA_ROOT/agibot/manifest.csv" ] || die \
         "AgiBot manifest missing/empty. Supply the curated extracted/aligned manifest, or set REBUILD_AGIBOT_MANIFEST=1 after preparation."
@@ -385,7 +485,7 @@ validate() {
   if [ "$AGIBOT_ENABLE" = 1 ]; then
     datasets+=(agibot)
     # The Hydra loader cap is 10k; the curated official corpus contains 5,671.
-    validator_args+=(--agibot-cap 10000 --agibot-expected "$AGIBOT_LIMIT")
+    validator_args+=(--agibot-cap 10000 --agibot-expected "$AGIBOT_LIMIT" --agibot-profile production)
   fi
   if [ "$ABC_ENABLE" = 1 ]; then
     datasets+=(abc)

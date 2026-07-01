@@ -8,6 +8,7 @@ import json
 import math
 import os
 import random
+import socket
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -18,7 +19,6 @@ import torch.distributed as dist
 from torch.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = REPO_ROOT / "projects" / "latent_action_models"
 CONFIG_ROOT = PROJECT_ROOT / "configs"
@@ -28,6 +28,15 @@ sys.path[:0] = [
     str(PROJECT_ROOT),
     str(REPO_ROOT),
 ]
+
+from tools.distributed_topology import validate_rank_topology
+
+DATASET_KEYS = {
+    "droid": ("Droid", 0),
+    "egodex": ("EgoDex", 2),
+    "agibot": ("Agibot", 6),
+    "abc": ("ABC", 9),
+}
 
 
 def seed_all(seed: int) -> None:
@@ -89,12 +98,23 @@ def main() -> int:
         help="microbatches accumulated per optimizer update (default: 1)",
     )
     parser.add_argument("--steps", type=int, default=3, help="number of optimizer updates")
+    parser.add_argument("--expected-nodes", type=int, default=1)
+    parser.add_argument("--gpus-per-node", type=int, default=8)
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        choices=tuple(DATASET_KEYS),
+        default=list(DATASET_KEYS),
+    )
     args = parser.parse_args()
     if args.batch_size <= 0 or args.gradient_accumulation_steps <= 0 or args.steps < 3:
         parser.error(
             "batch size and gradient accumulation steps must be positive, "
             "and --steps must be at least 3"
         )
+    if len(args.datasets) != len(set(args.datasets)):
+        parser.error("--datasets must not contain duplicates")
+    selected_datasets = [name for name in DATASET_KEYS if name in args.datasets]
 
     torch.multiprocessing.set_start_method("spawn", force=True)
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -104,6 +124,20 @@ def main() -> int:
     device = torch.device("cuda", local_rank)
     dist.init_process_group("nccl")
     try:
+        topology_records = [None] * world_size
+        dist.all_gather_object(
+            topology_records,
+            {
+                "hostname": socket.gethostname(),
+                "rank": rank,
+                "local_rank": local_rank,
+            },
+        )
+        topology = validate_rank_topology(
+            topology_records,
+            expected_nodes=args.expected_nodes,
+            gpus_per_node=args.gpus_per_node,
+        )
         seed_all(1234)
         import custom_resolvers  # noqa: F401
         from hydra import compose, initialize_config_dir
@@ -115,9 +149,19 @@ def main() -> int:
             "explicit": "ravenhuang/wan-dit/wan_dit_explicit_abc_agibot_droid_egodex.yaml",
         }[args.variant]
         with initialize_config_dir(version_base=None, config_dir=str(CONFIG_ROOT)):
+            overrides = [f"+experiments_0908={experiment}"]
+            for dataset_name, (hydra_key, _morphology) in DATASET_KEYS.items():
+                if dataset_name not in selected_datasets:
+                    overrides.extend(
+                        [
+                            f"~dataset.datasets.{hydra_key}",
+                            f"~val_dataset.datasets.{hydra_key}",
+                            f"~viz_dataset.datasets.{hydra_key}",
+                        ]
+                    )
             cfg = compose(
                 config_name="train",
-                overrides=[f"+experiments_0908={experiment}"],
+                overrides=overrides,
             )
 
         if int(cfg.data_loader.batch_size) != args.batch_size:
@@ -265,9 +309,13 @@ def main() -> int:
         global_morphologies = sorted(
             {value for values in gathered_morphologies for value in values}
         )
-        if global_morphologies != [0, 2, 6, 9]:
+        expected_morphologies = sorted(
+            DATASET_KEYS[name][1] for name in selected_datasets
+        )
+        if global_morphologies != expected_morphologies:
             raise RuntimeError(
-                f"DDP smoke did not cover all morphologies: {global_morphologies}"
+                "DDP smoke did not cover selected morphologies: "
+                f"actual={global_morphologies}, expected={expected_morphologies}"
             )
 
         final_signature = parameter_signature(ddp, device)
@@ -300,7 +348,11 @@ def main() -> int:
                     {
                         "status": "passed",
                         "world_size": world_size,
+                        "expected_nodes": args.expected_nodes,
+                        "gpus_per_node": args.gpus_per_node,
+                        "topology": topology,
                         "variant": args.variant,
+                        "datasets": selected_datasets,
                         # Keep the original field for report consumers while
                         # making physical versus effective batch semantics explicit.
                         "per_gpu_batch_size": args.batch_size,

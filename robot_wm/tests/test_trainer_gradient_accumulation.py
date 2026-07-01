@@ -74,13 +74,16 @@ def _make_trainer(*, accumulation_steps, values, use_amp=False):
     trainer.optimizer = _CountingSGD(trainer.model.parameters())
     trainer.lr_scheduler = mock.Mock()
     trainer.metrics = Metrics(world_size=1, batch_size=2)
+    trainer.batch_size = 2
     trainer.gradient_accumulation_steps = accumulation_steps
     trainer._data_loader_iter = iter(
         {"value": torch.tensor([float(value)])} for value in values
     )
     trainer._to_device = lambda batch: batch
     trainer._require_finite_losses = mock.Mock()
-    trainer._clip_grad_norm = mock.Mock()
+    trainer._clip_grad_norm = mock.Mock(return_value=torch.tensor(1.25))
+    trainer.local_rank = 0
+    trainer.world_size = 1
     trainer.use_amp = use_amp
     trainer.dtype = torch.bfloat16
     trainer.scaler = _FakeScaler() if use_amp else None
@@ -88,6 +91,37 @@ def _make_trainer(*, accumulation_steps, values, use_amp=False):
 
 
 class TrainerGradientAccumulationTest(unittest.TestCase):
+    def test_operational_metrics_use_cpu_for_gloo_and_reduce_max(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.local_rank = 0
+        trainer.world_size = 2
+        trainer.batch_size = 4
+        trainer.gradient_accumulation_steps = 2
+
+        def reduce_max(values, op):
+            self.assertEqual(values.device.type, "cpu")
+            self.assertEqual(op, torch.distributed.ReduceOp.MAX)
+            values.copy_(torch.tensor([3.0, 4.0, 5.0, 6.0]))
+
+        with mock.patch(
+            "robot_wm.utils.trainer.dist.is_initialized", return_value=True
+        ), mock.patch(
+            "robot_wm.utils.trainer.torch.distributed.get_backend",
+            return_value="gloo",
+        ), mock.patch(
+            "robot_wm.utils.trainer.torch.distributed.all_reduce",
+            side_effect=reduce_max,
+        ), mock.patch(
+            "robot_wm.utils.trainer.torch.cuda.is_available", return_value=False
+        ):
+            metrics = trainer._collect_operational_metrics(torch.tensor(1.0), 2.0)
+
+        self.assertEqual(metrics["system/gradient_norm_max"], 3.0)
+        self.assertEqual(metrics["system/optimizer_step_seconds_max"], 4.0)
+        self.assertEqual(metrics["system/gpu_memory_allocated_gib_max"], 5.0)
+        self.assertEqual(metrics["system/gpu_memory_reserved_gib_max"], 6.0)
+        self.assertEqual(metrics["system/effective_global_batch_size"], 16)
+
     def test_accumulation_config_defaults_and_requires_positive_integer(self):
         self.assertEqual(Trainer._parse_gradient_accumulation_steps({}), 1)
         self.assertEqual(
@@ -123,6 +157,13 @@ class TrainerGradientAccumulationTest(unittest.TestCase):
         trainer._clip_grad_norm.assert_called_once_with()
         self.assertEqual(trainer.metrics.total_observations, 6)
         self.assertEqual(trainer.metrics.samples_since_log, 6)
+        self.assertEqual(
+            trainer._last_operational_metrics["system/effective_global_batch_size"],
+            6,
+        )
+        self.assertAlmostEqual(
+            trainer._last_operational_metrics["system/gradient_norm_max"], 1.25
+        )
 
     def test_amp_unscales_clips_and_steps_once_per_window(self):
         trainer, core = _make_trainer(

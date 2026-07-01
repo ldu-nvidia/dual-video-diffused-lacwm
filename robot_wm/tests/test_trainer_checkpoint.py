@@ -15,6 +15,7 @@ class TrainerCheckpointTest(unittest.TestCase):
     def test_single_rank_state_does_not_use_object_collective(self):
         trainer = Trainer.__new__(Trainer)
         trainer.world_size = 1
+        trainer.global_rank = 0
         trainer._capture_rng_state = lambda: {"torch_cpu": torch.tensor([1])}
         trainer.data_loader = mock.Mock()
         trainer.data_loader.state_dict.return_value = {"cursor": torch.tensor([2])}
@@ -32,6 +33,7 @@ class TrainerCheckpointTest(unittest.TestCase):
     def test_multi_rank_state_collective_gathers_serialized_bytes(self):
         trainer = Trainer.__new__(Trainer)
         trainer.world_size = 2
+        trainer.global_rank = 0
         trainer._capture_rng_state = lambda: {"torch_cpu": torch.tensor([1])}
         trainer.data_loader = mock.Mock()
         trainer.data_loader.state_dict.return_value = {"cursor": torch.tensor([2])}
@@ -74,6 +76,24 @@ class TrainerCheckpointTest(unittest.TestCase):
                 torch.load(live, weights_only=True)["value"].item(), 7
             )
 
+    def test_iteration_zero_does_not_duplicate_live_snapshot(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.is_main_process = True
+        trainer._curr_iter = 0
+        trainer.save_path = Path("snapshot.pt")
+        trainer._gather_rank_states = lambda: [{"rank": 0}]
+        trainer._build_snapshot = lambda rank_states: {"rank_states": rank_states}
+        trainer._atomic_save_snapshot = mock.Mock()
+
+        with mock.patch(
+            "robot_wm.utils.trainer.dist.is_initialized", return_value=False
+        ):
+            trainer._save_snapshot()
+
+        trainer._atomic_save_snapshot.assert_called_once_with(
+            {"rank_states": [{"rank": 0}]}, trainer.save_path
+        )
+
     def test_snapshot_carries_guarded_run_identity(self):
         trainer = Trainer.__new__(Trainer)
         trainer.model = mock.Mock()
@@ -103,7 +123,7 @@ class TrainerCheckpointTest(unittest.TestCase):
             trainer.save_path = Path(temporary) / "snapshot.pt"
             torch.save(
                 {
-                    "snapshot_schema_version": 2,
+                    "snapshot_schema_version": 3,
                     "run_identity_sha256": "b" * 64,
                 },
                 trainer.save_path,
@@ -120,7 +140,7 @@ class TrainerCheckpointTest(unittest.TestCase):
             trainer.save_path = Path(temporary) / "snapshot.pt"
             torch.save(
                 {
-                    "snapshot_schema_version": 2,
+                    "snapshot_schema_version": 3,
                     "gradient_accumulation_steps": 2,
                 },
                 trainer.save_path,
@@ -129,6 +149,96 @@ class TrainerCheckpointTest(unittest.TestCase):
                 RuntimeError, "gradient-accumulation mismatch"
             ):
                 trainer._load_snapshot()
+
+    def test_resume_rejects_world_size_before_mutating_training_state(self):
+        world_sizes = (8, 16, 24, 32)
+        for index, current_world_size in enumerate(world_sizes):
+            saved_world_size = world_sizes[(index + 1) % len(world_sizes)]
+            with self.subTest(
+                current=current_world_size, saved=saved_world_size
+            ):
+                trainer = Trainer.__new__(Trainer)
+                trainer.local_rank = 0
+                trainer.global_rank = 0
+                trainer.world_size = current_world_size
+                trainer.run_identity_sha256 = None
+                trainer.gradient_accumulation_steps = 4
+                trainer.model = mock.Mock()
+                trainer.optimizer = mock.Mock()
+                trainer.lr_scheduler = mock.Mock()
+                trainer.metrics = mock.Mock()
+                trainer.use_amp = False
+                with tempfile.TemporaryDirectory() as temporary:
+                    trainer.save_path = Path(temporary) / "snapshot.pt"
+                    torch.save(
+                        {
+                            "snapshot_schema_version": 3,
+                            "gradient_accumulation_steps": 4,
+                            "world_size": saved_world_size,
+                            "rank_states": [
+                                {"global_rank": rank}
+                                for rank in range(saved_world_size)
+                            ],
+                            "model": {},
+                            "optimizer": {},
+                            "lr_scheduler": {},
+                        },
+                        trainer.save_path,
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, f"saved_world_size={saved_world_size}"
+                    ):
+                        trainer._load_snapshot()
+
+                trainer.model.module.load_state_dict.assert_not_called()
+                trainer.optimizer.load_state_dict.assert_not_called()
+                trainer.lr_scheduler.load_state_dict.assert_not_called()
+
+    def test_resume_rejects_invalid_rank_state_cardinality_and_order(self):
+        for world_size in (8, 16, 24, 32):
+            valid_states = [
+                {"global_rank": rank} for rank in range(world_size)
+            ]
+            cases = {
+                "missing": valid_states[:-1],
+                "extra": [*valid_states, {"global_rank": world_size}],
+                "reordered": [valid_states[1], valid_states[0], *valid_states[2:]],
+            }
+            for case_name, rank_states in cases.items():
+                with self.subTest(world_size=world_size, case=case_name):
+                    trainer = Trainer.__new__(Trainer)
+                    trainer.local_rank = 0
+                    trainer.global_rank = 0
+                    trainer.world_size = world_size
+                    trainer.run_identity_sha256 = None
+                    trainer.gradient_accumulation_steps = 4
+                    trainer.model = mock.Mock()
+                    trainer.optimizer = mock.Mock()
+                    trainer.lr_scheduler = mock.Mock()
+                    trainer.metrics = mock.Mock()
+                    trainer.use_amp = False
+                    with tempfile.TemporaryDirectory() as temporary:
+                        trainer.save_path = Path(temporary) / "snapshot.pt"
+                        torch.save(
+                            {
+                                "snapshot_schema_version": 3,
+                                "gradient_accumulation_steps": 4,
+                                "world_size": world_size,
+                                "rank_states": rank_states,
+                                "model": {},
+                                "optimizer": {},
+                                "lr_scheduler": {},
+                            },
+                            trainer.save_path,
+                        )
+                        with self.assertRaisesRegex(
+                            RuntimeError, "rank states|rank_states"
+                        ):
+                            trainer._load_snapshot()
+
+                    trainer.model.module.load_state_dict.assert_not_called()
+                    trainer.optimizer.load_state_dict.assert_not_called()
+                    trainer.lr_scheduler.load_state_dict.assert_not_called()
 
     def test_signal_handler_only_records_checkpoint_intent(self):
         trainer = Trainer.__new__(Trainer)

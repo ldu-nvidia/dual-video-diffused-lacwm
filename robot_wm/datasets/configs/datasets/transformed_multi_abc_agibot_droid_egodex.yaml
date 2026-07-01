@@ -5,6 +5,16 @@ infinite: true
 transform:
   sample_size: ???
   chunk_size: ???
+# Exact support test used by the Wan flow-loss mask. Invalid clips are
+# deterministically resampled inside the stateful dataset before batching.
+future_validity:
+  enabled: true
+  history_frames: 5
+  future_frames: 8
+  temporal_ratio: 4
+  num_views: 3
+  view_std_threshold: 0.001
+  max_retries: 8
 datasets:
   Droid:
     _target_: robot_wm.datasets.droid.lerobot_dataset.DroidLeRobotDataset

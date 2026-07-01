@@ -18,7 +18,8 @@ Required:
   --videox-home PATH      VideoX-Fun checkout.
   --data-root PATH        Root containing all four prepared datasets; required only
                           for --data-mode real.
-  --run-root PATH         Output root under /mnt/data1 or /mnt/data2.
+  --run-root PATH         Output root under /mnt/data1, /mnt/data2, or a root
+                          explicitly allowed by LACWM_ALLOWED_RUN_ROOTS.
   --wandb-mode disabled   Gradient validation never contacts W&B; this explicit
                           acknowledgement is required.
 
@@ -148,8 +149,17 @@ fi
 
 # This lock is independent of the chosen output root, so two wrappers under the
 # same account cannot both pass preflight before either one allocates CUDA.
-LOCK_ROOT="/run/user/${UID}"
-[[ -d "$LOCK_ROOT" && ! -L "$LOCK_ROOT" ]] || die "secure runtime lock directory is unavailable: $LOCK_ROOT"
+LOCK_ROOT="${LACWM_HOST_LOCK_ROOT:-/run/user/${UID}}"
+if [[ ! -d "$LOCK_ROOT" ]]; then
+  [[ -z "${LACWM_HOST_LOCK_ROOT:-}" ]] || die \
+    "configured runtime lock directory is unavailable: $LOCK_ROOT"
+  LOCK_ROOT="/tmp/lacwm-runtime-${UID}"
+  if [[ ! -e "$LOCK_ROOT" ]]; then
+    (umask 077 && mkdir "$LOCK_ROOT") || die \
+      "could not create fallback runtime lock directory: $LOCK_ROOT"
+  fi
+fi
+[[ -d "$LOCK_ROOT" && ! -L "$LOCK_ROOT" ]] || die "runtime lock path is not a secure directory: $LOCK_ROOT"
 [[ "$(stat -c %u "$LOCK_ROOT")" == "$UID" && "$(stat -c %a "$LOCK_ROOT")" == "700" ]] || \
   die "runtime lock directory must be owned by UID $UID with mode 700: $LOCK_ROOT"
 LOCK_FILE="$LOCK_ROOT/lacwm-training.lock"

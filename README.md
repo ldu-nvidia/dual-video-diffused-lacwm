@@ -64,7 +64,7 @@ Two variants share the same skeleton:
 ## Setup
 
 The supported training stack is native **PyTorch 2.7.1 + CUDA 12.8**, launched
-with `torchrun`/NCCL DDP. The 1.3B backbone fits on each B200 and only the LoRA and
+with `torchrun`/NCCL DDP on one to four 8xB200 nodes. The 1.3B backbone fits on each B200 and only the LoRA and
 robot-conditioning modules are trainable, so Megatron tensor/pipeline parallelism
 would add conversion and communication complexity without solving a memory problem.
 
@@ -140,9 +140,31 @@ Each dataset has `<DS>_ENABLE` (default `0`) and a required positive finite
 downloads also require an `EGODEX_SHA256_PLAN` with one trusted `<part> <sha256>`
 line per archive because the upstream project does not publish checksums.
 ABC requires `ABC_DOWNLOAD_PLAN`, containing exactly `ABC_LIMIT` Hugging Face
-`episode.mcap` paths. Automatic AgiBot download is blocked because archive extraction
-and generation of `*_aligned.json` camera parameters need an explicit external plan;
-provide an extracted/aligned tree and use `FETCH=skip`.
+`episode.mcap` paths. AgiBot requires `AGIBOT_ARCHIVE_PLAN`, with one reviewed
+`<section> <HF .tar path> <sha256>` record per official archive, plus an exact
+`AGIBOT_EPISODE_PLAN` CSV (`task_id,episode_id,dataset`). The setup script downloads
+only those paths at the pinned upstream revision, verifies every hash, safely extracts
+them, and qualifies only the planned episodes. Qualification strictly decodes every
+video frame, hashes each of the seven runtime payloads per episode, and never derives
+motion from static calibration or fills missing base poses.
+
+For an already extracted tree, run a read-only structural preview. It deliberately
+cannot certify lineage or publish a production manifest:
+
+```bash
+python tools/prepare_agibot.py \
+  --root "$LACWM_DATA/agibot" --limit 5671 \
+  --episode-plan /path/to/agibot_episodes.csv --validate-all
+```
+
+Only the verified archive flow accepts `--execute`; it extracts into a plan-bound clean
+staging tree and atomically publishes `manifest.success.csv`, `manifest.csv`, and
+`preparation_report.json` plus `payloads.sha256` with the final corpus. Production
+validation re-hashes those payloads and independently rechecks the claimed archive
+path/hash/size records against the pinned Hugging Face revision, so it needs authorized
+Hugging Face network access. Incomplete episodes fail publication.
+Qualification-only sample data and its synthesized camera/base streams are rejected by
+the production preparer and validator.
 
 ### Paths (no hardcoded locations)
 
@@ -164,7 +186,7 @@ To relocate, set `BASE` (or the individual vars) when running `setup_training.sh
 | Dataset | Source | On-disk layout (what the loader reads) | Notes |
 |---|---|---|---|
 | DROID | [cadene/droid](https://huggingface.co/datasets/cadene/droid) | `droid_lerobot/{data,meta,videos}`, `data/chunk-*/episode_*.parquet` | LeRobot **v2.1**, loads directly. (`lerobot/droid_1.0.1` is **v3.0** file-packed parquet and is *not* loadable as-is.) `DROID_LIMIT` → `ceil(limit/1000)` chunks |
-| Agibot | [agibot-world/AgiBotWorld-Alpha](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Alpha) | `agibot/{observations,proprio_stats,parameters,task_info}/<task>/<ep>` | must be extracted before use; loader requires `*_aligned.json` camera params. Automatic setup download is blocked until that external preparation is complete |
+| Agibot | [agibot-world/AgiBotWorld-Alpha](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Alpha) | `agibot/{observations,proprio_stats,parameters}/<task>/<ep>` (`task_info` optional) | exact checksummed archive plan required; production preparation requires genuine `*_aligned.json` camera series and T-sized robot base streams and never synthesizes them |
 | EgoDex | [apple/ml-egodex](https://github.com/apple/ml-egodex) (zips on Apple's CDN) | `egodex_cdn/<part>/<task>/<n>.hdf5` | direct, no preprocessing; the active run used `part2.zip` |
 | ABC | [XDOF/ABC-130k](https://huggingface.co/datasets/XDOF/ABC-130k) | `abc_pp/<task>/episode_*/{top,left_wrist,right_wrist}.mp4 + states.npz` | HF ships raw `episode.mcap`; setup downloads only paths explicitly listed in `ABC_DOWNLOAD_PLAN`, then runs the mcap→`abc_pp` preprocessor |
 
@@ -178,8 +200,9 @@ Loaders read manifests of **absolute** paths, so they are regenerated per server
 - `abc_pp/manifest.txt` — finite runtime manifest derived only from the success
   manifest; partial `episode_*` directories are never enumerated
 - `agibot/manifest.csv` — `task_id,episode_id,dataset` (path-portable; an existing curated
-  manifest, e.g. the active run's 5,671-episode subset, is preserved by default;
-  `REBUILD_AGIBOT_MANIFEST=1` requires a complete extracted/aligned tree)
+  manifest is preserved by default; production regeneration is permitted only through
+  the clean checksummed-archive flow—`REBUILD_AGIBOT_MANIFEST=1` intentionally fails
+  rather than relabel an unbound extracted tree)
 - DROID needs no manifest — the loader globs `data/chunk-*/episode_*.parquet`
 
 ## Training

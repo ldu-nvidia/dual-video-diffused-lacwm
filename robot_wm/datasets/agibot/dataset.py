@@ -2,6 +2,7 @@ import csv
 import json
 import logging
 import os
+from collections.abc import Mapping
 from typing import Any, Optional
 
 import h5py
@@ -13,14 +14,21 @@ from robot_wm.datasets.base import Dataset
 
 logger = logging.getLogger(__name__)
 
-# TODO: make configurable
-_AGIBOT_DATA = os.environ.get("LACWM_DATA", "/scr/ravenh/lacwm_data")
-DATASET_ROOTS = {
-    "alpha": os.environ.get("AGIBOT_ALPHA_ROOT", f"{_AGIBOT_DATA}/agibot"),
-    "beta": os.environ.get("AGIBOT_BETA_ROOT", f"{_AGIBOT_DATA}/agibot"),
-    "viscam": f"{_AGIBOT_DATA}/agibot_combined",
-    "scr": f"{_AGIBOT_DATA}/agibot",
-}
+
+def _default_dataset_roots() -> dict[str, str]:
+    """Resolve dataset roots from the environment at construction time."""
+    agibot_data = os.environ.get("LACWM_DATA", "/scr/ravenh/lacwm_data")
+    return {
+        "alpha": os.environ.get("AGIBOT_ALPHA_ROOT", f"{agibot_data}/agibot"),
+        "beta": os.environ.get("AGIBOT_BETA_ROOT", f"{agibot_data}/agibot"),
+        "viscam": f"{agibot_data}/agibot_combined",
+        "scr": f"{agibot_data}/agibot",
+    }
+
+
+# Retain the legacy module-level defaults for external imports. Dataset instances
+# resolve the environment again so worker construction is not tied to import time.
+DATASET_ROOTS = _default_dataset_roots()
 
 
 class AgibotDataset(Dataset):
@@ -34,15 +42,51 @@ class AgibotDataset(Dataset):
         load_camera_params: bool = True,
         load_task_info: bool = False,
         subsample_traj: Optional[int] = None,
+        dataset_roots: Optional[Mapping[str, os.PathLike | str]] = None,
+        max_retries: int = 8,
         **kwargs,
     ):
         super().__init__(seed=seed, infinite=infinite, transform=transform)
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int):
+            raise TypeError("max_retries must be an integer")
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+
+        resolved_roots = _default_dataset_roots()
+        if dataset_roots is not None:
+            if not isinstance(dataset_roots, Mapping):
+                raise TypeError(
+                    "dataset_roots must be a mapping of dataset IDs to paths"
+                )
+            for dataset_id, root in dataset_roots.items():
+                if not isinstance(dataset_id, str) or not dataset_id.strip():
+                    raise ValueError("dataset_roots keys must be non-empty strings")
+                try:
+                    resolved_root = os.fspath(root)
+                except TypeError as exc:
+                    raise TypeError(
+                        f"dataset root for {dataset_id!r} must be path-like"
+                    ) from exc
+                if not resolved_root:
+                    raise ValueError(
+                        f"dataset root for {dataset_id!r} must not be empty"
+                    )
+                resolved_roots[dataset_id] = resolved_root
+        self.dataset_roots = resolved_roots
+        self._max_retries = max_retries
+
         self.csv_path = csv_path
         if manifest is not None:
             self.csv_path = manifest
-        self.all_task_episodes = self.get_manifest(self.csv_path)
+        if self.csv_path is None:
+            raise ValueError("either csv_path or manifest must be provided")
+        self.all_task_episodes = self.get_manifest(
+            self.csv_path, allowed_dataset_ids=self.dataset_roots
+        )
         if subsample_traj is not None:
             self.all_task_episodes = self.all_task_episodes[:subsample_traj]
+        if not self.all_task_episodes:
+            raise ValueError(f"AgiBot manifest contains no episodes: {self.csv_path}")
         self.load_camera_params = load_camera_params
         self.load_task_info = load_task_info
         logger.info(f"{self.csv_path = }")
@@ -50,7 +94,10 @@ class AgibotDataset(Dataset):
         self.decode_camera = False
 
     @staticmethod
-    def get_manifest(csv_path: str):
+    def get_manifest(
+        csv_path: str,
+        allowed_dataset_ids: Optional[Mapping[str, object]] = None,
+    ):
         """
         Get a list of task_id and episode_id pairs, these is how the data is stored.
         It will return a list of tuples, where each tuple contains a task_id and an episode_id.
@@ -74,6 +121,16 @@ class AgibotDataset(Dataset):
                 if len(values) != 3 or any(not value for value in values):
                     raise ValueError(
                         f"invalid AgiBot manifest row {line_number}: {row}"
+                    )
+                dataset_id = values[2]
+                if (
+                    allowed_dataset_ids is not None
+                    and dataset_id not in allowed_dataset_ids
+                ):
+                    allowed = ", ".join(sorted(allowed_dataset_ids))
+                    raise ValueError(
+                        f"invalid AgiBot dataset ID {dataset_id!r} at manifest "
+                        f"row {line_number}; configured IDs: {allowed}"
                     )
                 task_episode_pairs.append(values)
         return task_episode_pairs
@@ -197,24 +254,62 @@ class AgibotDataset(Dataset):
 
     def __get_sample(self, index: int) -> dict[str, Any]:
         task_id, episode_id, dataset_id = self.all_task_episodes[index]
-        src_path = DATASET_ROOTS[dataset_id]
+        src_path = self.dataset_roots[dataset_id]
         episode = self._get_sample_from_ids(src_path, task_id, episode_id)
         if self._transform is not None:
             episode = self._transform(episode)
         return episode
 
     def _get_sample(self, index: int) -> dict[str, Any]:
-        # return self.__get_sample(index)
-        try:
-            return self.__get_sample(index)
-        except Exception as e:
-            new_index = int(
-                torch.randint(
-                    0, self._get_length(), (1,), generator=self._gen
-                ).item()
+        initial_index = int(index)
+        current_index = initial_index
+        failures: list[tuple[int, Exception]] = []
+        total_attempts = self._max_retries + 1
+
+        for attempt in range(1, total_attempts + 1):
+            try:
+                return self.__get_sample(current_index)
+            except Exception as exc:
+                failures.append((current_index, exc))
+                if attempt == total_attempts:
+                    break
+                new_index = int(
+                    torch.randint(
+                        0, self._get_length(), (1,), generator=self._gen
+                    ).item()
+                )
+                logger.warning(
+                    "AgiBot sample %s failed on attempt %s/%s (%s: %s); "
+                    "retrying index %s",
+                    current_index,
+                    attempt,
+                    total_attempts,
+                    type(exc).__name__,
+                    exc,
+                    new_index,
+                )
+                current_index = new_index
+
+        details = []
+        for attempt, (failed_index, exc) in enumerate(failures, 1):
+            try:
+                task_id, episode_id, dataset_id = self.all_task_episodes[failed_index]
+                sample = (
+                    f"task_id={task_id}, episode_id={episode_id}, "
+                    f"dataset_id={dataset_id}"
+                )
+            except (IndexError, TypeError):
+                sample = "manifest row unavailable"
+            details.append(
+                f"attempt {attempt}/{total_attempts} index={failed_index} "
+                f"({sample}): {type(exc).__name__}: {exc}"
             )
-            logger.warning(f"{index = } failed; using {new_index = }; {e = }")
-            return self._get_sample(new_index)
+        message = (
+            f"failed to load an AgiBot sample after {total_attempts} attempts "
+            f"(initial_index={initial_index}, max_retries={self._max_retries}). "
+            + " | ".join(details)
+        )
+        raise RuntimeError(message) from failures[-1][1]
 
     def __getitem__(self, index):
         return self._get_sample(index)

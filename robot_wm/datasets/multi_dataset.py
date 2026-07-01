@@ -1,4 +1,5 @@
 # a dataset that contains multiple datasets such as the droid dataset and the egodex dataset, it needs to take in args for each dataset and then combine them
+import json
 import logging
 from typing import Any, Optional
 
@@ -10,6 +11,10 @@ import torch
 import torch.nn.functional as F
 
 from robot_wm.datasets.base import Dataset
+from robot_wm.datasets.future_validity import (
+    FutureValidityConfig,
+    evaluate_future_validity,
+)
 
 Morphology_Mapping = {
     "MPKDataset": 0,
@@ -85,6 +90,7 @@ class MultiDataset(Dataset):
         padding_dim: int = 0,
         img_augment: bool = False,
         emit_crop_rgb: bool = True,
+        future_validity: Optional[dict] = None,
     ):
         super().__init__(seed=seed, infinite=infinite, transform=transform)
         self.datasets = datasets
@@ -97,6 +103,9 @@ class MultiDataset(Dataset):
         self.padding_dim = padding_dim
         self.img_augment = img_augment
         self.emit_crop_rgb = emit_crop_rgb
+        self.future_validity = FutureValidityConfig.from_mapping(future_validity)
+        self._validity_gen = torch.Generator()
+        self._validity_initialized = False
         self._augment_gen = torch.Generator()
         self._augment_initialized = False
         self.augment = torch.nn.Sequential(
@@ -129,7 +138,8 @@ class MultiDataset(Dataset):
     def __len__(self) -> int:
         return self._get_length()
 
-    def _get_sample(self, index):
+    def _get_sample_once(self, index):
+        index = int(index)
         # fine the which dataset the index is in using the dataset_lengths
         dataset_index = np.searchsorted(self.cumulative_lengths, index, "right")
         # get the index of the sample in the dataset
@@ -139,7 +149,8 @@ class MultiDataset(Dataset):
         else:
             sample_index = index - self.cumulative_lengths[dataset_index - 1]
 
-        dataset = self.datasets[list(self.datasets.keys())[dataset_index]]
+        dataset_name = list(self.datasets.keys())[dataset_index]
+        dataset = self.datasets[dataset_name]
         episode = dataset._get_sample(sample_index)
         _camera = None
         if isinstance(episode, tuple):
@@ -217,7 +228,67 @@ class MultiDataset(Dataset):
             #     fps=30,
             # )
 
-        return episode
+        return episode, dataset_name, int(sample_index)
+
+    def _initialize_validity_generator(self):
+        if self._validity_initialized:
+            return
+        worker = torch.utils.data.get_worker_info()
+        worker_id = worker.id if worker is not None else 0
+        self._validity_gen.manual_seed(
+            self._seed + 2_000_033 * self._process_id + 13_337 * worker_id
+        )
+        self._validity_initialized = True
+
+    def _draw_validity_retry_index(self) -> int:
+        self._initialize_validity_generator()
+        return int(
+            torch.randint(
+                0,
+                int(self._get_length()),
+                (1,),
+                generator=self._validity_gen,
+            ).item()
+        )
+
+    def _get_sample(self, index):
+        initial_index = int(index)
+        current_index = initial_index
+        diagnostics = []
+        total_attempts = self.future_validity.max_retries + 1
+        for attempt in range(1, total_attempts + 1):
+            episode, dataset_name, sample_index = self._get_sample_once(current_index)
+            if not self.future_validity.enabled:
+                return episode
+            validity = evaluate_future_validity(episode, self.future_validity)
+            if validity.valid:
+                return episode
+            diagnostic = {
+                "attempt": attempt,
+                "total_attempts": total_attempts,
+                "global_index": current_index,
+                "dataset": dataset_name,
+                "sample_index": sample_index,
+                **validity.diagnostic(),
+            }
+            diagnostics.append(diagnostic)
+            if attempt == total_attempts:
+                break
+            next_index = self._draw_validity_retry_index()
+            logger.warning(
+                "Rejected sample with no model-supervised future pixels; "
+                "retrying global index %s. diagnostic=%s",
+                next_index,
+                json.dumps(diagnostic, sort_keys=True),
+            )
+            current_index = next_index
+
+        raise RuntimeError(
+            "future-validity retries exhausted before batching "
+            f"(initial_index={initial_index}, "
+            f"max_retries={self.future_validity.max_retries}). "
+            f"diagnostics={json.dumps(diagnostics, sort_keys=True)}"
+        )
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         episode = self._get_sample(index)
@@ -229,6 +300,9 @@ class MultiDataset(Dataset):
             "_gen": self._gen.get_state(),
             "_augment_gen": self._augment_gen.get_state(),
             "_augment_initialized": self._augment_initialized,
+            "_future_validity": dict(vars(self.future_validity)),
+            "_validity_gen": self._validity_gen.get_state(),
+            "_validity_initialized": self._validity_initialized,
             "_datasets": {},
         }
         for dataset_name, dataset in self.datasets.items():
@@ -245,6 +319,24 @@ class MultiDataset(Dataset):
             self._augment_gen.set_state(state_dict["_augment_gen"])
             self._augment_initialized = bool(
                 state_dict.get("_augment_initialized", True)
+            )
+        saved_validity = state_dict.get("_future_validity")
+        if saved_validity is not None:
+            if saved_validity != dict(vars(self.future_validity)):
+                raise RuntimeError(
+                    "checkpoint future-validity configuration does not match"
+                )
+            if "_validity_gen" not in state_dict:
+                raise RuntimeError(
+                    "checkpoint lacks deterministic future-validity retry state"
+                )
+            self._validity_gen.set_state(state_dict["_validity_gen"])
+            self._validity_initialized = bool(
+                state_dict.get("_validity_initialized", True)
+            )
+        elif self.future_validity.enabled:
+            raise RuntimeError(
+                "checkpoint lacks deterministic future-validity retry state"
             )
         child_states = state_dict.get("_datasets")
         if not isinstance(child_states, dict) or set(child_states) != set(self.datasets):

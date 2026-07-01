@@ -15,17 +15,29 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
-
+# Keep this CLI directly executable (``python tools/training_preflight.py``)
+# without relying on a caller-provided PYTHONPATH.  The guarded launchers add
+# the repository root already, but standalone incident/preflight use should be
+# equally deterministic.
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.run_root_policy import (
+    RunRootPolicyError,
+    canonical_allowed_run_root,
+    configured_allowed_run_roots,
+)
+
+
 PROJECT_ROOT = REPO_ROOT / "projects" / "latent_action_models"
-ALLOWED_RUN_ROOTS = (Path("/mnt/data1"), Path("/mnt/data2"))
 TRAIN_MARKERS = (
     "torchrun",
     "torch.distributed.run",
@@ -71,6 +83,14 @@ TRAINING_IMPORT_PROBES = (
     "videox_fun.models.wan_transformer3d",
 )
 DEFAULT_MIN_GPU_MEMORY_MIB = 78_000
+DATASET_NAMES = ("droid", "egodex", "agibot", "abc")
+STRICT_DATA_POLICY = "strict"
+FAST_DATA_POLICY = "files_only_user_waived_v1"
+DATA_VALIDATION_POLICIES = (STRICT_DATA_POLICY, FAST_DATA_POLICY)
+FAST_SOURCE_ORDER = ("Droid", "EgoDex", "Agibot", "ABC")
+FAST_SOURCE_LENGTHS = (10_000, 10_000, 5_671, 10_000)
+FAST_WAIVER_KIND = "lacwm_user_authorized_fast_mixed_overlay"
+FAST_AUTHORIZATION_KIND = "lacwm_fast_training_authorization"
 
 
 @dataclass
@@ -112,6 +132,42 @@ def run_command(
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
+def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_regular_file(path: Path, label: str) -> Path:
+    """Reject a symlink at the supplied path before canonicalizing it."""
+
+    candidate = path.expanduser()
+    try:
+        info = candidate.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError(f"{label} is missing: {candidate}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+        raise ValueError(f"{label} is not a nonempty non-symlink regular file: {candidate}")
+    return candidate.resolve(strict=True)
+
+
+def read_json_object(path: Path, label: str) -> dict[str, object]:
+    path = canonical_regular_file(path, label)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} is not a JSON object: {path}")
+    return payload
+
+
+def parse_aware_timestamp(value: object, label: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include an explicit timezone")
+    return parsed
+
+
 def parse_gpu_list(raw: str | None) -> list[int]:
     if not raw:
         return []
@@ -138,6 +194,17 @@ def supported_gpu_memory_mib(raw: str) -> int:
     return value
 
 
+def normalized_dataset_names(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    if len(values) != len(set(values)):
+        raise ValueError("dataset names must not contain duplicates")
+    selected = set(values)
+    if not selected or not selected <= set(DATASET_NAMES):
+        raise ValueError(
+            "datasets must be a non-empty subset of " + ", ".join(DATASET_NAMES)
+        )
+    return tuple(name for name in DATASET_NAMES if name in selected)
+
+
 def existing_writable_ancestor(path: Path) -> Path | None:
     current = path
     while not current.exists() and current != current.parent:
@@ -145,11 +212,6 @@ def existing_writable_ancestor(path: Path) -> Path | None:
     if current.exists() and current.is_dir() and os.access(current, os.W_OK | os.X_OK):
         return current
     return None
-
-
-def path_is_under(path: Path, roots: Iterable[Path]) -> bool:
-    resolved = path.resolve(strict=False)
-    return any(resolved == root or root in resolved.parents for root in roots)
 
 
 def count_nonempty_lines(path: Path, *, skip_header: bool = False) -> tuple[int, list[str]]:
@@ -207,8 +269,17 @@ def check_repo(results: Results, profile: str) -> None:
 
 
 def check_output_root(results: Results, run_root: Path, profile: str) -> None:
-    allowed = path_is_under(run_root, ALLOWED_RUN_ROOTS)
-    results.add("run root policy", allowed, f"{run_root.resolve(strict=False)} must be under /mnt/data1 or /mnt/data2")
+    try:
+        allowed_roots = configured_allowed_run_roots()
+        resolved_run_root = canonical_allowed_run_root(run_root, allowed_roots)
+        results.add(
+            "run root policy",
+            True,
+            f"{resolved_run_root} is under an allowed root; "
+            f"allowed={':'.join(str(path) for path in allowed_roots)}",
+        )
+    except RunRootPolicyError as exc:
+        results.add("run root policy", False, str(exc))
     ancestor = existing_writable_ancestor(run_root)
     results.add("run root writable", ancestor is not None, f"writable ancestor: {ancestor}")
     if ancestor is None:
@@ -414,68 +485,498 @@ def _manifest_entries(path: Path, limit: int) -> list[Path]:
     return entries
 
 
-def _current_data_fingerprints(data_root: Path) -> dict[str, dict[str, object]]:
+def _current_data_fingerprints(
+    data_root: Path,
+    dataset_names: tuple[str, ...] = DATASET_NAMES,
+    *,
+    agibot_profile: str = "production",
+) -> dict[str, dict[str, object]]:
     """Recompute the validator's cheap identity fingerprint for active files."""
-    from tools.validate_training_data import stat_fingerprint
+    from tools.validate_training_data import (
+        _agibot_lineage_findings,
+        _find_agibot_qualification_provenance,
+        stat_fingerprint,
+    )
 
-    droid_root = data_root / "droid_lerobot"
-    droid_files: list[Path] = []
-    for parquet in sorted((droid_root / "data").glob("chunk-*/episode_*.parquet"))[:10_000]:
-        match = parquet.stem.removeprefix("episode_")
-        episode = int(match)
-        chunk = episode // 1_000
-        droid_files.append(parquet)
-        droid_files.extend(
-            droid_root
-            / "videos"
-            / f"chunk-{chunk:03d}"
-            / f"observation.images.{camera}"
-            / f"episode_{episode:06d}.mp4"
-            for camera in ("exterior_image_1_left", "exterior_image_2_left", "wrist_image_left")
-        )
+    selected = set(dataset_names)
+    if not selected or not selected <= set(DATASET_NAMES):
+        raise ValueError(f"invalid selected datasets: {sorted(selected)!r}")
+    fingerprints: dict[str, dict[str, object]] = {}
 
-    egodex_manifest = data_root / "egodex_cdn" / "manifest.csv"
-    egodex_entries = _manifest_entries(egodex_manifest, 10_000)
-    egodex_files = [item for path in egodex_entries for item in (path, path.with_suffix(".mp4"))]
-
-    agibot_manifest = data_root / "agibot" / "manifest.csv"
-    agibot_files: list[Path] = []
-    with agibot_manifest.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.reader(handle, skipinitialspace=True)
-        next(reader)
-        for row_index, row in enumerate(reader):
-            if row_index >= 10_000:
-                break
-            task, episode, dataset_name = (value.strip() for value in row)
-            root = agibot_root(data_root, dataset_name)
-            agibot_files.append(root / "proprio_stats" / task / episode / "proprio_stats.h5")
-            agibot_files.extend(
-                root / "observations" / task / episode / "videos" / filename
-                for filename in ("head_color.mp4", "hand_left_color.mp4", "hand_right_color.mp4")
-            )
-            agibot_files.extend(
-                root / "parameters" / task / episode / "parameters" / "camera" / filename
-                for filename in (
-                    "head_extrinsic_params_aligned.json",
-                    "hand_left_extrinsic_params_aligned.json",
-                    "hand_right_extrinsic_params_aligned.json",
+    if "droid" in selected:
+        droid_root = data_root / "droid_lerobot"
+        droid_files: list[Path] = []
+        for parquet in sorted(
+            (droid_root / "data").glob("chunk-*/episode_*.parquet")
+        )[:10_000]:
+            match = parquet.stem.removeprefix("episode_")
+            episode = int(match)
+            chunk = episode // 1_000
+            droid_files.append(parquet)
+            droid_files.extend(
+                droid_root
+                / "videos"
+                / f"chunk-{chunk:03d}"
+                / f"observation.images.{camera}"
+                / f"episode_{episode:06d}.mp4"
+                for camera in (
+                    "exterior_image_1_left",
+                    "exterior_image_2_left",
+                    "wrist_image_left",
                 )
             )
+        fingerprints["droid"] = stat_fingerprint(droid_files)
 
-    abc_manifest = data_root / "abc_pp" / "manifest.txt"
-    abc_entries = _manifest_entries(abc_manifest, 10_000)
-    abc_files = [
-        item
-        for path in abc_entries
-        for item in (path / "states.npz", path / "top.mp4", path / "left_wrist.mp4", path / "right_wrist.mp4")
-    ]
+    if "egodex" in selected:
+        egodex_manifest = data_root / "egodex_cdn" / "manifest.csv"
+        egodex_entries = _manifest_entries(egodex_manifest, 10_000)
+        egodex_files = [
+            item
+            for path in egodex_entries
+            for item in (path, path.with_suffix(".mp4"))
+        ]
+        fingerprints["egodex"] = stat_fingerprint(egodex_files, egodex_manifest)
 
-    return {
-        "droid": stat_fingerprint(droid_files),
-        "egodex": stat_fingerprint(egodex_files, egodex_manifest),
-        "agibot": stat_fingerprint(agibot_files, agibot_manifest),
-        "abc": stat_fingerprint(abc_files, abc_manifest),
-    }
+    if "agibot" in selected:
+        agibot_manifest = data_root / "agibot" / "manifest.csv"
+        agibot_files: list[Path] = []
+        agibot_roots: set[Path] = set()
+        agibot_entry_count = 0
+        with agibot_manifest.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle, skipinitialspace=True)
+            next(reader)
+            for row_index, row in enumerate(reader):
+                if row_index >= 10_000:
+                    break
+                agibot_entry_count += 1
+                task, episode, dataset_name = (value.strip() for value in row)
+                root = agibot_root(data_root, dataset_name)
+                agibot_roots.add(root)
+                agibot_files.append(
+                    root / "proprio_stats" / task / episode / "proprio_stats.h5"
+                )
+                agibot_files.extend(
+                    root / "observations" / task / episode / "videos" / filename
+                    for filename in (
+                        "head_color.mp4",
+                        "hand_left_color.mp4",
+                        "hand_right_color.mp4",
+                    )
+                )
+                agibot_files.extend(
+                    root
+                    / "parameters"
+                    / task
+                    / episode
+                    / "parameters"
+                    / "camera"
+                    / filename
+                    for filename in (
+                        "head_extrinsic_params_aligned.json",
+                        "hand_left_extrinsic_params_aligned.json",
+                        "hand_right_extrinsic_params_aligned.json",
+                    )
+                )
+
+        agibot_fingerprint = stat_fingerprint(agibot_files, agibot_manifest)
+        lineage_paths: list[Path] = []
+        if agibot_profile == "production":
+            lineage_findings, lineage_paths = _agibot_lineage_findings(
+                agibot_roots,
+                agibot_manifest,
+                agibot_entry_count,
+                "production",
+                expected_payloads=set(agibot_files),
+                verify_upstream=False,
+                verify_payload_hashes=False,
+            )
+            lineage_errors = [
+                item for item in lineage_findings if item.severity == "error"
+            ]
+            if lineage_errors:
+                examples = "; ".join(item.message for item in lineage_errors[:3])
+                raise ValueError(
+                    f"current AgiBot production lineage is invalid: {examples}"
+                )
+            if lineage_paths:
+                agibot_fingerprint["lineage"] = stat_fingerprint(lineage_paths)
+        elif agibot_profile != "qualification":
+            raise ValueError(f"unsupported AgiBot profile: {agibot_profile!r}")
+        agibot_fingerprint["agibot_profile"] = agibot_profile
+        agibot_fingerprint["qualification_markers"] = [
+            str(path)
+            for path, _signals in _find_agibot_qualification_provenance(
+                agibot_roots
+            )
+        ]
+        agibot_fingerprint["lineage_files"] = [
+            str(path) for path in lineage_paths
+        ]
+        fingerprints["agibot"] = agibot_fingerprint
+
+    if "abc" in selected:
+        abc_manifest = data_root / "abc_pp" / "manifest.txt"
+        abc_entries = _manifest_entries(abc_manifest, 10_000)
+        abc_files = [
+            item
+            for path in abc_entries
+            for item in (
+                path / "states.npz",
+                path / "top.mp4",
+                path / "left_wrist.mp4",
+                path / "right_wrist.mp4",
+            )
+        ]
+        fingerprints["abc"] = stat_fingerprint(abc_files, abc_manifest)
+
+    return {name: fingerprints[name] for name in DATASET_NAMES if name in selected}
+
+
+def _fast_agibot_metadata_fingerprint(
+    data_root: Path, waiver: dict[str, object]
+) -> tuple[str, int, int]:
+    """Recompute the waived overlay's metadata-only AgiBot seal.
+
+    This deliberately reads only the active manifest and inode metadata.  It
+    does not decode videos or hash payload contents; that omission is recorded
+    by the immutable waiver and must be separately authorized.
+    """
+
+    staging_value = waiver.get("staging_root")
+    if not isinstance(staging_value, str):
+        raise ValueError("fast waiver lacks staging_root")
+    staging = Path(staging_value).expanduser().resolve(strict=True)
+    manifest = data_root / "agibot" / "manifest.csv"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError(f"fast AgiBot manifest is missing/symlinked: {manifest}")
+
+    with manifest.open(newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        if next(reader, None) != ["task_id", "episode_id", "dataset"]:
+            raise ValueError("fast AgiBot manifest has an unexpected header")
+        rows = [tuple(value.strip() for value in row) for row in reader]
+    if (
+        len(rows) != 5_671
+        or len(set(rows)) != 5_671
+        or any(
+            len(row) != 3
+            or not row[0].isdigit()
+            or not row[1].isdigit()
+            or row[2] != "scr"
+            or row[0] == "475"
+            for row in rows
+        )
+    ):
+        raise ValueError("fast AgiBot manifest is not the approved 5,671-row schema")
+
+    videos = (
+        "head_color.mp4",
+        "hand_left_color.mp4",
+        "hand_right_color.mp4",
+    )
+    extrinsics = (
+        "head_extrinsic_params_aligned.json",
+        "hand_left_extrinsic_params_aligned.json",
+        "hand_right_extrinsic_params_aligned.json",
+    )
+    digest = hashlib.sha256()
+    payload_count = 0
+    payload_bytes = 0
+    for task, episode, _dataset in rows:
+        paths = [
+            data_root
+            / "agibot"
+            / "proprio_stats"
+            / task
+            / episode
+            / "proprio_stats.h5"
+        ]
+        paths.extend(
+            data_root / "agibot" / "observations" / task / episode / "videos" / name
+            for name in videos
+        )
+        paths.extend(
+            data_root
+            / "agibot"
+            / "parameters"
+            / task
+            / episode
+            / "parameters"
+            / "camera"
+            / name
+            for name in extrinsics
+        )
+        for path in paths:
+            if path.is_symlink():
+                raise ValueError(f"fast AgiBot payload must not itself be a symlink: {path}")
+            resolved = path.resolve(strict=True)
+            if not resolved.is_relative_to(staging):
+                raise ValueError(
+                    f"fast AgiBot payload escapes the sealed staging root: {path} -> {resolved}"
+                )
+            info = resolved.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+                raise ValueError(f"fast AgiBot payload is not a nonempty file: {resolved}")
+            relative = resolved.relative_to(staging).as_posix()
+            digest.update(
+                f"{relative}\0{info.st_size}\0{info.st_mtime_ns}\0"
+                f"{info.st_ctime_ns}\0{info.st_ino}\n".encode()
+            )
+            payload_count += 1
+            payload_bytes += info.st_size
+    return digest.hexdigest(), payload_count, payload_bytes
+
+
+def check_fast_training_evidence(
+    results: Results,
+    data_root: Path,
+    data_report_path: Path | None,
+    authorization_path: Path | None,
+    mixed_report_path: Path | None,
+) -> None:
+    """Validate explicit user authorization and live fast-overlay evidence."""
+
+    label = "fast user-waived training evidence"
+    if (
+        data_report_path is None
+        or authorization_path is None
+        or mixed_report_path is None
+    ):
+        results.add(
+            label,
+            False,
+            "fast policy requires --fast-training-authorization and --mixed-loader-report",
+        )
+        return
+    try:
+        authorization_path = canonical_regular_file(
+            authorization_path, "fast training authorization"
+        )
+        data_report_path = canonical_regular_file(
+            data_report_path, "files-only data report"
+        )
+        mixed_report_path = canonical_regular_file(
+            mixed_report_path, "mixed-loader report"
+        )
+        authorization = read_json_object(
+            authorization_path, "fast training authorization"
+        )
+        mixed = read_json_object(mixed_report_path, "mixed-loader report")
+        waiver_path = data_root / "fast_validation_waiver.json"
+        waiver = read_json_object(waiver_path, "original fast validation waiver")
+
+        if authorization.get("schema_version") != 1:
+            raise ValueError("fast training authorization schema_version must be 1")
+        if authorization.get("kind") != FAST_AUTHORIZATION_KIND:
+            raise ValueError("fast training authorization has an unexpected kind")
+        if authorization.get("training_authorized") is not True:
+            raise ValueError("fast training authorization is not explicitly true")
+        if authorization.get("policy") != FAST_DATA_POLICY:
+            raise ValueError("fast training authorization policy mismatch")
+        if Path(str(authorization.get("data_root", ""))).expanduser().resolve(
+            strict=False
+        ) != data_root.resolve(strict=False):
+            raise ValueError("fast training authorization is bound to another data root")
+        if authorization.get("branch") != "lora":
+            raise ValueError("fast training authorization is for another branch")
+        if authorization.get("authorization_scope") != (
+            "one_branch_one_commit_one_fast_overlay"
+        ):
+            raise ValueError("fast training authorization scope mismatch")
+        if authorization.get("authorized_by") != "user" or not isinstance(
+            authorization.get("authorization_basis"), str
+        ) or not str(authorization["authorization_basis"]).strip():
+            raise ValueError("fast training authorization lacks explicit user authority")
+        if authorization.get("source_order") != list(FAST_SOURCE_ORDER) or authorization.get(
+            "source_lengths"
+        ) != list(FAST_SOURCE_LENGTHS):
+            raise ValueError("fast training authorization source topology mismatch")
+        current_commit = run_command(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"]
+        ).stdout.strip()
+        if authorization.get("expected_commit") != current_commit:
+            raise ValueError("fast training authorization is for another commit")
+        parse_aware_timestamp(authorization.get("created_at_utc"), "created_at_utc")
+        if Path(str(authorization.get("certificate_path", ""))).expanduser().resolve(
+            strict=False
+        ) != authorization_path:
+            raise ValueError("fast training authorization was moved from its bound path")
+        if authorization_path.stat().st_mode & 0o222:
+            raise ValueError("fast training authorization must be read-only")
+
+        waiver_hash = sha256_file(waiver_path)
+        inputs = authorization.get("inputs")
+        if not isinstance(inputs, dict) or set(inputs) != {
+            "waiver",
+            "files_only_report",
+            "mixed_loader_report",
+            "gradient_report",
+        }:
+            raise ValueError("authorization input bindings are incomplete")
+
+        def require_input_record(name: str, expected_path: Path | None = None) -> Path:
+            record = inputs.get(name)
+            if not isinstance(record, dict):
+                raise ValueError(f"authorization input binding is malformed: {name}")
+            path = canonical_regular_file(
+                Path(str(record.get("path", ""))),
+                f"authorization input {name}",
+            )
+            if expected_path is not None and path != expected_path:
+                raise ValueError(f"authorization input path mismatch: {name}")
+            if path.stat().st_size != record.get("size") or sha256_file(path) != record.get(
+                "sha256"
+            ):
+                raise ValueError(f"authorization input bytes changed: {name}")
+            return path
+
+        require_input_record("waiver", waiver_path)
+        require_input_record("files_only_report", data_report_path)
+        require_input_record("mixed_loader_report", mixed_report_path)
+        require_input_record("gradient_report")
+        if waiver.get("schema_version") != 1 or waiver.get("kind") != FAST_WAIVER_KIND:
+            raise ValueError("original fast waiver kind/schema mismatch")
+        if (
+            waiver.get("logical_read_skipped") is not True
+            or waiver.get("strict_validated") is not False
+        ):
+            raise ValueError("original fast waiver does not describe the skipped checks")
+        if waiver.get("selected_episodes") != 5_671 or waiver.get(
+            "required_payloads"
+        ) != 39_697:
+            raise ValueError("original fast waiver corpus counts mismatch")
+        recorded_fingerprint = waiver.get("metadata_fingerprint_sha256")
+        if not isinstance(recorded_fingerprint, str) or len(recorded_fingerprint) != 64:
+            raise ValueError("original fast waiver lacks a metadata fingerprint")
+        live_fingerprint, payload_count, payload_bytes = (
+            _fast_agibot_metadata_fingerprint(data_root, waiver)
+        )
+        if live_fingerprint != recorded_fingerprint:
+            raise ValueError("live AgiBot metadata fingerprint differs from the waiver")
+        if payload_count != waiver.get("required_payloads") or payload_bytes != waiver.get(
+            "required_payload_bytes"
+        ):
+            raise ValueError("live AgiBot payload metadata counts differ from the waiver")
+        authorized_agibot = authorization.get("agibot")
+        if (
+            not isinstance(authorized_agibot, dict)
+            or authorized_agibot.get("metadata_fingerprint_sha256")
+            != live_fingerprint
+            or authorized_agibot.get("required_payloads") != payload_count
+            or authorized_agibot.get("required_payload_bytes") != payload_bytes
+        ):
+            raise ValueError("authorization AgiBot metadata seal differs from live evidence")
+        authorized_validation = authorization.get("validation")
+        if not isinstance(authorized_validation, dict):
+            raise ValueError("authorization validation summary is absent")
+        original_summary = authorized_validation.get("original_waiver")
+        files_summary = authorized_validation.get("files_only")
+        mixed_summary = authorized_validation.get("mixed_loader")
+        gradient_summary = authorized_validation.get("real_gradient")
+        if (
+            not isinstance(original_summary, dict)
+            or original_summary.get("logical_read_skipped") is not True
+            or original_summary.get("strict_validated") is not False
+            or original_summary.get("training_authorized") is not False
+            or not isinstance(files_summary, dict)
+            or files_summary.get("passed") is not True
+            or files_summary.get("files_only") is not True
+            or not isinstance(mixed_summary, dict)
+            or mixed_summary.get("passed") is not True
+            or not isinstance(gradient_summary, dict)
+            or gradient_summary.get("passed") is not True
+        ):
+            raise ValueError("authorization validation summaries are incomplete")
+
+        if mixed.get("schema_version") != 1 or mixed.get("kind") != (
+            "lacwm_real_mixed_stateful_dataloader_smoke"
+        ):
+            raise ValueError("mixed-loader report kind/schema mismatch")
+        if (
+            mixed.get("status") != "passed"
+            or mixed.get("git_commit") != current_commit
+            or mixed.get("git_status") != ""
+            or Path(str(mixed.get("requested_data_root", ""))).expanduser().resolve(
+                strict=False
+            )
+            != data_root.resolve(strict=False)
+        ):
+            raise ValueError("mixed-loader report is not passing and commit-bound")
+        validation = mixed.get("validation")
+        if not isinstance(validation, dict):
+            raise ValueError("mixed-loader report lacks validation evidence")
+        mixed_data = validation.get("data")
+        mix = validation.get("mix")
+        resume = validation.get("resume")
+        if not all(isinstance(value, dict) for value in (mixed_data, mix, resume)):
+            raise ValueError("mixed-loader report has malformed data/mix/resume evidence")
+        if Path(str(mixed_data.get("root", ""))).expanduser().resolve(
+            strict=False
+        ) != data_root.resolve(strict=False):
+            raise ValueError("mixed-loader report is bound to another data root")
+        if mixed_data.get("source_order") != list(FAST_SOURCE_ORDER) or mixed_data.get(
+            "source_lengths"
+        ) != list(FAST_SOURCE_LENGTHS):
+            raise ValueError("mixed-loader source order/lengths mismatch")
+        if mixed_data.get("total_episodes") != sum(FAST_SOURCE_LENGTHS):
+            raise ValueError("mixed-loader total episode count mismatch")
+        observed = mix.get("observed_source_counts")
+        if (
+            not isinstance(observed, dict)
+            or set(observed) != set(FAST_SOURCE_ORDER)
+            or any(int(observed.get(name, 0)) <= 0 for name in FAST_SOURCE_ORDER)
+            or not isinstance(mix.get("batches_checked"), int)
+            or mix.get("batches_checked", 0) <= 0
+            or mix.get("mixed_batches") != mix.get("batches_checked")
+        ):
+            raise ValueError("mixed-loader report did not observe every source and a mixed batch")
+        if (
+            resume.get("exact_continuation") is not True
+            or resume.get("reference_signature") != resume.get("restored_signature")
+        ):
+            raise ValueError("mixed-loader report lacks exact resume continuity")
+        state_path = canonical_regular_file(
+            Path(str(resume.get("state_path", ""))),
+            "mixed-loader state artifact",
+        )
+        if (
+            state_path.stat().st_size != resume.get("state_size")
+            or sha256_file(state_path) != resume.get("state_sha256")
+        ):
+            raise ValueError("mixed-loader state artifact hash mismatch")
+
+        evidence = mixed_data.get("evidence")
+        expected_evidence = {
+            ".prepared/manifests.ready": data_root / ".prepared/manifests.ready",
+            "egodex_cdn/manifest.csv": data_root / "egodex_cdn/manifest.csv",
+            "agibot/manifest.csv": data_root / "agibot/manifest.csv",
+            "abc_pp/manifest.txt": data_root / "abc_pp/manifest.txt",
+        }
+        if not isinstance(evidence, dict) or set(evidence) != set(expected_evidence):
+            raise ValueError("mixed-loader manifest evidence set mismatch")
+        for name, expected_path in expected_evidence.items():
+            record = evidence.get(name)
+            if not isinstance(record, dict):
+                raise ValueError(f"mixed-loader evidence is malformed for {name}")
+            resolved = expected_path.resolve(strict=True)
+            if Path(str(record.get("path", ""))).expanduser().resolve(
+                strict=False
+            ) != resolved:
+                raise ValueError(f"mixed-loader evidence path mismatch for {name}")
+            if resolved.stat().st_size != record.get("size") or sha256_file(
+                resolved
+            ) != record.get("sha256"):
+                raise ValueError(f"live manifest evidence changed for {name}")
+
+        results.add(
+            label,
+            True,
+            f"authorization_sha256={sha256_file(authorization_path)}; "
+            f"waiver_sha256={waiver_hash}; mixed_sha256={sha256_file(mixed_report_path)}; "
+            f"agibot_metadata_sha256={live_fingerprint}; payloads={payload_count}",
+        )
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        results.add(label, False, str(exc))
 
 
 def check_strict_data_report(
@@ -485,6 +986,14 @@ def check_strict_data_report(
     python_bin: Path,
     args: argparse.Namespace,
 ) -> None:
+    dataset_names = normalized_dataset_names(args.datasets)
+    policy = getattr(args, "data_validation_policy", STRICT_DATA_POLICY)
+    fast_policy = policy == FAST_DATA_POLICY
+    validation_label = (
+        "files-only user-waived data validation"
+        if fast_policy
+        else "strict data validation"
+    )
     payload: dict[str, object] | None = None
     detail_prefix = ""
     if report_path is not None:
@@ -497,28 +1006,39 @@ def check_strict_data_report(
             detail_prefix = f"cached report {report_path}; internal_age={age_hours:.1f}h; "
             if age_hours > args.max_data_report_age_hours:
                 results.add(
-                    "strict data validation",
+                    validation_label,
                     False,
                     detail_prefix + f"older than {args.max_data_report_age_hours:.1f}h",
                 )
                 return
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            results.add("strict data validation", False, f"cannot read {report_path}: {exc}")
+            results.add(validation_label, False, f"cannot read {report_path}: {exc}")
             return
     else:
+        if fast_policy:
+            results.add(
+                validation_label,
+                False,
+                "fast policy requires an explicit commit-bound files-only report",
+            )
+            return
         command = [
             str(python_bin),
             str(REPO_ROOT / "tools" / "validate_training_data.py"),
             "--data-root",
             str(data_root),
+            "--datasets",
+            *dataset_names,
             "--workers",
             str(args.data_validation_workers),
+            "--agibot-profile",
+            "production",
             "--json",
         ]
         completed = run_command(command, timeout=21_600)
         if completed.returncode not in {0, 1}:
             results.add(
-                "strict data validation",
+                validation_label,
                 False,
                 f"validator failed to run: {completed.stderr.strip() or completed.stdout.strip()}",
             )
@@ -527,17 +1047,21 @@ def check_strict_data_report(
             payload = json.loads(completed.stdout)
             detail_prefix = "fresh strict validator run; "
         except json.JSONDecodeError as exc:
-            results.add("strict data validation", False, f"validator emitted invalid JSON: {exc}")
+            results.add(validation_label, False, f"validator emitted invalid JSON: {exc}")
             return
 
     reports = payload.get("reports", []) if isinstance(payload, dict) else []
-    names = {report.get("name") for report in reports if isinstance(report, dict)}
-    expected_sources = {
+    report_names = [
+        str(report.get("name")) for report in reports if isinstance(report, dict)
+    ]
+    names = set(report_names)
+    all_sources = {
         "droid": (data_root / "droid_lerobot").resolve(strict=False),
         "egodex": (data_root / "egodex_cdn" / "manifest.csv").resolve(strict=False),
         "agibot": (data_root / "agibot" / "manifest.csv").resolve(strict=False),
         "abc": (data_root / "abc_pp" / "manifest.txt").resolve(strict=False),
     }
+    expected_sources = {name: all_sources[name] for name in dataset_names}
     sources_ok = all(
         isinstance(report, dict)
         and str(report.get("name")) in expected_sources
@@ -553,31 +1077,100 @@ def check_strict_data_report(
     }
     content_counts_ok = all(
         isinstance(report, dict)
-        and int(report.get("checked", 0)) >= expected_by_name.get(str(report.get("name")), 10**18)
-        and int(report.get("selected", 0)) >= expected_by_name.get(str(report.get("name")), 10**18)
-        and int(report.get("active_complete", 0)) >= expected_by_name.get(str(report.get("name")), 10**18)
+        and (
+            fast_policy
+            or int(report.get("checked", 0))
+            >= expected_by_name.get(str(report.get("name")), 10**18)
+        )
+        and int(report.get("selected", 0))
+        >= expected_by_name.get(str(report.get("name")), 10**18)
+        and int(report.get("active_complete", 0))
+        >= expected_by_name.get(str(report.get("name")), 10**18)
+        and (
+            not fast_policy
+            or int(report.get("complete", 0))
+            >= expected_by_name.get(str(report.get("name")), 10**18)
+        )
         for report in reports
     )
     current_commit = run_command(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"]).stdout.strip()
     validator_path = REPO_ROOT / "tools" / "validate_training_data.py"
     validator_hash = hashlib.sha256(validator_path.read_bytes()).hexdigest()
-    expected_invocation = {
-        "data_root": str(data_root.resolve(strict=False)),
-        "datasets": ["droid", "egodex", "agibot", "abc"],
-        "min_timesteps": 66,
-        "validate_all": False,
-        "files_only": False,
-        "caps": {"droid": 10_000, "egodex": 10_000, "agibot": 10_000, "abc": 10_000},
-        "expected": {"droid": 10_000, "egodex": 10_000, "agibot": 5_671, "abc": 10_000},
-        "sources": {name: str(path) for name, path in expected_sources.items()},
-        "agibot_roots": {
-            "scr": str(agibot_root(data_root, "scr").resolve(strict=False)),
-            "alpha": str(agibot_root(data_root, "alpha").resolve(strict=False)),
-            "beta": str(agibot_root(data_root, "beta").resolve(strict=False)),
-            "viscam": str(agibot_root(data_root, "viscam").resolve(strict=False)),
-        },
+    invocation = payload.get("invocation") if isinstance(payload, dict) else None
+    selected_caps = {name: 10_000 for name in dataset_names}
+    selected_expected = {
+        name: (5_671 if name == "agibot" else 10_000)
+        for name in dataset_names
     }
-    invocation_ok = isinstance(payload, dict) and payload.get("invocation") == expected_invocation
+    invocation_sources = invocation.get("sources") if isinstance(invocation, dict) else None
+    invocation_caps = invocation.get("caps") if isinstance(invocation, dict) else None
+    invocation_expected = invocation.get("expected") if isinstance(invocation, dict) else None
+    invocation_external_roots = (
+        invocation.get("allowed_external_roots")
+        if isinstance(invocation, dict)
+        else None
+    )
+    fast_external_roots_ok = bool(
+        not fast_policy
+        or (
+            isinstance(invocation_external_roots, dict)
+            and Path(
+                str(invocation_external_roots.get("egodex", "/nonexistent"))
+            ).expanduser().resolve(strict=False)
+            == (data_root.parent / "egodex_cdn").resolve(strict=False)
+            and Path(
+                str(invocation_external_roots.get("abc", "/nonexistent"))
+            ).expanduser().resolve(strict=False)
+            == (data_root.parent / "abc_pp").resolve(strict=False)
+        )
+    )
+    invocation_ok = bool(
+        isinstance(invocation, dict)
+        and invocation.get("data_root") == str(data_root.resolve(strict=False))
+        and invocation.get("datasets") == list(dataset_names)
+        and invocation.get("min_timesteps") == 66
+        and invocation.get("validate_all") is False
+        and invocation.get("files_only") is fast_policy
+        and isinstance(invocation_sources, dict)
+        and {
+            name: str(
+                Path(str(invocation_sources.get(name, "/nonexistent"))).resolve(
+                    strict=False
+                )
+            )
+            for name in dataset_names
+        }
+        == {name: str(path) for name, path in expected_sources.items()}
+        and isinstance(invocation_caps, dict)
+        and {name: invocation_caps.get(name) for name in dataset_names}
+        == selected_caps
+        and isinstance(invocation_expected, dict)
+        and {name: invocation_expected.get(name) for name in dataset_names}
+        == selected_expected
+        and fast_external_roots_ok
+        and (
+            "agibot" not in dataset_names
+            or (
+                invocation.get("agibot_profile")
+                == ("qualification" if fast_policy else "production")
+                and invocation.get("agibot_roots")
+                == {
+                    "scr": str(
+                        agibot_root(data_root, "scr").resolve(strict=False)
+                    ),
+                    "alpha": str(
+                        agibot_root(data_root, "alpha").resolve(strict=False)
+                    ),
+                    "beta": str(
+                        agibot_root(data_root, "beta").resolve(strict=False)
+                    ),
+                    "viscam": str(
+                        agibot_root(data_root, "viscam").resolve(strict=False)
+                    ),
+                }
+            )
+        )
+    )
     provenance_ok = bool(
         isinstance(payload, dict)
         and payload.get("schema_version") == 2
@@ -586,9 +1179,20 @@ def check_strict_data_report(
         and payload.get("validator_sha256") == validator_hash
     )
     fingerprints_ok = False
-    if isinstance(payload, dict) and names == set(expected_sources):
+    if (
+        isinstance(payload, dict)
+        and len(report_names) == len(dataset_names)
+        and names == set(dataset_names)
+    ):
         try:
-            current_fingerprints = _current_data_fingerprints(data_root)
+            if fast_policy:
+                current_fingerprints = _current_data_fingerprints(
+                    data_root, dataset_names, agibot_profile="qualification"
+                )
+            else:
+                current_fingerprints = _current_data_fingerprints(
+                    data_root, dataset_names
+                )
             reported_fingerprints = {
                 str(report["name"]): report.get("fingerprint")
                 for report in reports
@@ -601,7 +1205,8 @@ def check_strict_data_report(
         isinstance(payload, dict)
         and payload.get("read_only") is True
         and payload.get("passed") is True
-        and names == {"droid", "egodex", "agibot", "abc"}
+        and len(report_names) == len(dataset_names)
+        and names == set(dataset_names)
         and sources_ok
         and content_counts_ok
         and invocation_ok
@@ -611,7 +1216,7 @@ def check_strict_data_report(
     errors = sum(int(report.get("error_count", 0)) for report in reports if isinstance(report, dict))
     checked = sum(int(report.get("checked", 0)) for report in reports if isinstance(report, dict))
     results.add(
-        "strict data validation",
+        validation_label,
         ok,
         detail_prefix
         + f"datasets={sorted(str(name) for name in names)}; checked={checked:,}; "
@@ -627,20 +1232,30 @@ def check_data(
     args: argparse.Namespace,
     python_bin: Path,
 ) -> None:
+    dataset_names = normalized_dataset_names(args.datasets)
     results.add("data root", data_root.is_dir(), str(data_root))
     if not data_root.is_dir():
         return
     if profile == "full":
         report_path = args.data_validation_report.resolve(strict=False) if args.data_validation_report else None
         check_strict_data_report(results, report_path, data_root, python_bin, args)
-    if profile == "full":
-        minimums = (args.min_droid, args.min_egodex, args.min_agibot, args.min_abc)
-    else:
-        minimums = (1, 1, 1, 1)
-    check_droid(results, data_root, minimums[0])
-    check_egodex(results, data_root, minimums[1])
-    check_agibot(results, data_root, minimums[2])
-    check_abc(results, data_root, minimums[3])
+        if args.data_validation_policy == FAST_DATA_POLICY:
+            check_fast_training_evidence(
+                results,
+                data_root,
+                report_path,
+                args.fast_training_authorization,
+                args.mixed_loader_report,
+            )
+    checks = {
+        "droid": (check_droid, args.min_droid),
+        "egodex": (check_egodex, args.min_egodex),
+        "agibot": (check_agibot, args.min_agibot),
+        "abc": (check_abc, args.min_abc),
+    }
+    for name in dataset_names:
+        check, configured_minimum = checks[name]
+        check(results, data_root, configured_minimum if profile == "full" else 1)
 
 
 def list_training_processes() -> list[dict[str, str | int]]:
@@ -787,7 +1402,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-validation-report",
         type=Path,
-        help="consume a strict JSON report from tools/validate_training_data.py; full mode invokes it when omitted",
+        help=(
+            "consume a JSON report from tools/validate_training_data.py; strict "
+            "full mode invokes it when omitted, while the fast policy requires "
+            "an explicit --files-only report"
+        ),
+    )
+    parser.add_argument(
+        "--data-validation-policy",
+        choices=DATA_VALIDATION_POLICIES,
+        default=STRICT_DATA_POLICY,
+        help="strict by default; the files-only policy requires explicit waiver evidence",
+    )
+    parser.add_argument(
+        "--fast-training-authorization",
+        type=Path,
+        help="explicit immutable authorization JSON required by files_only_user_waived_v1",
+    )
+    parser.add_argument(
+        "--mixed-loader-report",
+        type=Path,
+        help="commit/data-bound mixed StatefulDataLoader report required by the fast policy",
     )
     parser.add_argument("--max-data-report-age-hours", type=float, default=24.0)
     parser.add_argument(
@@ -800,6 +1435,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--data-validation-workers", type=int, default=min(16, os.cpu_count() or 1))
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        choices=DATASET_NAMES,
+        default=list(DATASET_NAMES),
+        help="exact dataset set required by this training stage",
+    )
     parser.add_argument("--min-droid", type=int, default=10_000)
     parser.add_argument("--min-egodex", type=int, default=10_000)
     parser.add_argument("--min-agibot", type=int, default=5_671)
@@ -812,6 +1454,28 @@ def main() -> int:
     args = parser.parse_args()
     if args.skip_data and args.profile != "smoke":
         parser.error("--skip-data is allowed only with --profile smoke")
+    fast_evidence_supplied = bool(
+        args.fast_training_authorization or args.mixed_loader_report
+    )
+    if args.data_validation_policy == FAST_DATA_POLICY:
+        if args.profile != "full":
+            parser.error("the files-only user-waived policy is allowed only with --profile full")
+        if not args.data_validation_report:
+            parser.error("the files-only user-waived policy requires --data-validation-report")
+        if not args.fast_training_authorization or not args.mixed_loader_report:
+            parser.error(
+                "the files-only user-waived policy requires --fast-training-authorization "
+                "and --mixed-loader-report"
+            )
+    elif fast_evidence_supplied:
+        parser.error(
+            "fast authorization/mixed evidence is forbidden unless --data-validation-policy "
+            f"is {FAST_DATA_POLICY}"
+        )
+    try:
+        args.datasets = list(normalized_dataset_names(args.datasets))
+    except ValueError as exc:
+        parser.error(str(exc))
     try:
         selected = parse_gpu_list(args.gpus)
     except argparse.ArgumentTypeError as exc:
@@ -855,6 +1519,8 @@ def main() -> int:
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "hostname": socket.gethostname(),
         "profile": args.profile,
+        "data_validation_policy": args.data_validation_policy,
+        "dataset_names": args.datasets,
         "gpu_requirements": {
             "model": "B200" if args.profile == "full" else None,
             "minimum_memory_mib": (

@@ -1,6 +1,7 @@
 # References:
 #     https://github.com/pytorch/examples/blob/5dfeb46902baf444010f2f54bcf4dfbea109ae4d/distributed/ddp-tutorial-series/multinode.py
 #     https://github.com/pytorch/torchtitan/blob/b345557a37d7d8804e3b1cf8e9e0a36e46e689e9/torchtitan/train.py
+import hashlib
 import io
 import json
 import logging
@@ -53,9 +54,10 @@ class Metrics:
     warmup: int = 100
     best_val_loss: float = float("inf")
 
-    def update(self, microbatches: int = 1):
+    def update(self, microbatches: int = 1, step_time: float | None = None):
         current_time = time.time()
-        step_time = current_time - self.last_step_time
+        if step_time is None:
+            step_time = current_time - self.last_step_time
         self.last_step_time = current_time
         self.time_since_log += step_time
 
@@ -63,9 +65,9 @@ class Metrics:
         self.samples_since_log += samples
         self.total_observations += samples
 
-    def get_train_metrics(self, iter_num, losses):
+    def get_train_metrics(self, iter_num, losses, operational_metrics=None):
         samples_per_second = 0
-        if self.time_since_log > 0 and iter_num > self.warmup:
+        if self.time_since_log > 0 and iter_num >= self.warmup:
             samples_per_second = self.samples_since_log / self.time_since_log
 
         metrics = {
@@ -76,6 +78,9 @@ class Metrics:
 
         for key, value in losses.items():
             metrics[f"train_loss/{key}"] = value
+
+        if operational_metrics:
+            metrics.update(operational_metrics)
 
         if logger.getEffectiveLevel() <= logging.DEBUG:
             metrics.update(
@@ -97,9 +102,36 @@ class Metrics:
 
         for key, value in val_losses.items():
             metrics[f"val_loss/{key}"] = value
+        for dataset_name, value in self.best_validation_losses().items():
+            metrics[f"val_loss/best/{dataset_name}"] = value
         metrics["val_loss/best_val_loss"] = self.best_val_loss
 
         return metrics
+
+    def best_validation_losses(self) -> dict[str, float]:
+        prefix = "best_val_loss_"
+        return {
+            key.removeprefix(prefix): float(value)
+            for key, value in sorted(vars(self).items())
+            if key.startswith(prefix)
+        }
+
+    def refresh_best_val_loss(self) -> float:
+        """Keep the legacy aggregate best metric finite and meaningful.
+
+        Multi-dataset validation emits ``avg/loss``.  Its historical minimum is
+        the best jointly observed validation point, so it is a better aggregate
+        than averaging per-dataset minima reached at potentially different
+        iterations.  A single-dataset run falls back to that dataset's best.
+        """
+        best_losses = self.best_validation_losses()
+        if not best_losses:
+            return self.best_val_loss
+        if "avg" in best_losses:
+            self.best_val_loss = best_losses["avg"]
+        else:
+            self.best_val_loss = sum(best_losses.values()) / len(best_losses)
+        return self.best_val_loss
 
     def reset_throughput_counters(self):
         self.samples_since_log = 0
@@ -125,6 +157,7 @@ class Trainer:
         self.log_every = config["logging"]["log_every"]
         self.val_every = config["validation"]["val_every"]
         self.n_val_samples = config["validation"]["n_val_samples"]
+        self.save_best = self._parse_save_best(config)
         self.viz_every = config["visualization"]["viz_every"]
         self.viz_path = Path(config["visualization"]["viz_path"])
         self.save_every = config["saving"]["save_every"]
@@ -135,7 +168,9 @@ class Trainer:
         self._start_iter = 0
         self._curr_iter = 0
         self.resumed = False
+        self.transitioned = False
         self._resume_rng_state = None
+        self.transition_parent = None
         self._checkpoint_stop_requested = False
         self._checkpoint_stop_signal = None
         request_path = os.environ.get("LACWM_CHECKPOINT_REQUEST_FILE")
@@ -149,6 +184,10 @@ class Trainer:
         # every checkpoint prevents an unrelated snapshot with compatible tensor
         # shapes from being silently resumed under this run's identity.
         self.run_identity_sha256 = os.environ.get("LACWM_RUN_IDENTITY_SHA256")
+        transition_handoff = config.get("transition_handoff_path")
+        self.transition_handoff_path = (
+            Path(transition_handoff) if transition_handoff is not None else None
+        )
 
         # daniel: I hate this but no better solution in reasonable time
         if hasattr(model, "custom_to"):
@@ -199,7 +238,12 @@ class Trainer:
         self.error_if_nonfinite = config["gradient_clipping"]["error_if_nonfinite"]
 
         # Metrics tracking
-        self.metrics = Metrics(self.world_size, self.batch_size)
+        self.metrics = Metrics(
+            self.world_size,
+            self.batch_size,
+            warmup=self._parse_throughput_warmup_steps(config),
+        )
+        self._last_operational_metrics = {}
 
         # Wandb
         self.use_wandb = False
@@ -208,6 +252,8 @@ class Trainer:
         # Load checkpoint if exists
         if self.save_path.exists():
             self._load_snapshot()
+        elif self.transition_handoff_path is not None:
+            self._load_transition_snapshot(self.transition_handoff_path)
         logger.info(f"Initialized trainer; save path: {self.save_path}")
 
         if (
@@ -236,6 +282,108 @@ class Trainer:
                 f"got {value!r}"
             )
         return int(value)
+
+    @staticmethod
+    def _parse_throughput_warmup_steps(config) -> int:
+        value = config.get("throughput_warmup_steps", 100)
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+            raise ValueError(
+                "throughput_warmup_steps must be a nonnegative integer, "
+                f"got {value!r}"
+            )
+        return int(value)
+
+    @staticmethod
+    def _parse_save_best(config) -> bool:
+        value = config.get("validation", {}).get("save_best", True)
+        if not isinstance(value, bool):
+            raise ValueError(
+                "validation.save_best must be a boolean, "
+                f"got {value!r}"
+            )
+        return value
+
+    def _distributed_weighted_loss_means(
+        self,
+        local_sums: dict[str, torch.Tensor],
+        local_counts: dict[str, int],
+    ) -> dict[str, torch.Tensor]:
+        """Return deterministic global means for a dynamic metric dictionary.
+
+        Conditional losses (for example a morphology-specific decoder loss)
+        are not necessarily present on every rank or every microbatch.  All
+        ranks first agree on the sorted union of keys, then reduce a sum and a
+        contribution count for every key in one collective.  An absent key has
+        count zero, so it never dilutes the mean as if it were a zero-valued
+        observation.
+        """
+        if set(local_sums) != set(local_counts):
+            raise ValueError("loss sums and counts must contain identical keys")
+        for key, value in local_sums.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"loss metric key must be str, got {type(key).__name__}"
+                )
+            if not isinstance(value, torch.Tensor) or value.numel() != 1:
+                raise ValueError(f"loss metric {key!r} must be a scalar tensor")
+            count = local_counts[key]
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, Integral)
+                or count < 1
+            ):
+                raise ValueError(
+                    f"loss metric {key!r} must have a positive contribution count"
+                )
+
+        local_keys = tuple(sorted(local_sums))
+        if not dist.is_initialized() or self.world_size == 1:
+            return {
+                key: local_sums[key] / local_counts[key] for key in local_keys
+            }
+
+        gathered_keys = [None] * self.world_size
+        torch.distributed.all_gather_object(gathered_keys, local_keys)
+        global_keys = set()
+        for rank, rank_keys in enumerate(gathered_keys):
+            if not isinstance(rank_keys, (tuple, list)) or not all(
+                isinstance(key, str) for key in rank_keys
+            ):
+                raise RuntimeError(
+                    f"rank {rank} returned an invalid loss-metric key collection"
+                )
+            global_keys.update(rank_keys)
+        ordered_keys = tuple(sorted(global_keys))
+        if not ordered_keys:
+            return {}
+        if not local_sums:
+            raise RuntimeError(
+                "distributed loss reduction needs one local tensor to select a device"
+            )
+
+        reference = next(iter(local_sums.values()))
+        packed = torch.zeros(
+            (len(ordered_keys), 2),
+            device=reference.device,
+            dtype=torch.float64,
+        )
+        for index, key in enumerate(ordered_keys):
+            if key in local_sums:
+                packed[index, 0] = local_sums[key].detach().to(dtype=torch.float64)
+                packed[index, 1] = local_counts[key]
+
+        torch.distributed.all_reduce(packed, op=torch.distributed.ReduceOp.SUM)
+        if (packed[:, 1] <= 0).any():
+            missing = [
+                key
+                for key, count in zip(ordered_keys, packed[:, 1].tolist())
+                if count <= 0
+            ]
+            raise RuntimeError(
+                f"loss metrics have no contributing samples after reduction: {missing}"
+            )
+        means = packed[:, 0] / packed[:, 1]
+        return {key: means[index] for index, key in enumerate(ordered_keys)}
 
     def start_data_loaders(self):
         if self._data_loader_iter is not None:
@@ -294,6 +442,7 @@ class Trainer:
 
     def _gather_rank_states(self):
         local_state = {
+            "global_rank": self.global_rank,
             "rng": self._capture_rng_state(),
             "data_loader": self.data_loader.state_dict(),
             "val_data_loaders": [loader.state_dict() for loader in self.val_data_loaders],
@@ -327,7 +476,7 @@ class Trainer:
 
     def _build_snapshot(self, rank_states):
         snapshot = {
-            "snapshot_schema_version": 2,
+            "snapshot_schema_version": 3,
             "model": self.model.module.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "lr_scheduler": self.lr_scheduler.state_dict(),
@@ -345,6 +494,8 @@ class Trainer:
         }
         if self.run_identity_sha256 is not None:
             snapshot["run_identity_sha256"] = self.run_identity_sha256
+        if getattr(self, "transition_parent", None) is not None:
+            snapshot["transition_parent"] = dict(self.transition_parent)
 
         if self.use_amp:
             snapshot["scaler"] = self.scaler.state_dict()
@@ -471,7 +622,10 @@ class Trainer:
                     # The live resume file is updated at every save cadence.
                     # Milestone archives are additional copies, never replacements.
                     self._atomic_save_snapshot(snapshot, self.save_path)
-                    if self._curr_iter % 10000 == 0:
+                    # Iteration zero is already represented by the live resume
+                    # file. Avoid a second, potentially tens-of-GB full-model
+                    # copy before the smoke/run has made any progress.
+                    if self._curr_iter > 0 and self._curr_iter % 10000 == 0:
                         archive = self.save_path.with_suffix(f".{self._curr_iter}.pt")
                         self._atomic_save_snapshot(snapshot, archive)
             except Exception as exc:  # synchronize failure before any rank tears down
@@ -565,10 +719,10 @@ class Trainer:
     def _load_snapshot(self):
         map_loc = f"cuda:{self.local_rank}"
         snapshot = torch.load(self.save_path, map_location=map_loc, weights_only=True)
-        if snapshot.get("snapshot_schema_version") != 2:
+        if snapshot.get("snapshot_schema_version") != 3:
             raise RuntimeError(
                 "unsupported resume checkpoint schema; exact distributed resume "
-                "requires snapshot_schema_version=2"
+                "requires snapshot_schema_version=3"
             )
         checkpoint_identity = snapshot.get("run_identity_sha256")
         if checkpoint_identity is not None and self.run_identity_sha256 is None:
@@ -582,6 +736,9 @@ class Trainer:
                 f"checkpoint={checkpoint_identity!r}, "
                 f"expected={self.run_identity_sha256!r}"
             )
+        self.transition_parent = self._validate_transition_parent_metadata(
+            snapshot.get("transition_parent")
+        )
         checkpoint_accumulation_steps = int(
             snapshot.get("gradient_accumulation_steps", 1)
         )
@@ -591,6 +748,30 @@ class Trainer:
                 f"checkpoint={checkpoint_accumulation_steps}, "
                 f"current={self.gradient_accumulation_steps}"
             )
+
+        # Reject an incompatible fixed-world-size resume before mutating model,
+        # optimizer, scheduler, metrics, or loader state. Exact continuation
+        # requires one saved RNG/loader stream for every current global rank.
+        cpu_snapshot = torch.load(self.save_path, map_location="cpu", weights_only=True)
+        rank_states = cpu_snapshot.get("rank_states")
+        saved_world_size = int(cpu_snapshot.get("world_size", -1))
+        if not isinstance(rank_states, list) or saved_world_size != self.world_size:
+            raise RuntimeError(
+                "checkpoint lacks compatible per-rank RNG/data-loader state: "
+                f"saved_world_size={saved_world_size}, current_world_size={self.world_size}"
+            )
+        if len(rank_states) != self.world_size:
+            raise RuntimeError(
+                f"checkpoint has {len(rank_states)} rank states for world size {self.world_size}"
+            )
+        saved_rank_order = [state.get("global_rank") for state in rank_states]
+        expected_rank_order = list(range(self.world_size))
+        if saved_rank_order != expected_rank_order:
+            raise RuntimeError(
+                "checkpoint rank states are missing, duplicated, or reordered: "
+                f"saved={saved_rank_order}, expected={expected_rank_order}"
+            )
+
         self.model.module.load_state_dict(snapshot["model"])
 
         self.optimizer.load_state_dict(snapshot["optimizer"])
@@ -607,22 +788,6 @@ class Trainer:
             self.wandb_run_id = snapshot["wandb_run_id"]
             logger.info(f"Resuming wandb run: {self.wandb_run_id}")
 
-        # The state_dict for the data loader needs to be loaded to the cpu
-        # otherwise the random number generators in datasets or transforms will
-        # not load properly. It seem like there should be a better solution than
-        # reloading the snapshot to the cpu.
-        cpu_snapshot = torch.load(self.save_path, map_location="cpu", weights_only=True)
-        rank_states = cpu_snapshot.get("rank_states")
-        saved_world_size = int(cpu_snapshot.get("world_size", -1))
-        if not isinstance(rank_states, list) or saved_world_size != self.world_size:
-            raise RuntimeError(
-                "checkpoint lacks compatible per-rank RNG/data-loader state: "
-                f"saved_world_size={saved_world_size}, current_world_size={self.world_size}"
-            )
-        if len(rank_states) != self.world_size:
-            raise RuntimeError(
-                f"checkpoint has {len(rank_states)} rank states for world size {self.world_size}"
-            )
         rank_state = rank_states[self.global_rank]
         self.data_loader.load_state_dict(rank_state["data_loader"])
         val_states = rank_state.get("val_data_loaders", [])
@@ -641,6 +806,201 @@ class Trainer:
         self.resumed = True
         logger.info(f"Resuming from iteration {self._start_iter:,}")
 
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(16 * 1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _sha256_file_rank_zero(self, path: Path) -> str:
+        """Hash one shared snapshot once, then give every rank the result."""
+        error = None
+        digest = None
+        if not dist.is_initialized() or self.world_size == 1 or self.is_main_process:
+            try:
+                digest = self._sha256_file(path)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        if dist.is_initialized() and self.world_size > 1:
+            result = [digest, error]
+            torch.distributed.broadcast_object_list(result, src=0)
+            digest, error = result
+        if error is not None:
+            raise RuntimeError(f"unable to hash transition snapshot: {error}")
+        return digest
+
+    @staticmethod
+    def _require_sha256(value, *, field_name: str) -> str:
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise RuntimeError(
+                f"{field_name} must be a lowercase 64-character SHA-256 digest"
+            )
+        return value
+
+    @classmethod
+    def _validate_transition_parent_metadata(cls, metadata):
+        if metadata is None:
+            return None
+        if not isinstance(metadata, dict):
+            raise RuntimeError("checkpoint transition_parent metadata must be a mapping")
+        required = {
+            "run_identity_sha256",
+            "snapshot_sha256",
+            "handoff_manifest_sha256",
+        }
+        missing = sorted(required - set(metadata))
+        if missing:
+            raise RuntimeError(
+                f"checkpoint transition_parent metadata is missing fields: {missing}"
+            )
+        validated = dict(metadata)
+        for field_name in sorted(required):
+            validated[field_name] = cls._require_sha256(
+                validated[field_name], field_name=f"transition_parent.{field_name}"
+            )
+        return validated
+
+    def _load_transition_snapshot(self, handoff_path: Path):
+        """Warm-continue optimizer state while starting a new dataset lineage.
+
+        A dataset-stage transition is deliberately not an exact resume.  Model,
+        optimizer, scheduler, scaler, next iteration, and observation count are
+        inherited from the immutable parent snapshot.  Rank-local loader/RNG
+        state, W&B identity, and validation bests are intentionally reset for
+        the child dataset and child run identity.
+        """
+        handoff_path = handoff_path.expanduser().resolve(strict=True)
+        try:
+            manifest_bytes = handoff_path.read_bytes()
+            manifest = json.loads(manifest_bytes)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"unable to read transition handoff manifest {handoff_path}: {exc}"
+            ) from exc
+        if manifest.get("schema_version") != 1 or manifest.get("status") != "complete":
+            raise RuntimeError(
+                "transition handoff must have schema_version=1 and status='complete'"
+            )
+
+        parent_identity = self._require_sha256(
+            manifest.get("parent_run_identity_sha256"),
+            field_name="parent_run_identity_sha256",
+        )
+        expected_snapshot_sha = self._require_sha256(
+            manifest.get("parent_snapshot_sha256"),
+            field_name="parent_snapshot_sha256",
+        )
+        if self.run_identity_sha256 is None:
+            raise RuntimeError(
+                "dataset-stage transition requires LACWM_RUN_IDENTITY_SHA256 for "
+                "the new child run"
+            )
+        self._require_sha256(
+            self.run_identity_sha256, field_name="LACWM_RUN_IDENTITY_SHA256"
+        )
+        if self.run_identity_sha256 == parent_identity:
+            raise RuntimeError(
+                "dataset-stage transition requires a new run identity distinct "
+                "from the parent"
+            )
+
+        parent_snapshot_value = manifest.get("parent_snapshot")
+        if not isinstance(parent_snapshot_value, str) or not parent_snapshot_value:
+            raise RuntimeError("transition handoff lacks parent_snapshot")
+        parent_snapshot = Path(parent_snapshot_value).expanduser()
+        if not parent_snapshot.is_absolute():
+            parent_snapshot = handoff_path.parent / parent_snapshot
+        parent_snapshot = parent_snapshot.resolve(strict=True)
+        actual_snapshot_sha = self._sha256_file_rank_zero(parent_snapshot)
+        if actual_snapshot_sha != expected_snapshot_sha:
+            raise RuntimeError(
+                "transition parent snapshot SHA-256 mismatch: "
+                f"actual={actual_snapshot_sha!r}, expected={expected_snapshot_sha!r}"
+            )
+
+        snapshot = torch.load(parent_snapshot, map_location="cpu", weights_only=True)
+        if snapshot.get("snapshot_schema_version") != 3:
+            raise RuntimeError(
+                "unsupported transition checkpoint schema; expected "
+                "snapshot_schema_version=3"
+            )
+        if snapshot.get("run_identity_sha256") != parent_identity:
+            raise RuntimeError(
+                "transition parent identity mismatch between handoff and snapshot: "
+                f"handoff={parent_identity!r}, "
+                f"snapshot={snapshot.get('run_identity_sha256')!r}"
+            )
+        checkpoint_accumulation_steps = int(
+            snapshot.get("gradient_accumulation_steps", 1)
+        )
+        if checkpoint_accumulation_steps != self.gradient_accumulation_steps:
+            raise RuntimeError(
+                "transition checkpoint gradient-accumulation mismatch: "
+                f"checkpoint={checkpoint_accumulation_steps}, "
+                f"current={self.gradient_accumulation_steps}"
+            )
+        saved_world_size = int(snapshot.get("world_size", -1))
+        if saved_world_size != self.world_size:
+            raise RuntimeError(
+                "transition checkpoint world-size mismatch: "
+                f"checkpoint={saved_world_size}, current={self.world_size}"
+            )
+        for key in ("model", "optimizer", "lr_scheduler", "_start_iter", "_total_observations"):
+            if key not in snapshot:
+                raise RuntimeError(f"transition checkpoint is missing required key {key!r}")
+        start_iter = snapshot["_start_iter"]
+        total_observations = snapshot["_total_observations"]
+        if isinstance(start_iter, bool) or not isinstance(start_iter, Integral) or start_iter < 0:
+            raise RuntimeError("transition checkpoint _start_iter must be nonnegative")
+        if (
+            isinstance(total_observations, bool)
+            or not isinstance(total_observations, Integral)
+            or total_observations < 0
+        ):
+            raise RuntimeError(
+                "transition checkpoint _total_observations must be nonnegative"
+            )
+        if self.use_amp != ("scaler" in snapshot):
+            raise RuntimeError(
+                "transition checkpoint AMP/scaler policy differs from the child run"
+            )
+
+        # All provenance and compatibility checks precede state mutation.
+        self.model.module.load_state_dict(snapshot["model"])
+        self.optimizer.load_state_dict(snapshot["optimizer"])
+        self.lr_scheduler.load_state_dict(snapshot["lr_scheduler"])
+        if self.use_amp:
+            self.scaler.load_state_dict(snapshot["scaler"])
+        self._start_iter = int(start_iter)
+        self.metrics.total_observations = int(total_observations)
+        self.metrics.best_val_loss = float("inf")
+        for key in list(vars(self.metrics)):
+            if key.startswith("best_val_loss_"):
+                delattr(self.metrics, key)
+        self.metrics.reset_throughput_counters()
+        self._resume_rng_state = None
+        self.wandb_run_id = None
+        self.resumed = False
+        self.transitioned = True
+        self.transition_parent = {
+            "run_identity_sha256": parent_identity,
+            "snapshot_sha256": actual_snapshot_sha,
+            "handoff_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "snapshot": str(parent_snapshot),
+        }
+        logger.info(
+            "Transitioned from parent run %s at iteration %s; loader/RNG and "
+            "validation-best state start fresh",
+            parent_identity,
+            self._start_iter,
+        )
+
     def _log(self, metrics):
         if not self.is_main_process:
             return
@@ -652,10 +1012,15 @@ class Trainer:
             iter_num = metrics.get("iteration", 0)
             loss = metrics.get("train_loss/loss", 0)
             samples_per_second = metrics.get("samples_per_second", 0)
+            grad_norm = metrics.get("system/gradient_norm_max", float("nan"))
+            step_seconds = metrics.get(
+                "system/optimizer_step_seconds_max", float("nan")
+            )
 
             logger.info(
                 f"[{iter_num}] loss: {loss:0.3f}, "
                 f"samples/sec: {samples_per_second:.1f}, "
+                f"step: {step_seconds:.2f}s, grad norm: {grad_norm:.3f}, "
                 f"total observations: {self.metrics.total_observations:,}"
             )
 
@@ -678,12 +1043,67 @@ class Trainer:
 
     def _clip_grad_norm(self):
         parameters = [p for p in self.model.parameters() if p.requires_grad]
-        torch.nn.utils.clip_grad_norm_(
+        return torch.nn.utils.clip_grad_norm_(
             parameters=parameters,
             max_norm=self.max_norm,
             norm_type=self.norm_type,
             error_if_nonfinite=self.error_if_nonfinite,
         )
+
+    def _collect_operational_metrics(self, grad_norm, step_time: float) -> dict:
+        if isinstance(grad_norm, torch.Tensor):
+            grad_norm = float(grad_norm.detach().float().item())
+        else:
+            grad_norm = float(grad_norm)
+
+        memory_allocated = 0.0
+        memory_reserved = 0.0
+        if self._model_uses_cuda():
+            memory_allocated = torch.cuda.memory_allocated(self.local_rank) / 2**30
+            memory_reserved = torch.cuda.memory_reserved(self.local_rank) / 2**30
+
+        distributed = dist.is_initialized() and self.world_size > 1
+        collective_device = "cpu"
+        if distributed and str(torch.distributed.get_backend()).lower() == "nccl":
+            collective_device = torch.device("cuda", self.local_rank)
+        values = torch.tensor(
+            [grad_norm, float(step_time), memory_allocated, memory_reserved],
+            dtype=torch.float64,
+            device=collective_device,
+        )
+        if distributed:
+            torch.distributed.all_reduce(values, op=torch.distributed.ReduceOp.MAX)
+
+        return {
+            "system/gradient_norm_max": float(values[0].item()),
+            "system/optimizer_step_seconds_max": float(values[1].item()),
+            "system/gpu_memory_allocated_gib_max": float(values[2].item()),
+            "system/gpu_memory_reserved_gib_max": float(values[3].item()),
+            "system/world_size": self.world_size,
+            "system/effective_global_batch_size": (
+                self.batch_size * self.gradient_accumulation_steps * self.world_size
+            ),
+        }
+
+    def _should_collect_operational_metrics(self) -> bool:
+        """Collect synchronized telemetry only on iterations that will be logged."""
+        if not all(
+            hasattr(self, name)
+            for name in ("_curr_iter", "log_every", "max_iter")
+        ):
+            return True
+        return (
+            self._curr_iter % self.log_every == 0
+            or self._curr_iter + 1 == self.max_iter
+        )
+
+    def _model_uses_cuda(self) -> bool:
+        if not torch.cuda.is_available() or not hasattr(self, "model"):
+            return False
+        try:
+            return next(self.model.parameters()).is_cuda
+        except StopIteration:
+            return False
 
     def _require_finite_losses(self, loss):
         """Fail every rank together before backward if any rank is non-finite."""
@@ -716,6 +1136,13 @@ class Trainer:
         return batch
 
     def _step(self):
+        collect_operational_metrics = self._should_collect_operational_metrics()
+        if collect_operational_metrics and self._model_uses_cuda():
+            # CUDA execution is asynchronous. Synchronize only on logging steps
+            # so the reported maximum step duration is accurate without adding a
+            # device/global collective to every optimizer update.
+            torch.cuda.synchronize(self.local_rank)
+        step_started = time.perf_counter()
         loss_sums = {}
         loss_counts = defaultdict(int)
 
@@ -761,7 +1188,7 @@ class Trainer:
 
         if self.use_amp:
             self.scaler.unscale_(self.optimizer)
-        self._clip_grad_norm()
+        grad_norm = self._clip_grad_norm()
         if self.use_amp:
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -770,21 +1197,24 @@ class Trainer:
 
         self.optimizer.zero_grad()
         self.lr_scheduler.step()
-        self.metrics.update(microbatches=self.gradient_accumulation_steps)
+        if collect_operational_metrics and self._model_uses_cuda():
+            torch.cuda.synchronize(self.local_rank)
+        step_time = time.perf_counter() - step_started
+        self.metrics.update(
+            microbatches=self.gradient_accumulation_steps,
+            step_time=step_time,
+        )
+        if collect_operational_metrics:
+            self._last_operational_metrics = self._collect_operational_metrics(
+                grad_norm, step_time
+            )
+        else:
+            self._last_operational_metrics = {}
 
-        # Report the mean raw loss over the full accumulation window. Auxiliary
-        # keys that are conditional on a morphology are averaged over the
-        # microbatches in which that key was emitted rather than treating absence
-        # as a zero loss.
-        losses = {
-            key: value / loss_counts[key] for key, value in loss_sums.items()
-        }
-
-        # Reduce all losses across processes
-        if dist.is_initialized():
-            for key, value in losses.items():
-                torch.distributed.all_reduce(value)
-                losses[key] = value / dist.get_world_size()
+        # Report global means over only the microbatches/ranks that emitted each
+        # key. The reducer first establishes one global key order, avoiding
+        # mismatched collectives when ranks observe different morphologies.
+        losses = self._distributed_weighted_loss_means(loss_sums, loss_counts)
 
         # Convert to Python scalars for logging
         losses = {k: v.item() for k, v in losses.items()}
@@ -808,7 +1238,8 @@ class Trainer:
 
             if "MultiDataset" in dataset_name:
                 dataset_name = val_loader.dataset.full_name + f"_{i}"
-            losses = defaultdict(list)
+            loss_sums = {}
+            loss_counts = defaultdict(int)
 
             for _ in range(self.n_val_samples):
                 val_batch = next(val_iter)
@@ -819,25 +1250,25 @@ class Trainer:
                 ):
                     batch_loss = self.model(**val_batch)
 
-                # Keep as tensors for now
-                losses["loss"].append(batch_loss.detach())
+                batch_losses = {"loss": batch_loss.detach()}
                 if hasattr(self.model.module, "aux_losses"):
-                    for aux_name, aux_value in self.model.module.aux_losses.items():
-                        losses[aux_name].append(aux_value.detach())
+                    batch_losses.update(self.model.module.aux_losses)
+                for key, value in batch_losses.items():
+                    detached = value.detach()
+                    if key not in loss_sums:
+                        loss_sums[key] = detached.clone()
+                    else:
+                        loss_sums[key].add_(detached)
+                    loss_counts[key] += 1
 
-            # Average losses for this dataset
-            dataset_losses = {}
-            for key, value_list in losses.items():
-                # Stack tensors and compute mean
-                stacked = torch.stack(value_list)
-                mean_loss = stacked.mean()
-
-                # Reduce across processes
-                if dist.is_initialized():
-                    torch.distributed.all_reduce(mean_loss)
-                    mean_loss = mean_loss / dist.get_world_size()
-
-                dataset_losses[key] = mean_loss.item()
+            # Conditional keys may differ by rank and validation sample. Weight
+            # each mean by its actual number of contributing batch samples.
+            dataset_losses = {
+                key: value.item()
+                for key, value in self._distributed_weighted_loss_means(
+                    loss_sums, loss_counts
+                ).items()
+            }
 
             # Add to all_losses with dataset prefix
             for key, value in dataset_losses.items():
@@ -977,6 +1408,19 @@ class Trainer:
         wandb.summary["total_parameters"] = total_params
         wandb.summary["trainable_parameters"] = trainable_params
         wandb.summary["frozen_parameters"] = total_params - trainable_params
+        wandb.summary["world_size"] = self.world_size
+        wandb.summary["nodes"] = int(os.environ.get("LACWM_NNODES", "1"))
+        wandb.summary["gpus_per_node"] = int(
+            os.environ.get("LACWM_GPUS_PER_NODE", str(self.world_size))
+        )
+        wandb.summary["effective_global_batch_size"] = (
+            self.batch_size * self.gradient_accumulation_steps * self.world_size
+        )
+        wandb.summary["run_identity_sha256"] = getattr(
+            self, "run_identity_sha256", None
+        )
+        if getattr(self, "transition_parent", None) is not None:
+            wandb.summary["transition_parent"] = self.transition_parent
 
     def finalize_wandb(self):
         if not self.use_wandb:
@@ -1003,7 +1447,11 @@ class Trainer:
 
                 # log metrics
                 if self._curr_iter % self.log_every == 0 or is_last:
-                    metrics = self.metrics.get_train_metrics(self._curr_iter, losses)
+                    metrics = self.metrics.get_train_metrics(
+                        self._curr_iter,
+                        losses,
+                        getattr(self, "_last_operational_metrics", {}),
+                    )
                     metrics["learning_rate"] = self.optimizer.param_groups[0]["lr"]
                     self._log(metrics)
                     self.metrics.reset_throughput_counters()
@@ -1013,21 +1461,29 @@ class Trainer:
                 if self._curr_iter % self.val_every == 0 or is_last:
                     val_losses = self._validate()
                     # Track and save best validation loss per dataset
+                    improved_datasets = []
                     for key, value in val_losses.items():
                         if key.endswith("/loss"):
-                            dataset_name = key.split("/")[0]
+                            dataset_name = key.removesuffix("/loss")
                             best_key = f"best_val_loss_{dataset_name}"
                             previous_best = getattr(
                                 self.metrics, best_key, float("inf")
                             )
                             if value < previous_best:
                                 setattr(self.metrics, best_key, value)
-                                self._save_snapshot(
-                                    is_best=True, dataset_name=dataset_name
-                                )
-                                logger.info(
-                                    f"New best for {dataset_name}: {value:.4f}"
-                                )
+                                improved_datasets.append((dataset_name, value))
+
+                    # Refresh before writing any best checkpoint so the snapshot
+                    # and W&B telemetry never retain the initial global infinity.
+                    self.metrics.refresh_best_val_loss()
+                    for dataset_name, value in improved_datasets:
+                        if self.save_best:
+                            self._save_snapshot(
+                                is_best=True, dataset_name=dataset_name
+                            )
+                        logger.info(
+                            f"New best for {dataset_name}: {value:.4f}"
+                        )
 
                     val_metrics = self.metrics.get_val_metrics(
                         self._curr_iter, val_losses

@@ -23,6 +23,7 @@ import hashlib
 import importlib
 import json
 import math
+import numbers
 import os
 import re
 import subprocess
@@ -51,6 +52,33 @@ AGIBOT_CAMERA_JSONS = (
     "head_extrinsic_params_aligned.json",
     "hand_left_extrinsic_params_aligned.json",
     "hand_right_extrinsic_params_aligned.json",
+)
+AGIBOT_PROFILES = ("production", "qualification")
+AGIBOT_ROTATION_ATOL = 1e-3
+AGIBOT_OFFICIAL_REPO = "agibot-world/AgiBotWorld-Alpha"
+AGIBOT_OFFICIAL_REVISION = "128665c9e0244c45d1cbe5c13f5a4706afd24f27"
+AGIBOT_PREPARATION_REPORT = "preparation_report.json"
+AGIBOT_QUALIFICATION_MARKER_NAMES = (
+    ".qualification-only",
+    ".qualification_only",
+    "QUALIFICATION_ONLY",
+    "QUALIFICATION_ONLY_DO_NOT_TRAIN.md",
+    "qualification-only.marker",
+    "qualification_only.marker",
+    "qualification_provenance.json",
+)
+AGIBOT_QUALIFICATION_SIGNALS = (
+    "qualification_only",
+    "qualification only",
+    "static_extrinsic_repetition",
+    "static extrinsic repetition",
+    "synthesized_identity_base_pose",
+    "synthesized identity base pose",
+    "synthesized as identity",
+    "identity base pose",
+    "synthesized by repeating",
+    "repeating a single static extrinsic",
+    "repeated camera",
 )
 
 # Kept explicit so this utility does not import the training stack merely to
@@ -146,13 +174,16 @@ def stat_fingerprint(paths: Iterable[Path], manifest: Path | None = None) -> dic
     for path in unique_paths:
         try:
             stat = path.stat()
-            record = f"{path}\0{stat.st_size}\0{stat.st_mtime_ns}\n"
+            record = (
+                f"{path}\0{stat.st_size}\0{stat.st_mtime_ns}\0"
+                f"{stat.st_ctime_ns}\0{stat.st_ino}\n"
+            )
         except OSError as exc:
             missing.append(str(path))
             record = f"{path}\0MISSING\0{type(exc).__name__}\n"
         digest.update(record.encode("utf-8"))
     result: dict[str, Any] = {
-        "algorithm": "sha256(canonical_path,NUL,size,NUL,mtime_ns)",
+        "algorithm": "sha256(canonical_path,NUL,size,NUL,mtime_ns,NUL,ctime_ns,NUL,inode)",
         "file_count": len(unique_paths),
         "digest": digest.hexdigest(),
         "missing": missing,
@@ -289,16 +320,36 @@ def _probe_video(path: Path, av: Any, required_frames: Optional[int] = None) -> 
             if not streams:
                 return [Finding("error", "contains no video stream", str(path))]
             stream = streams[0]
+            stream.codec_context.options = {
+                **stream.codec_context.options,
+                "err_detect": "crccheck+bitstream+buffer+explode",
+            }
             width = int(getattr(stream, "width", 0) or 0)
             height = int(getattr(stream, "height", 0) or 0)
             if width <= 0 or height <= 0:
                 findings.append(Finding("error", "video has invalid dimensions", str(path)))
-            # Decode one frame: an MP4 header can be valid while its media payload is not.
-            try:
-                first = next(container.decode(stream))
-                if first.width <= 0 or first.height <= 0:
-                    findings.append(Finding("error", "decoded frame has invalid dimensions", str(path)))
-            except StopIteration:
+            decoded_frames = 0
+            reported_corruption = False
+            for frame in container.decode(stream):
+                if frame.width <= 0 or frame.height <= 0:
+                    findings.append(
+                        Finding(
+                            "error",
+                            f"decoded frame {decoded_frames} has invalid dimensions",
+                            str(path),
+                        )
+                    )
+                if bool(getattr(frame, "is_corrupt", False)) and not reported_corruption:
+                    findings.append(
+                        Finding(
+                            "error",
+                            f"decoded frame {decoded_frames} is marked corrupt",
+                            str(path),
+                        )
+                    )
+                    reported_corruption = True
+                decoded_frames += 1
+            if decoded_frames == 0:
                 findings.append(Finding("error", "video contains no decodable frames", str(path)))
             frame_count = int(getattr(stream, "frames", 0) or 0)
             if required_frames is not None:
@@ -310,34 +361,14 @@ def _probe_video(path: Path, av: Any, required_frames: Optional[int] = None) -> 
                             str(path),
                         )
                     )
-                elif frame_count <= 0:
+                if decoded_frames != required_frames:
                     findings.append(
                         Finding(
                             "error",
-                            "container does not report frame count; cannot prove trajectory alignment",
+                            f"video decodes to {decoded_frames} frames; trajectory has {required_frames}",
                             str(path),
                         )
                     )
-                if frame_count > 0:
-                    duration = int(getattr(stream, "duration", 0) or 0)
-                    if duration <= 0:
-                        findings.append(
-                            Finding("error", "video stream has no seekable duration", str(path))
-                        )
-                    else:
-                        try:
-                            container.seek(max(0, duration - 1), stream=stream, backward=True)
-                            tail = None
-                            for tail in container.decode(stream):
-                                pass
-                            if tail is None or tail.width <= 0 or tail.height <= 0:
-                                findings.append(
-                                    Finding("error", "last video segment is not decodable", str(path))
-                                )
-                        except Exception as exc:
-                            findings.append(
-                                Finding("error", f"cannot seek/decode video tail: {exc}", str(path))
-                            )
         finally:
             container.close()
     except Exception as exc:
@@ -617,7 +648,7 @@ def validate_egodex(args: argparse.Namespace) -> DatasetReport:
     manifest = args.egodex_manifest
     report = DatasetReport("egodex", str(manifest), args.egodex_cap, args.egodex_expected)
     entries = _read_path_manifest(manifest, report)
-    allowed_root = manifest.parent.resolve()
+    allowed_root = args.egodex_allowed_root
     for path in entries:
         if not path.resolve(strict=False).is_relative_to(allowed_root):
             report.error(f"manifest entry escapes EgoDex root {allowed_root}", path)
@@ -691,7 +722,570 @@ def _agibot_paths(entry: AgibotEntry, roots: dict[str, Path]) -> AgibotPaths:
     return AgibotPaths(entry, root, proprio, videos, camera_jsons)
 
 
-def _deep_agibot(paths: AgibotPaths, h5py: Any, av: Any, min_timesteps: int) -> list[Finding]:
+def _agibot_provenance_signals(path: Path) -> tuple[str, ...]:
+    """Return explicit qualification/synthesis signals from one provenance file."""
+    if path.name in AGIBOT_QUALIFICATION_MARKER_NAMES and path.suffix != ".json":
+        return (f"marker filename {path.name!r}",)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        if path.name == "qualification_provenance.json":
+            return (f"qualification provenance marker is unreadable: {exc}",)
+        return ()
+
+    serialized = json.dumps(payload, sort_keys=True).lower()
+    signals = [signal for signal in AGIBOT_QUALIFICATION_SIGNALS if signal in serialized]
+    if path.name == "qualification_provenance.json":
+        signals.insert(0, "qualification_provenance.json")
+    elif signals and "agibot" not in serialized:
+        # A shared data-root may contain provenance for another dataset.  Generic
+        # provenance is relevant here only when it identifies AgiBot itself.
+        return ()
+    return tuple(dict.fromkeys(signals))
+
+
+def _find_agibot_qualification_provenance(
+    roots: Iterable[Path],
+) -> list[tuple[Path, tuple[str, ...]]]:
+    """Find direct AgiBot qualification markers without walking a large data tree."""
+    candidates: set[Path] = set()
+    for root in roots:
+        resolved = root.expanduser().resolve(strict=False)
+        for directory in (resolved, resolved.parent):
+            for name in AGIBOT_QUALIFICATION_MARKER_NAMES:
+                path = directory / name
+                if path.is_file():
+                    candidates.add(path)
+            try:
+                candidates.update(
+                    path
+                    for path in directory.glob("*provenance*.json")
+                    if path.is_file()
+                )
+            except OSError:
+                # Structural checks below report inaccessible episode payloads.
+                # Do not turn unrelated parent-directory traversal into a crash.
+                continue
+
+    detected: list[tuple[Path, tuple[str, ...]]] = []
+    for path in sorted(candidates, key=str):
+        signals = _agibot_provenance_signals(path)
+        if signals:
+            detected.append((path, signals))
+    return detected
+
+
+def _agibot_profile_findings(
+    roots: Iterable[Path], profile: str
+) -> tuple[list[Finding], list[Path]]:
+    detected = _find_agibot_qualification_provenance(roots)
+    findings: list[Finding] = []
+    if profile == "qualification":
+        findings.append(
+            Finding(
+                "warning",
+                "AgiBot qualification profile permits provenance-declared synthesized/"
+                "repeated camera or base-pose data; results are pipeline-only",
+            )
+        )
+        for path, signals in detected:
+            findings.append(
+                Finding(
+                    "warning",
+                    "qualification provenance accepted explicitly: " + ", ".join(signals),
+                    str(path),
+                )
+            )
+    else:
+        for path, signals in detected:
+            findings.append(
+                Finding(
+                    "error",
+                    "production profile forbids qualification/synthesized AgiBot data: "
+                    + ", ".join(signals),
+                    str(path),
+                )
+            )
+    return findings, [path for path, _ in detected]
+
+
+def _verify_agibot_official_inventory(
+    inventory: Sequence[dict[str, Any]],
+) -> Optional[str]:
+    """Re-check report claims at the immutable approved upstream revision."""
+    try:
+        from huggingface_hub import HfApi
+    except ImportError as exc:
+        return f"huggingface-hub is required for production lineage verification: {exc}"
+    paths = [str(item.get("path", "")) for item in inventory]
+    try:
+        entries = HfApi().get_paths_info(
+            AGIBOT_OFFICIAL_REPO,
+            paths,
+            repo_type="dataset",
+            revision=AGIBOT_OFFICIAL_REVISION,
+            token=True,
+            expand=True,
+        )
+    except Exception as exc:
+        return f"cannot independently verify pinned official archive inventory: {exc}"
+    by_path = {getattr(entry, "path", None): entry for entry in entries}
+    for item in inventory:
+        path = str(item.get("path", ""))
+        entry = by_path.get(path)
+        lfs = getattr(entry, "lfs", None) if entry is not None else None
+        upstream_hash = getattr(lfs, "sha256", None)
+        upstream_size = int(getattr(entry, "size", 0) or 0) if entry is not None else 0
+        if (
+            entry is None
+            or upstream_hash != item.get("sha256")
+            or upstream_size != item.get("size")
+        ):
+            return f"claimed archive is absent or differs at pinned revision: {path}"
+    return None
+
+
+def _agibot_lineage_findings(
+    roots: Iterable[Path],
+    manifest: Path,
+    entry_count: int,
+    profile: str,
+    expected_payloads: Optional[set[Path]] = None,
+    workers: int = 1,
+    verify_upstream: bool = True,
+    verify_payload_hashes: bool = True,
+) -> tuple[list[Finding], list[Path]]:
+    """Require positive archive-bound provenance for production AgiBot data."""
+    if profile != "production":
+        return [], []
+    findings: list[Finding] = []
+    lineage_paths: list[Path] = []
+    manifest_resolved = manifest.resolve(strict=False)
+    manifest_hash = _sha256_file(manifest) if manifest.is_file() else None
+    expected_payloads = {
+        path.expanduser().resolve(strict=False) for path in (expected_payloads or set())
+    }
+    for root in sorted({path.expanduser().resolve(strict=False) for path in roots}, key=str):
+        report_path = root / AGIBOT_PREPARATION_REPORT
+        marker_path = root / ".agibot_archive_plan.sha256"
+        lineage_paths.extend((report_path, marker_path))
+        if report_path.is_symlink() or not report_path.is_file():
+            findings.append(
+                Finding(
+                    "error",
+                    "production AgiBot requires an archive-bound preparation_report.json",
+                    str(report_path),
+                )
+            )
+            continue
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            findings.append(
+                Finding("error", f"cannot read production preparation report: {exc}", str(report_path))
+            )
+            continue
+        if not isinstance(payload, dict):
+            findings.append(Finding("error", "preparation report is not a JSON object", str(report_path)))
+            continue
+
+        def require(condition: bool, message: str) -> None:
+            if not condition:
+                findings.append(Finding("error", message, str(report_path)))
+
+        source = payload.get("source")
+        require(payload.get("profile") == "production", "preparation report profile is not production")
+        require(
+            payload.get("preparer_sha256")
+            == _sha256_file(Path(__file__).resolve().with_name("prepare_agibot.py")),
+            "preparation report was produced by a different AgiBot preparer",
+        )
+        require(payload.get("passed") is True, "preparation report is not passing")
+        require(payload.get("archive_verified") is True, "preparation report is not archive-verified")
+        require(
+            payload.get("official_inventory_verified") is True,
+            "preparation report is not bound to the pinned official archive inventory",
+        )
+        require(
+            isinstance(source, dict)
+            and source.get("repo_id") == AGIBOT_OFFICIAL_REPO
+            and source.get("revision") == AGIBOT_OFFICIAL_REVISION,
+            "preparation report is not pinned to the approved official AgiBot revision",
+        )
+        require(
+            Path(str(payload.get("root", "/nonexistent"))).resolve(strict=False) == root,
+            "preparation report root does not match the active dataset root",
+        )
+        require(payload.get("synthetic_camera_motion") is False, "camera lineage is synthetic/unknown")
+        require(payload.get("synthetic_base_pose") is False, "base-pose lineage is synthetic/unknown")
+        require(
+            isinstance(payload.get("archive_plan_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", payload["archive_plan_sha256"]) is not None,
+            "preparation report lacks a valid archive-plan SHA-256",
+        )
+        require(
+            Path(str(payload.get("manifest", "/nonexistent"))).resolve(strict=False)
+            == manifest_resolved,
+            "preparation report is bound to a different runtime manifest",
+        )
+        require(
+            isinstance(manifest_hash, str) and payload.get("manifest_sha256") == manifest_hash,
+            "runtime manifest hash does not match preparation provenance",
+        )
+        require(
+            payload.get("selected_count") == entry_count,
+            "preparation selected_count does not match runtime manifest entries",
+        )
+        archive_results = payload.get("archive_results")
+        official_inventory = payload.get("official_inventory")
+        sections = {
+            item.get("section")
+            for item in archive_results
+            if isinstance(item, dict)
+        } if isinstance(archive_results, list) else set()
+        require(
+            sections.issuperset({"observations", "parameters", "proprio_stats"}),
+            "preparation report does not bind all required archive sections",
+        )
+        require(
+            isinstance(archive_results, list)
+            and all(
+                isinstance(item, dict)
+                and isinstance(item.get("sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is not None
+                for item in archive_results
+            ),
+            "preparation report contains invalid archive hashes",
+        )
+        inventory_valid = (
+            isinstance(official_inventory, list)
+            and len(official_inventory) == len(archive_results)
+            and all(
+                isinstance(item, dict)
+                and item.get("section") in {"observations", "parameters", "proprio_stats"}
+                and isinstance(item.get("path"), str)
+                and item["path"].startswith(f"{item.get('section')}/")
+                and not item["path"].startswith("/")
+                and ".." not in item["path"].split("/")
+                and item["path"].endswith(".tar")
+                and isinstance(item.get("sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is not None
+                and isinstance(item.get("size"), int)
+                and not isinstance(item.get("size"), bool)
+                and item["size"] > 0
+                for item in official_inventory
+            )
+            and {
+                (item.get("path"), item.get("sha256"))
+                for item in official_inventory
+            }
+            == {
+                (item.get("archive"), item.get("sha256"))
+                for item in archive_results
+                if isinstance(item, dict)
+            }
+        )
+        require(
+            inventory_valid,
+            "local archive results do not match a well-formed pinned official inventory",
+        )
+        if inventory_valid and verify_upstream:
+            upstream_error = _verify_agibot_official_inventory(official_inventory)
+            require(
+                upstream_error is None,
+                upstream_error or "pinned official archive inventory verification failed",
+            )
+        require(
+            isinstance(archive_results, list)
+            and any(
+                isinstance(item, dict)
+                and item.get("covered_planned_payload_count") == entry_count * 7
+                for item in archive_results
+            ),
+            "preparation report does not prove archive coverage for every manifest payload",
+        )
+        if marker_path.is_symlink() or not marker_path.is_file():
+            findings.append(
+                Finding("error", "archive-plan lineage marker is missing", str(marker_path))
+            )
+        else:
+            try:
+                marker = marker_path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                findings.append(Finding("error", f"cannot read lineage marker: {exc}", str(marker_path)))
+            else:
+                require(
+                    marker == payload.get("archive_plan_sha256"),
+                    "archive-plan marker does not match preparation report",
+                )
+        success_path = Path(str(payload.get("success_manifest", "/nonexistent"))).resolve(strict=False)
+        if not success_path.is_relative_to(root) or success_path.is_symlink() or not success_path.is_file():
+            findings.append(
+                Finding("error", "preparation success manifest is missing/outside the dataset root", str(success_path))
+            )
+        else:
+            lineage_paths.append(success_path)
+            require(
+                payload.get("success_manifest_sha256") == _sha256_file(success_path),
+                "success-manifest hash does not match preparation provenance",
+            )
+        payload_manifest = Path(
+            str(payload.get("payload_manifest", "/nonexistent"))
+        ).resolve(strict=False)
+        if (
+            not payload_manifest.is_relative_to(root)
+            or payload_manifest.is_symlink()
+            or not payload_manifest.is_file()
+        ):
+            findings.append(
+                Finding(
+                    "error",
+                    "payload hash manifest is missing/outside the dataset root",
+                    str(payload_manifest),
+                )
+            )
+            continue
+        lineage_paths.append(payload_manifest)
+        require(
+            payload.get("payload_manifest_sha256") == _sha256_file(payload_manifest),
+            "payload hash manifest does not match preparation provenance",
+        )
+        declared: dict[Path, str] = {}
+        parse_errors: list[str] = []
+        try:
+            with payload_manifest.open("r", encoding="utf-8") as handle:
+                for line_number, raw in enumerate(handle, 1):
+                    value = raw.rstrip("\n")
+                    fields = value.split("  ", 1)
+                    if len(fields) != 2 or re.fullmatch(r"[0-9a-f]{64}", fields[0]) is None:
+                        parse_errors.append(f"line {line_number}: invalid hash record")
+                        continue
+                    relative = Path(fields[1])
+                    absolute = (root / relative).resolve(strict=False)
+                    if relative.is_absolute() or not absolute.is_relative_to(root):
+                        parse_errors.append(f"line {line_number}: unsafe payload path")
+                        continue
+                    if absolute in declared:
+                        parse_errors.append(f"line {line_number}: duplicate payload path")
+                        continue
+                    declared[absolute] = fields[0]
+        except OSError as exc:
+            parse_errors.append(f"cannot read payload hash manifest: {exc}")
+        require(not parse_errors, f"invalid payload hash manifest: {parse_errors[:5]}")
+        require(
+            payload.get("payload_count") == len(expected_payloads) == entry_count * 7,
+            "payload hash count does not match the seven required files per manifest episode",
+        )
+        missing_or_extra = expected_payloads.symmetric_difference(declared)
+        require(
+            not missing_or_extra,
+            f"payload hash manifest file set differs from runtime manifest; "
+            f"examples={[str(path) for path in sorted(missing_or_extra, key=str)[:5]]}",
+        )
+        if not parse_errors and not missing_or_extra and verify_payload_hashes:
+            def check_payload(item: tuple[Path, str]) -> Optional[str]:
+                path, expected_hash = item
+                if path.is_symlink() or not path.is_file():
+                    return f"missing/symlink payload: {path}"
+                actual_hash = _sha256_file(path)
+                if actual_hash != expected_hash:
+                    return f"payload SHA-256 mismatch: {path}"
+                return None
+
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                mismatches = [
+                    message
+                    for message in executor.map(check_payload, declared.items())
+                    if message is not None
+                ]
+            require(
+                not mismatches,
+                f"published payloads no longer match verified archives; examples={mismatches[:5]}",
+            )
+    return findings, lineage_paths
+
+
+def _check_agibot_timestamps(values: Any, path: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    value_shape = getattr(values, "shape", None)
+    shape = tuple(value_shape) if value_shape is not None else (len(values),)
+    if len(shape) != 1:
+        return [
+            Finding(
+                "error",
+                f"timestamp has shape {shape}, expected [T]",
+                str(path),
+            )
+        ]
+    timestamps = values.tolist() if hasattr(values, "tolist") else list(values)
+    if not all(_is_finite_json_number(value) for value in timestamps):
+        findings.append(
+            Finding("error", "timestamp contains non-numeric or NaN/Inf values", str(path))
+        )
+        return findings
+    if len(timestamps) > 1:
+        for index, (left, right) in enumerate(zip(timestamps, timestamps[1:])):
+            if right <= left:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"timestamp is not strictly increasing at indices {index}->{index + 1}",
+                        str(path),
+                    )
+                )
+                break
+    return findings
+
+
+def _is_finite_json_number(value: Any) -> bool:
+    return (
+        isinstance(value, numbers.Real)
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _check_agibot_camera_json(
+    json_path: Path, trajectory_length: Optional[int], np: Any | None = None
+) -> list[Finding]:
+    findings: list[Finding] = []
+    try:
+        with json_path.open("r", encoding="utf-8") as handle:
+            records = json.load(handle)
+    except Exception as exc:
+        return [Finding("error", f"cannot inspect camera JSON: {exc}", str(json_path))]
+
+    if not isinstance(records, list) or not records:
+        return [Finding("error", "camera JSON must be a nonempty list", str(json_path))]
+    if trajectory_length is not None and len(records) != trajectory_length:
+        findings.append(
+            Finding(
+                "error",
+                f"camera JSON length {len(records)} != trajectory length {trajectory_length}",
+                str(json_path),
+            )
+        )
+
+    valid_rotations: list[tuple[int, list[list[float]]]] = []
+    for index, record in enumerate(records):
+        extrinsic = record.get("extrinsic") if isinstance(record, dict) else None
+        rotation = extrinsic.get("rotation_matrix") if isinstance(extrinsic, dict) else None
+        translation = extrinsic.get("translation_vector") if isinstance(extrinsic, dict) else None
+        rotation_shape_ok = (
+            isinstance(rotation, list)
+            and len(rotation) == 3
+            and all(isinstance(row, list) and len(row) == 3 for row in rotation)
+        )
+        translation_shape_ok = isinstance(translation, list) and len(translation) == 3
+        if not rotation_shape_ok or not translation_shape_ok:
+            findings.append(
+                Finding(
+                    "error",
+                    f"record {index} has invalid extrinsic matrix/vector",
+                    str(json_path),
+                )
+            )
+            continue
+
+        rotation_values = [value for row in rotation for value in row]
+        if not all(_is_finite_json_number(value) for value in rotation_values):
+            findings.append(
+                Finding(
+                    "error",
+                    f"record {index} rotation matrix contains non-numeric or NaN/Inf values",
+                    str(json_path),
+                )
+            )
+            continue
+        if not all(_is_finite_json_number(value) for value in translation):
+            findings.append(
+                Finding(
+                    "error",
+                    f"record {index} translation contains non-numeric or NaN/Inf values",
+                    str(json_path),
+                )
+            )
+
+        matrix = [[float(value) for value in row] for row in rotation]
+        if np is not None:
+            valid_rotations.append((index, matrix))
+            continue
+        gram = [
+            [sum(matrix[k][i] * matrix[k][j] for k in range(3)) for j in range(3)]
+            for i in range(3)
+        ]
+        orthonormal = all(
+            abs(gram[i][j] - (1.0 if i == j else 0.0)) <= AGIBOT_ROTATION_ATOL
+            for i in range(3)
+            for j in range(3)
+        )
+        if not orthonormal:
+            findings.append(
+                Finding(
+                    "error",
+                    f"record {index} rotation matrix is not orthonormal within "
+                    f"atol={AGIBOT_ROTATION_ATOL:g}",
+                    str(json_path),
+                )
+            )
+        determinant = (
+            matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
+            - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
+            + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0])
+        )
+        if determinant <= 0.0:
+            findings.append(
+                Finding(
+                    "error",
+                    f"record {index} rotation determinant must be positive; got {determinant:.6g}",
+                    str(json_path),
+                )
+            )
+
+    if np is not None and valid_rotations:
+        indices = [index for index, _ in valid_rotations]
+        matrices = np.asarray(
+            [matrix for _, matrix in valid_rotations], dtype=np.float64
+        )
+        grams = np.swapaxes(matrices, 1, 2) @ matrices
+        orthonormal = np.all(
+            np.abs(grams - np.eye(3, dtype=np.float64)[None, :, :])
+            <= AGIBOT_ROTATION_ATOL,
+            axis=(1, 2),
+        )
+        determinants = np.linalg.det(matrices)
+        for index, is_orthonormal, determinant in zip(
+            indices, orthonormal.tolist(), determinants.tolist()
+        ):
+            if not is_orthonormal:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"record {index} rotation matrix is not orthonormal within "
+                        f"atol={AGIBOT_ROTATION_ATOL:g}",
+                        str(json_path),
+                    )
+                )
+            if determinant <= 0.0:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"record {index} rotation determinant must be positive; "
+                        f"got {determinant:.6g}",
+                        str(json_path),
+                    )
+                )
+    return findings
+
+
+def _deep_agibot(
+    paths: AgibotPaths,
+    h5py: Any,
+    av: Any,
+    min_timesteps: int,
+    profile: str = "production",
+) -> list[Finding]:
     findings: list[Finding] = []
     trajectory_length: Optional[int] = None
     import numpy as np
@@ -701,52 +1295,115 @@ def _deep_agibot(paths: AgibotPaths, h5py: Any, av: Any, min_timesteps: int) -> 
             if missing:
                 findings.append(Finding("error", f"missing HDF5 fields: {missing}", str(paths.proprio)))
             if "timestamp" in handle:
-                timestamp_shape = tuple(handle["timestamp"].shape)
-                if len(timestamp_shape) != 1:
-                    findings.append(Finding("error", f"timestamp has shape {timestamp_shape}, expected [T]", str(paths.proprio)))
-                else:
+                timestamp = handle["timestamp"][...]
+                timestamp_shape = tuple(timestamp.shape)
+                if len(timestamp_shape) == 1:
                     trajectory_length = int(timestamp_shape[0])
                     if trajectory_length < min_timesteps:
                         findings.append(
                             Finding("error", f"trajectory has {trajectory_length} timestamps; need at least {min_timesteps}", str(paths.proprio))
                         )
+                findings.extend(_check_agibot_timestamps(timestamp, paths.proprio))
             for key, tail in AGIBOT_H5_FIELDS.items():
                 if key == "timestamp" or key not in handle:
                     continue
                 findings.extend(_check_shape(paths.proprio, key, handle[key].shape, tail, trajectory_length))
                 if not np.isfinite(handle[key][...]).all():
                     findings.append(Finding("error", f"field {key!r} contains NaN/Inf", str(paths.proprio)))
+            for key in ("state/end/orientation", "action/end/orientation"):
+                if key not in handle:
+                    continue
+                values = np.asarray(handle[key][...], dtype=np.float64)
+                norms = np.linalg.norm(values, axis=-1)
+                if not np.all(np.abs(norms - 1.0) <= 1e-3):
+                    findings.append(
+                        Finding(
+                            "error",
+                            f"field {key!r} contains non-unit/zero quaternions",
+                            str(paths.proprio),
+                        )
+                    )
+            if "state/robot/orientation" in handle and "state/robot/position" in handle:
+                base_orientation = np.asarray(
+                    handle["state/robot/orientation"][...], dtype=np.float64
+                )
+                base_position = np.asarray(
+                    handle["state/robot/position"][...], dtype=np.float64
+                )
+                norms = np.linalg.norm(base_orientation, axis=-1)
+                zero_sentinel = norms <= 1e-8
+                unit_quaternion = np.abs(norms - 1.0) <= 1e-3
+                if not np.all(zero_sentinel | unit_quaternion):
+                    findings.append(
+                        Finding(
+                            "error",
+                            "robot orientation is neither unit quaternion nor the "
+                            "official all-zero fixed-base sentinel",
+                            str(paths.proprio),
+                        )
+                    )
+                if np.any(zero_sentinel) and not np.all(zero_sentinel):
+                    findings.append(
+                        Finding(
+                            "error",
+                            "robot orientation mixes zero sentinels and quaternions",
+                            str(paths.proprio),
+                        )
+                    )
+                position_static = bool(
+                    len(base_position) <= 1
+                    or np.all(np.abs(base_position - base_position[:1]) <= 1e-7)
+                )
+                orientation_static = bool(
+                    len(base_orientation) <= 1
+                    or np.all(np.abs(base_orientation - base_orientation[:1]) <= 1e-7)
+                )
+                velocity_nonzero = False
+                if "action/robot/velocity" in handle:
+                    velocity = np.asarray(handle["action/robot/velocity"][...])
+                    if trajectory_length is not None and tuple(velocity.shape) != (
+                        trajectory_length,
+                        2,
+                    ):
+                        findings.append(
+                            Finding(
+                                "error",
+                                f"action/robot/velocity shape {tuple(velocity.shape)} "
+                                f"!= {(trajectory_length, 2)}",
+                                str(paths.proprio),
+                            )
+                        )
+                    elif not np.isfinite(velocity).all():
+                        findings.append(
+                            Finding(
+                                "error",
+                                "action/robot/velocity contains NaN/Inf",
+                                str(paths.proprio),
+                            )
+                        )
+                    else:
+                        velocity_nonzero = bool(np.any(np.abs(velocity) > 1e-6))
+                if velocity_nonzero and position_static and orientation_static:
+                    findings.append(
+                        Finding(
+                            "warning" if profile == "qualification" else "error",
+                            "nonzero commanded base velocity is inconsistent with a static base-pose stream",
+                            str(paths.proprio),
+                        )
+                    )
+                if np.all(zero_sentinel) and not position_static:
+                    findings.append(
+                        Finding(
+                            "error",
+                            "all-zero robot-orientation sentinel is valid only for a stationary fixed base",
+                            str(paths.proprio),
+                        )
+                    )
     except Exception as exc:
         findings.append(Finding("error", f"cannot inspect HDF5: {exc}", str(paths.proprio)))
 
     for json_path in paths.camera_jsons:
-        try:
-            with json_path.open("r", encoding="utf-8") as handle:
-                records = json.load(handle)
-            if not isinstance(records, list) or not records:
-                findings.append(Finding("error", "camera JSON must be a nonempty list", str(json_path)))
-                continue
-            if trajectory_length is not None and len(records) != trajectory_length:
-                findings.append(
-                    Finding("error", f"camera JSON length {len(records)} != trajectory length {trajectory_length}", str(json_path))
-                )
-            for index in range(len(records)):
-                record = records[index]
-                extrinsic = record.get("extrinsic") if isinstance(record, dict) else None
-                rotation = extrinsic.get("rotation_matrix") if isinstance(extrinsic, dict) else None
-                translation = extrinsic.get("translation_vector") if isinstance(extrinsic, dict) else None
-                if (
-                    not isinstance(rotation, list)
-                    or len(rotation) != 3
-                    or any(not isinstance(row, list) or len(row) != 3 for row in rotation)
-                    or not isinstance(translation, list)
-                    or len(translation) != 3
-                ):
-                    findings.append(
-                        Finding("error", f"record {index} has invalid extrinsic matrix/vector", str(json_path))
-                    )
-        except Exception as exc:
-            findings.append(Finding("error", f"cannot inspect camera JSON: {exc}", str(json_path)))
+        findings.extend(_check_agibot_camera_json(json_path, trajectory_length, np))
     for video in paths.videos:
         findings.extend(_probe_video(video, av, trajectory_length))
     return findings
@@ -763,7 +1420,39 @@ def validate_agibot(args: argparse.Namespace) -> DatasetReport:
         "viscam": args.agibot_viscam_root,
         "scr": args.agibot_root,
     }
+    used_roots = {
+        roots[entry.dataset_id]
+        for entry in entries
+        if entry.dataset_id in roots
+    }
+    profile_findings, qualification_markers = _agibot_profile_findings(
+        used_roots, args.agibot_profile
+    )
+    _merge_findings(report, profile_findings)
     all_paths = [_agibot_paths(entry, roots) for entry in entries]
+    expected_payloads = {
+        item.resolve(strict=False)
+        for paths in all_paths
+        for item in (paths.proprio, *paths.videos, *paths.camera_jsons)
+    }
+    distinct_roots = {path.resolve(strict=False) for path in used_roots}
+    if args.agibot_profile == "production" and len(distinct_roots) > 1:
+        report.error(
+            "production AgiBot manifests must use one canonical prepared root; "
+            f"found {sorted(str(path) for path in distinct_roots)}",
+            manifest,
+        )
+        lineage_paths: list[Path] = []
+    else:
+        lineage_findings, lineage_paths = _agibot_lineage_findings(
+            used_roots,
+            manifest,
+            len(entries),
+            args.agibot_profile,
+            expected_payloads,
+            args.workers,
+        )
+        _merge_findings(report, lineage_findings)
     complete: list[AgibotPaths] = []
     for paths in all_paths:
         findings = _required_files((paths.proprio, *paths.videos, *paths.camera_jsons))
@@ -780,6 +1469,22 @@ def validate_agibot(args: argparse.Namespace) -> DatasetReport:
         ),
         manifest,
     )
+    if lineage_paths:
+        report.fingerprint = stat_fingerprint(
+            (
+                item
+                for paths in selected
+                for item in (paths.proprio, *paths.videos, *paths.camera_jsons)
+            ),
+            manifest,
+        )
+        lineage_fingerprint = stat_fingerprint(lineage_paths)
+        report.fingerprint["lineage"] = lineage_fingerprint
+    report.fingerprint["agibot_profile"] = args.agibot_profile
+    report.fingerprint["qualification_markers"] = [
+        str(path) for path in qualification_markers
+    ]
+    report.fingerprint["lineage_files"] = [str(path) for path in lineage_paths]
     complete_set = set(complete)
     _check_cap(report, len(entries), sum(paths in complete_set for paths in selected))
     if args.files_only:
@@ -792,7 +1497,9 @@ def validate_agibot(args: argparse.Namespace) -> DatasetReport:
     deep_entries = complete if args.validate_all else [paths for paths in selected if paths in complete_set]
     _parallel_deep_check(
         deep_entries,
-        lambda item: _deep_agibot(item, h5py, av, args.min_timesteps),
+        lambda item: _deep_agibot(
+            item, h5py, av, args.min_timesteps, args.agibot_profile
+        ),
         report,
         args.workers,
     )
@@ -845,7 +1552,7 @@ def validate_abc(args: argparse.Namespace) -> DatasetReport:
     manifest = args.abc_manifest
     report = DatasetReport("abc", str(manifest), args.abc_cap, args.abc_expected)
     entries = _read_path_manifest(manifest, report)
-    allowed_root = (args.data_root / "abc_pp").resolve()
+    allowed_root = args.abc_allowed_root
     for path in entries:
         if not path.resolve(strict=False).is_relative_to(allowed_root):
             report.error(f"manifest entry escapes ABC root {allowed_root}", path)
@@ -910,12 +1617,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--droid-root", type=Path)
     parser.add_argument("--egodex-manifest", type=Path)
+    parser.add_argument(
+        "--egodex-allowed-root",
+        type=Path,
+        help=(
+            "explicit root that every EgoDex manifest entry must remain under; "
+            "defaults to the manifest directory"
+        ),
+    )
     parser.add_argument("--agibot-manifest", type=Path)
     parser.add_argument("--abc-manifest", type=Path)
+    parser.add_argument(
+        "--abc-allowed-root",
+        type=Path,
+        help=(
+            "explicit root that every ABC manifest entry must remain under; "
+            "defaults to DATA_ROOT/abc_pp"
+        ),
+    )
     parser.add_argument("--agibot-root", type=Path)
     parser.add_argument("--agibot-alpha-root", type=Path)
     parser.add_argument("--agibot-beta-root", type=Path)
     parser.add_argument("--agibot-viscam-root", type=Path)
+    parser.add_argument(
+        "--agibot-profile",
+        choices=AGIBOT_PROFILES,
+        default="production",
+        help=(
+            "AgiBot data-safety profile: production rejects qualification/synthesized "
+            "provenance; qualification permits it with warnings (default: production)"
+        ),
+    )
     return parser
 
 
@@ -931,8 +1663,14 @@ def _normalize_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -
 
     args.droid_root = (args.droid_root or args.data_root / "droid_lerobot").expanduser().resolve()
     args.egodex_manifest = (args.egodex_manifest or args.data_root / "egodex_cdn" / "manifest.csv").expanduser().resolve()
+    args.egodex_allowed_root = (
+        args.egodex_allowed_root or args.egodex_manifest.parent
+    ).expanduser().resolve()
     args.agibot_manifest = (args.agibot_manifest or args.data_root / "agibot" / "manifest.csv").expanduser().resolve()
     args.abc_manifest = (args.abc_manifest or args.data_root / "abc_pp" / "manifest.txt").expanduser().resolve()
+    args.abc_allowed_root = (
+        args.abc_allowed_root or args.data_root / "abc_pp"
+    ).expanduser().resolve()
     args.agibot_root = (args.agibot_root or args.data_root / "agibot").expanduser().resolve()
     args.agibot_alpha_root = (
         args.agibot_alpha_root
@@ -1012,12 +1750,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "agibot": str(args.agibot_manifest),
                 "abc": str(args.abc_manifest),
             },
+            "allowed_external_roots": {
+                "egodex": str(args.egodex_allowed_root),
+                "abc": str(args.abc_allowed_root),
+            },
             "agibot_roots": {
                 "scr": str(args.agibot_root),
                 "alpha": str(args.agibot_alpha_root),
                 "beta": str(args.agibot_beta_root),
                 "viscam": str(args.agibot_viscam_root),
             },
+            "agibot_profile": args.agibot_profile,
         }
         print(
             json.dumps(

@@ -54,10 +54,18 @@ trainer:
   viz_data_loader: ${viz_data_loader}
   config:
     max_iter: ???
+    # Optional immutable handoff manifest for a new dataset stage. This is used
+    # only when saving.save_path does not yet exist. It inherits model and
+    # optimizer progress while intentionally starting fresh loader/RNG,
+    # validation-best, and W&B state under a distinct guarded run identity.
+    transition_handoff_path: null
     # Number of physical microbatches whose gradients form one optimizer update.
     # Experiments that need accumulation override this; one preserves the
     # historical one-batch-per-update behavior.
     gradient_accumulation_steps: 1
+    # Ignore startup timing noise for the first 100 optimizer steps. Set to 0
+    # for short infrastructure smoke tests that need immediate throughput data.
+    throughput_warmup_steps: 100
     logging:
       log_every: 50
     saving:

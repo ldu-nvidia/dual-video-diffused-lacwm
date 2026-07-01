@@ -47,7 +47,7 @@ class SetupTrainingSafetyTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ALLOW_DATA_DOWNLOAD=1", result.stdout)
 
-    def test_agibot_archive_download_is_blocked_even_with_ack(self):
+    def test_agibot_download_requires_explicit_checksummed_archive_plan(self):
         result = self._run(
             FETCH="download",
             ALLOW_DATA_DOWNLOAD="1",
@@ -55,7 +55,18 @@ class SetupTrainingSafetyTest(unittest.TestCase):
             AGIBOT_LIMIT="1",
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("AgiBot automatic download is blocked", result.stdout)
+        self.assertIn("AGIBOT_ARCHIVE_PLAN is required", result.stdout)
+
+    def test_agibot_download_requires_exact_episode_plan(self):
+        result = self._run(
+            FETCH="download",
+            ALLOW_DATA_DOWNLOAD="1",
+            AGIBOT_ENABLE="1",
+            AGIBOT_LIMIT="1",
+            AGIBOT_ARCHIVE_PLAN=str(SETUP),  # nonempty; parsing occurs only after all guards
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("AGIBOT_EPISODE_PLAN is required", result.stdout)
 
     def test_abc_requires_explicit_file_plan_before_download(self):
         result = self._run(

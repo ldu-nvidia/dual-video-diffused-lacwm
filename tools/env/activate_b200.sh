@@ -35,4 +35,20 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 
+# Tested bare-metal B200 RoCE profile. Keep the defaults overridable for a
+# future fabric/runtime, while protecting NCCL 2.26.2 from its 32-rank NVLS
+# communicator memory failure.
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+export NCCL_IB_TIMEOUT="${NCCL_IB_TIMEOUT:-20}"
+export NCCL_IB_SL="${NCCL_IB_SL:-0}"
+export NCCL_IB_TC="${NCCL_IB_TC:-52}"
+export NCCL_IB_FIFO_TC="${NCCL_IB_FIFO_TC:-84}"
+export NCCL_IGNORE_CPU_AFFINITY="${NCCL_IGNORE_CPU_AFFINITY:-0}"
+export NCCL_IB_QPS_PER_CONNECTION="${NCCL_IB_QPS_PER_CONNECTION:-4}"
+export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-0}"
+export NCCL_IB_HCA="${NCCL_IB_HCA:-=rocep145s0:1,rocep146s0:1,rocep152s0:1,rocep153s0:1,rocep198s0:1,rocep199s0:1,rocep205s0:1,rocep206s0:1}"
+export NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-none}"
+export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
+export CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-${SLURM_TMPDIR:-/tmp}/lacwm-${UID}-cuda-cache-${SLURM_JOB_ID:-manual}}"
+
 unset _lacwm_env_dir _lacwm_repo _lacwm_pin _lacwm_base _lacwm_actual_pin

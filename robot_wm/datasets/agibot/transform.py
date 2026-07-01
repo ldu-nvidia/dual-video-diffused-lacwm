@@ -94,9 +94,21 @@ def _get_state(episode: dict[str, Any]) -> np.ndarray:
     right_T[:, :3, :3] = right_rot
 
     base_xyz = proprio_dict["state_robot_position"]
-    base_quat = proprio_dict["state_robot_orientation"]
-    zero_norm_indices = np.where(np.linalg.norm(base_quat, axis=1) == 0)[0]
+    base_quat = np.asarray(proprio_dict["state_robot_orientation"]).copy()
+    base_norms = np.linalg.norm(base_quat, axis=1)
+    zero_norm_indices = np.where(base_norms <= 1e-8)[0]
+    invalid = (base_norms > 1e-8) & (np.abs(base_norms - 1.0) > 1e-3)
+    if np.any(invalid):
+        raise ValueError("AgiBot robot orientation contains invalid quaternions")
     if len(zero_norm_indices) > 0:
+        if len(zero_norm_indices) != len(base_quat):
+            raise ValueError("AgiBot robot orientation mixes zero sentinels and quaternions")
+        if not np.all(np.abs(base_xyz - base_xyz[:1]) <= 1e-7):
+            raise ValueError("AgiBot zero-quaternion sentinel is valid only for a fixed base")
+        # The official full release uses [0,0,0,0] for every timestep of some
+        # genuinely fixed-base episodes. Canonicalize that documented sentinel
+        # to the identity quaternion; empty/moving base streams are rejected by
+        # preparation and validation rather than filled here.
         base_quat[zero_norm_indices] = np.array([0, 0, 0, 1])
     base_rot = quat_to_rot_mat(base_quat)
     base_T = np.tile(np.eye(4)[None, :, :], (base_xyz.shape[0], 1, 1))
@@ -123,7 +135,7 @@ def _get_gt_action(episode: dict[str, Any]) -> np.ndarray:
     proprio_dict = episode["proprio_stats"]
 
     # get position and orientation actions for both arms
-    left_xyz, right_xyz = proprio_dict["action_end_positon"].transpose(1, 0, 2)
+    left_xyz, right_xyz = proprio_dict["action_end_position"].transpose(1, 0, 2)
     left_quat, right_quat = proprio_dict["action_end_orientation"].transpose(1, 0, 2)
 
     gripper_state_binary, flag_imp = scale_gripper_state_0_to_1(
@@ -230,6 +242,8 @@ def _get_actions(episode: dict[str, Any], action_type: str = "action") -> np.nda
 
     if "camera" in action_type:
         camera_motion = _load_camera_extrinsics(episode, "head_color")
+        if "delta" in action_type:
+            camera_motion = _get_T_delta(camera_motion)
         action = np.concatenate([action, camera_motion], axis=-1)
     return action
 
