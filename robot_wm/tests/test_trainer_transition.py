@@ -82,6 +82,76 @@ class TrainerTransitionTest(unittest.TestCase):
         )
         return snapshot_path, handoff_path
 
+    def _write_topology_migration(self, root: Path, identity: str):
+        snapshot_path, handoff_path = self._write_parent_and_handoff(root, identity)
+        snapshot = torch.load(snapshot_path, map_location="cpu", weights_only=True)
+        snapshot["world_size"] = 4
+        snapshot["gradient_accumulation_steps"] = 2
+        snapshot["rank_states"] = [
+            {"global_rank": rank, "data_loader": {"cursor": rank}}
+            for rank in range(4)
+        ]
+        torch.save(snapshot, snapshot_path)
+        snapshot_sha = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+
+        identity_path = root / "run_identity.json"
+        identity_path.write_text(
+            json.dumps(
+                {
+                    "identity_sha256": identity,
+                    "batch_size": 4,
+                    "gradient_accumulation_steps": 2,
+                    "world_size": 4,
+                    "effective_global_batch_size": 32,
+                },
+                sort_keys=True,
+            )
+        )
+        identity_file_sha = hashlib.sha256(identity_path.read_bytes()).hexdigest()
+        ack_path = root / "checkpoint-ack.json"
+        ack_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "checkpoint_written": True,
+                    "next_iter": 41,
+                    "run_identity_sha256": identity,
+                    "snapshot": str(snapshot_path.resolve()),
+                },
+                sort_keys=True,
+            )
+        )
+        ack_sha = hashlib.sha256(ack_path.read_bytes()).hexdigest()
+        handoff_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "status": "complete",
+                    "transition_kind": "topology_migration_reset_rank_state",
+                    "rank_local_state_policy": "reset",
+                    "authorization_basis": "user authorized topology migration",
+                    "parent_snapshot": str(snapshot_path.resolve()),
+                    "parent_snapshot_sha256": snapshot_sha,
+                    "parent_run_identity_sha256": identity,
+                    "parent_run_identity": str(identity_path.resolve()),
+                    "parent_run_identity_file_sha256": identity_file_sha,
+                    "checkpoint_ack": str(ack_path.resolve()),
+                    "checkpoint_ack_sha256": ack_sha,
+                    "checkpoint_ack_next_iter": 41,
+                    "parent_batch_size": 4,
+                    "parent_gradient_accumulation_steps": 2,
+                    "parent_world_size": 4,
+                    "parent_effective_global_batch_size": 32,
+                    "target_batch_size": 4,
+                    "target_gradient_accumulation_steps": 4,
+                    "target_world_size": 2,
+                    "target_effective_global_batch_size": 32,
+                },
+                sort_keys=True,
+            )
+        )
+        return snapshot_path, handoff_path
+
     def test_transition_preserves_training_progress_and_resets_dataset_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -124,6 +194,51 @@ class TrainerTransitionTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
                 trainer._load_transition_snapshot(handoff)
 
+            trainer.model.module.load_state_dict.assert_not_called()
+            trainer.optimizer.load_state_dict.assert_not_called()
+            trainer.lr_scheduler.load_state_dict.assert_not_called()
+
+    def test_topology_migration_loads_progress_and_resets_rank_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent_identity = "a" * 64
+            trainer = self._make_trainer("b" * 64)
+            trainer.batch_size = 4
+            trainer.world_size = 2
+            trainer.gradient_accumulation_steps = 4
+            _, handoff = self._write_topology_migration(root, parent_identity)
+
+            trainer._load_transition_snapshot(handoff)
+
+            trainer.model.module.load_state_dict.assert_called_once()
+            trainer.optimizer.load_state_dict.assert_called_once()
+            trainer.lr_scheduler.load_state_dict.assert_called_once()
+            self.assertEqual(trainer._start_iter, 41)
+            self.assertEqual(trainer.metrics.total_observations, 9_999)
+            self.assertIsNone(trainer._resume_rng_state)
+            self.assertIsNone(trainer.wandb_run_id)
+            self.assertEqual(
+                trainer.transition_parent["transition_kind"],
+                "topology_migration_reset_rank_state",
+            )
+            self.assertEqual(
+                trainer.transition_parent["effective_global_batch_size"], 32
+            )
+
+    def test_topology_migration_rejects_non_reset_policy_before_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trainer = self._make_trainer("b" * 64)
+            trainer.batch_size = 4
+            trainer.world_size = 2
+            trainer.gradient_accumulation_steps = 4
+            _, handoff = self._write_topology_migration(root, "a" * 64)
+            manifest = json.loads(handoff.read_text())
+            manifest["rank_local_state_policy"] = "preserve"
+            handoff.write_text(json.dumps(manifest))
+
+            with self.assertRaisesRegex(RuntimeError, "reset rank-local state"):
+                trainer._load_transition_snapshot(handoff)
             trainer.model.module.load_state_dict.assert_not_called()
             trainer.optimizer.load_state_dict.assert_not_called()
             trainer.lr_scheduler.load_state_dict.assert_not_called()

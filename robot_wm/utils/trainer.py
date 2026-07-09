@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 # Average loss across all validation datasets
 AVG_LOSS_KEY = "avg/loss"
+TOPOLOGY_MIGRATION_KIND = "topology_migration_reset_rank_state"
 
 
 @dataclass
@@ -866,6 +867,193 @@ class Trainer:
             )
         return validated
 
+    def _validate_transition_topology(
+        self,
+        manifest,
+        snapshot,
+        *,
+        checkpoint_accumulation_steps: int,
+        saved_world_size: int,
+    ):
+        """Authorize a topology change only when the global batch is unchanged."""
+        if (
+            checkpoint_accumulation_steps == self.gradient_accumulation_steps
+            and saved_world_size == self.world_size
+        ):
+            if manifest.get("schema_version") == 1:
+                return None
+            raise RuntimeError(
+                "schema 2 topology migration requires a changed topology tuple"
+            )
+        if manifest.get("transition_kind") != TOPOLOGY_MIGRATION_KIND:
+            raise RuntimeError(
+                "transition checkpoint topology mismatch without an explicit "
+                f"{TOPOLOGY_MIGRATION_KIND} handoff"
+            )
+        if manifest.get("schema_version") != 2:
+            raise RuntimeError("topology migration requires handoff schema_version=2")
+        if manifest.get("rank_local_state_policy") != "reset":
+            raise RuntimeError(
+                "topology migration must explicitly reset rank-local state"
+            )
+        authorization_basis = manifest.get("authorization_basis")
+        if not isinstance(authorization_basis, str) or not authorization_basis.strip():
+            raise RuntimeError("topology migration lacks authorization_basis")
+
+        def positive_int(field_name: str) -> int:
+            value = manifest.get(field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise RuntimeError(
+                    f"topology migration {field_name} must be a positive integer"
+                )
+            return value
+
+        parent_batch_size = positive_int("parent_batch_size")
+        parent_world_size = positive_int("parent_world_size")
+        parent_accumulation = positive_int(
+            "parent_gradient_accumulation_steps"
+        )
+        parent_global_batch = positive_int(
+            "parent_effective_global_batch_size"
+        )
+        target_batch_size = positive_int("target_batch_size")
+        target_world_size = positive_int("target_world_size")
+        target_accumulation = positive_int(
+            "target_gradient_accumulation_steps"
+        )
+        target_global_batch = positive_int("target_effective_global_batch_size")
+        if (
+            parent_world_size != saved_world_size
+            or parent_accumulation != checkpoint_accumulation_steps
+        ):
+            raise RuntimeError(
+                "topology migration parent tuple differs from the checkpoint"
+            )
+        if (
+            target_batch_size != self.batch_size
+            or target_world_size != self.world_size
+            or target_accumulation != self.gradient_accumulation_steps
+        ):
+            raise RuntimeError(
+                "topology migration child tuple differs from the current run"
+            )
+        computed_parent_global_batch = (
+            parent_batch_size * parent_world_size * parent_accumulation
+        )
+        computed_target_global_batch = (
+            target_batch_size * target_world_size * target_accumulation
+        )
+        if (
+            parent_global_batch != computed_parent_global_batch
+            or target_global_batch != computed_target_global_batch
+            or parent_global_batch != target_global_batch
+        ):
+            raise RuntimeError(
+                "topology migration must preserve the effective global batch"
+            )
+
+        identity_path_value = manifest.get("parent_run_identity")
+        if not isinstance(identity_path_value, str) or not identity_path_value:
+            raise RuntimeError("topology migration lacks parent_run_identity")
+        identity_path = Path(identity_path_value).expanduser()
+        if not identity_path.is_absolute():
+            raise RuntimeError("topology migration parent_run_identity must be absolute")
+        identity_path = identity_path.resolve(strict=True)
+        expected_identity_file_sha = self._require_sha256(
+            manifest.get("parent_run_identity_file_sha256"),
+            field_name="parent_run_identity_file_sha256",
+        )
+        actual_identity_file_sha = self._sha256_file_rank_zero(identity_path)
+        if actual_identity_file_sha != expected_identity_file_sha:
+            raise RuntimeError("topology migration parent run identity SHA-256 mismatch")
+        try:
+            parent_identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"unable to read topology migration parent identity: {exc}"
+            ) from exc
+        if parent_identity.get("identity_sha256") != snapshot.get(
+            "run_identity_sha256"
+        ):
+            raise RuntimeError(
+                "topology migration parent identity differs from the checkpoint"
+            )
+        expected_parent_identity = {
+            "batch_size": parent_batch_size,
+            "world_size": parent_world_size,
+            "gradient_accumulation_steps": parent_accumulation,
+            "effective_global_batch_size": parent_global_batch,
+        }
+        mismatches = [
+            key
+            for key, value in expected_parent_identity.items()
+            if parent_identity.get(key) != value
+        ]
+        if mismatches:
+            raise RuntimeError(
+                "topology migration parent identity mismatch for fields: "
+                f"{mismatches}"
+            )
+
+        checkpoint_ack_value = manifest.get("checkpoint_ack")
+        if not isinstance(checkpoint_ack_value, str) or not checkpoint_ack_value:
+            raise RuntimeError("topology migration lacks checkpoint_ack")
+        checkpoint_ack_path = Path(checkpoint_ack_value).expanduser()
+        if not checkpoint_ack_path.is_absolute():
+            raise RuntimeError("topology migration checkpoint_ack must be absolute")
+        checkpoint_ack_path = checkpoint_ack_path.resolve(strict=True)
+        expected_ack_sha = self._require_sha256(
+            manifest.get("checkpoint_ack_sha256"),
+            field_name="checkpoint_ack_sha256",
+        )
+        actual_ack_sha = self._sha256_file_rank_zero(checkpoint_ack_path)
+        if actual_ack_sha != expected_ack_sha:
+            raise RuntimeError("topology migration checkpoint ACK SHA-256 mismatch")
+        try:
+            checkpoint_ack = json.loads(
+                checkpoint_ack_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"unable to read topology migration checkpoint ACK: {exc}"
+            ) from exc
+        if (
+            checkpoint_ack.get("schema_version") != 1
+            or checkpoint_ack.get("checkpoint_written") is not True
+            or checkpoint_ack.get("run_identity_sha256")
+            != snapshot.get("run_identity_sha256")
+        ):
+            raise RuntimeError("topology migration checkpoint ACK is not valid")
+        ack_next_iter = checkpoint_ack.get("next_iter")
+        if (
+            ack_next_iter != snapshot.get("_start_iter")
+            or manifest.get("checkpoint_ack_next_iter") != ack_next_iter
+        ):
+            raise RuntimeError(
+                "topology migration checkpoint ACK iteration mismatch"
+            )
+        ack_snapshot = Path(str(checkpoint_ack.get("snapshot", ""))).expanduser()
+        if not ack_snapshot.is_absolute():
+            raise RuntimeError(
+                "topology migration checkpoint ACK snapshot must be absolute"
+            )
+        handoff_snapshot = Path(str(manifest.get("parent_snapshot", ""))).expanduser()
+        if ack_snapshot.resolve(strict=True) != handoff_snapshot.resolve(strict=True):
+            raise RuntimeError(
+                "topology migration checkpoint ACK points to another snapshot"
+            )
+        return {
+            "transition_kind": TOPOLOGY_MIGRATION_KIND,
+            "rank_local_state_policy": "reset",
+            "authorization_basis": authorization_basis.strip(),
+            "checkpoint_ack_sha256": actual_ack_sha,
+            "parent_world_size": parent_world_size,
+            "parent_gradient_accumulation_steps": parent_accumulation,
+            "target_world_size": target_world_size,
+            "target_gradient_accumulation_steps": target_accumulation,
+            "effective_global_batch_size": target_global_batch,
+        }
+
     def _load_transition_snapshot(self, handoff_path: Path):
         """Warm-continue optimizer state while starting a new dataset lineage.
 
@@ -883,9 +1071,18 @@ class Trainer:
             raise RuntimeError(
                 f"unable to read transition handoff manifest {handoff_path}: {exc}"
             ) from exc
-        if manifest.get("schema_version") != 1 or manifest.get("status") != "complete":
+        schema_version = manifest.get("schema_version")
+        if (
+            manifest.get("status") != "complete"
+            or schema_version not in (1, 2)
+            or (
+                schema_version == 2
+                and manifest.get("transition_kind") != TOPOLOGY_MIGRATION_KIND
+            )
+        ):
             raise RuntimeError(
-                "transition handoff must have schema_version=1 and status='complete'"
+                "transition handoff must be complete schema 1, or complete schema 2 "
+                f"with transition_kind={TOPOLOGY_MIGRATION_KIND!r}"
             )
 
         parent_identity = self._require_sha256(
@@ -939,18 +1136,13 @@ class Trainer:
         checkpoint_accumulation_steps = int(
             snapshot.get("gradient_accumulation_steps", 1)
         )
-        if checkpoint_accumulation_steps != self.gradient_accumulation_steps:
-            raise RuntimeError(
-                "transition checkpoint gradient-accumulation mismatch: "
-                f"checkpoint={checkpoint_accumulation_steps}, "
-                f"current={self.gradient_accumulation_steps}"
-            )
         saved_world_size = int(snapshot.get("world_size", -1))
-        if saved_world_size != self.world_size:
-            raise RuntimeError(
-                "transition checkpoint world-size mismatch: "
-                f"checkpoint={saved_world_size}, current={self.world_size}"
-            )
+        topology_migration = self._validate_transition_topology(
+            manifest,
+            snapshot,
+            checkpoint_accumulation_steps=checkpoint_accumulation_steps,
+            saved_world_size=saved_world_size,
+        )
         for key in ("model", "optimizer", "lr_scheduler", "_start_iter", "_total_observations"):
             if key not in snapshot:
                 raise RuntimeError(f"transition checkpoint is missing required key {key!r}")
@@ -994,6 +1186,8 @@ class Trainer:
             "handoff_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
             "snapshot": str(parent_snapshot),
         }
+        if topology_migration is not None:
+            self.transition_parent.update(topology_migration)
         logger.info(
             "Transitioned from parent run %s at iteration %s; loader/RNG and "
             "validation-best state start fresh",

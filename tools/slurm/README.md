@@ -73,7 +73,12 @@ matches the immutable run identity, and references the existing live snapshot.
 
 Exact resume is fixed-world-size: a run started on N nodes must resume on the same
 N nodes, with one ordered RNG/loader state per global rank. Changing node count is a
-new run or model-only warm start, never an exact optimizer continuation.
+new run, never an exact stochastic continuation. A schema-2
+\`topology_migration_reset_rank_state\` handoff may preserve model, optimizer,
+scheduler, scaler, iteration, and observation count only when the parent checkpoint
+ACK and run identity are bound, the effective global batch is unchanged, and the
+new run explicitly resets all rank-local loader/RNG state and uses a distinct run
+and W&B identity.
 
 ## Unexpected failures
 

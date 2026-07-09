@@ -18,6 +18,9 @@ from pathlib import Path
 import torch
 
 
+TOPOLOGY_MIGRATION_KIND = "topology_migration_reset_rank_state"
+
+
 def _require_sha256(value: str, *, field_name: str) -> str:
     if (
         not isinstance(value, str)
@@ -51,6 +54,13 @@ def build_handoff(
     *,
     parent_snapshot: Path,
     expected_parent_run_identity_sha256: str,
+    parent_run_identity: Path | None = None,
+    checkpoint_ack: Path | None = None,
+    transition_kind: str | None = None,
+    target_batch_size: int | None = None,
+    target_gradient_accumulation_steps: int | None = None,
+    target_world_size: int | None = None,
+    authorization_basis: str | None = None,
 ) -> dict:
     expected_identity = _require_sha256(
         expected_parent_run_identity_sha256,
@@ -109,7 +119,7 @@ def build_handoff(
     if rank_order != list(range(world_size)):
         raise ValueError("parent snapshot rank states are missing or reordered")
 
-    return {
+    payload = {
         "schema_version": 1,
         "status": "complete",
         "parent_snapshot": str(snapshot_path),
@@ -124,6 +134,151 @@ def build_handoff(
         ),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
     }
+    migration_values = (
+        parent_run_identity,
+        checkpoint_ack,
+        transition_kind,
+        target_batch_size,
+        target_gradient_accumulation_steps,
+        target_world_size,
+        authorization_basis,
+    )
+    if any(value is not None for value in migration_values):
+        if not all(value is not None for value in migration_values):
+            raise ValueError(
+                "topology migration requires parent_run_identity, checkpoint_ack, "
+                "transition_kind, target batching/topology, and authorization_basis"
+            )
+        if transition_kind != TOPOLOGY_MIGRATION_KIND:
+            raise ValueError(
+                f"transition_kind must be {TOPOLOGY_MIGRATION_KIND!r}"
+            )
+        if not isinstance(authorization_basis, str) or not authorization_basis.strip():
+            raise ValueError("authorization_basis must be a non-empty string")
+        identity_path = parent_run_identity.expanduser().resolve(strict=True)
+        if not identity_path.is_file():
+            raise ValueError(
+                f"parent run identity is not a regular file: {identity_path}"
+            )
+        try:
+            identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"unable to read parent run identity {identity_path}: {exc}"
+            ) from exc
+        if identity.get("identity_sha256") != expected_identity:
+            raise ValueError(
+                "parent run identity file does not match the checkpoint identity"
+            )
+
+        def positive_int(value, *, field_name: str) -> int:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{field_name} must be a positive integer")
+            return value
+
+        parent_batch_size = positive_int(
+            identity.get("batch_size"), field_name="parent batch_size"
+        )
+        parent_accumulation = positive_int(
+            identity.get("gradient_accumulation_steps"),
+            field_name="parent gradient_accumulation_steps",
+        )
+        parent_world_size = positive_int(
+            identity.get("world_size"), field_name="parent world_size"
+        )
+        if parent_accumulation != int(snapshot["gradient_accumulation_steps"]):
+            raise ValueError(
+                "parent run identity gradient accumulation differs from snapshot"
+            )
+        if parent_world_size != int(snapshot["world_size"]):
+            raise ValueError("parent run identity world size differs from snapshot")
+        recorded_global_batch = positive_int(
+            identity.get("effective_global_batch_size"),
+            field_name="parent effective_global_batch_size",
+        )
+        parent_global_batch = (
+            parent_batch_size * parent_accumulation * parent_world_size
+        )
+        if parent_global_batch != recorded_global_batch:
+            raise ValueError(
+                "parent run identity has an inconsistent effective global batch"
+            )
+        target_batch_size = positive_int(
+            target_batch_size, field_name="target_batch_size"
+        )
+        target_gradient_accumulation_steps = positive_int(
+            target_gradient_accumulation_steps,
+            field_name="target_gradient_accumulation_steps",
+        )
+        target_world_size = positive_int(
+            target_world_size, field_name="target_world_size"
+        )
+        target_global_batch = (
+            target_batch_size
+            * target_gradient_accumulation_steps
+            * target_world_size
+        )
+        if target_global_batch != parent_global_batch:
+            raise ValueError(
+                "topology migration must preserve the effective global batch: "
+                f"parent={parent_global_batch}, target={target_global_batch}"
+            )
+        if (
+            target_batch_size == parent_batch_size
+            and target_gradient_accumulation_steps == parent_accumulation
+            and target_world_size == parent_world_size
+        ):
+            raise ValueError(
+                "topology migration requires a changed batch/topology tuple"
+            )
+
+        checkpoint_ack_path = checkpoint_ack.expanduser().resolve(strict=True)
+        if not checkpoint_ack_path.is_file():
+            raise ValueError(
+                f"checkpoint ACK is not a regular file: {checkpoint_ack_path}"
+            )
+        try:
+            ack = json.loads(checkpoint_ack_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"unable to read checkpoint ACK {checkpoint_ack_path}: {exc}"
+            ) from exc
+        if ack.get("schema_version") != 1 or ack.get("checkpoint_written") is not True:
+            raise ValueError("checkpoint ACK does not confirm a durable checkpoint")
+        if ack.get("run_identity_sha256") != expected_identity:
+            raise ValueError("checkpoint ACK run identity mismatch")
+        try:
+            ack_snapshot = Path(str(ack.get("snapshot", ""))).expanduser().resolve(
+                strict=True
+            )
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("checkpoint ACK snapshot path is invalid") from exc
+        if ack_snapshot != snapshot_path:
+            raise ValueError("checkpoint ACK points to a different snapshot")
+        if ack.get("next_iter") != int(snapshot["_start_iter"]):
+            raise ValueError("checkpoint ACK next_iter differs from snapshot")
+        payload.update(
+            {
+                "schema_version": 2,
+                "transition_kind": TOPOLOGY_MIGRATION_KIND,
+                "rank_local_state_policy": "reset",
+                "authorization_basis": authorization_basis.strip(),
+                "parent_run_identity": str(identity_path),
+                "parent_run_identity_file_sha256": _sha256_file(identity_path),
+                "checkpoint_ack": str(checkpoint_ack_path),
+                "checkpoint_ack_sha256": _sha256_file(checkpoint_ack_path),
+                "checkpoint_ack_next_iter": int(ack["next_iter"]),
+                "parent_batch_size": parent_batch_size,
+                "parent_effective_global_batch_size": parent_global_batch,
+                "target_batch_size": target_batch_size,
+                "target_gradient_accumulation_steps": (
+                    target_gradient_accumulation_steps
+                ),
+                "target_world_size": target_world_size,
+                "target_effective_global_batch_size": target_global_batch,
+            }
+        )
+    return payload
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -135,9 +290,25 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
             "parent_snapshot",
             "parent_snapshot_sha256",
             "parent_run_identity_sha256",
+            "transition_kind",
+            "rank_local_state_policy",
+            "authorization_basis",
+            "parent_run_identity",
+            "parent_run_identity_file_sha256",
+            "checkpoint_ack",
+            "checkpoint_ack_sha256",
+            "checkpoint_ack_next_iter",
+            "parent_batch_size",
+            "parent_world_size",
+            "parent_gradient_accumulation_steps",
+            "parent_effective_global_batch_size",
+            "target_batch_size",
+            "target_world_size",
+            "target_gradient_accumulation_steps",
+            "target_effective_global_batch_size",
         )
         if (
-            existing.get("schema_version") == 1
+            existing.get("schema_version") == payload.get("schema_version")
             and existing.get("status") == "complete"
             and all(
                 existing.get(key) == payload.get(key) for key in immutable_keys
@@ -179,6 +350,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Defaults to handoff_complete.json beside the parent snapshot",
     )
+    parser.add_argument(
+        "--parent-run-identity",
+        type=Path,
+        help="Required with target topology arguments for a guarded migration",
+    )
+    parser.add_argument("--checkpoint-ack", type=Path)
+    parser.add_argument("--transition-kind", choices=(TOPOLOGY_MIGRATION_KIND,))
+    parser.add_argument("--target-batch-size", type=int)
+    parser.add_argument("--target-gradient-accumulation-steps", type=int)
+    parser.add_argument("--target-world-size", type=int)
+    parser.add_argument("--authorization-basis")
     return parser.parse_args()
 
 
@@ -189,6 +371,15 @@ def main() -> int:
         expected_parent_run_identity_sha256=(
             args.expected_parent_run_identity_sha256
         ),
+        parent_run_identity=args.parent_run_identity,
+        checkpoint_ack=args.checkpoint_ack,
+        transition_kind=args.transition_kind,
+        target_batch_size=args.target_batch_size,
+        target_gradient_accumulation_steps=(
+            args.target_gradient_accumulation_steps
+        ),
+        target_world_size=args.target_world_size,
+        authorization_basis=args.authorization_basis,
     )
     output = args.output
     if output is None:

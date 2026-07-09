@@ -371,8 +371,16 @@ try:
     payload = json.loads(encoded)
 except json.JSONDecodeError as exc:
     raise SystemExit(f"transition handoff is not valid JSON: {path}: {exc}") from exc
-if payload.get("schema_version") != 1 or payload.get("status") != "complete":
-    raise SystemExit("transition handoff must have schema_version=1 and status='complete'")
+schema_version = payload.get("schema_version")
+if payload.get("status") != "complete" or schema_version not in (1, 2):
+    raise SystemExit("transition handoff must be complete schema_version 1 or 2")
+if schema_version == 2:
+    if payload.get("transition_kind") != "topology_migration_reset_rank_state":
+        raise SystemExit("schema 2 transition handoff has an unsupported transition_kind")
+    if payload.get("rank_local_state_policy") != "reset":
+        raise SystemExit("schema 2 transition handoff must reset rank-local state")
+    if not str(payload.get("authorization_basis", "")).strip():
+        raise SystemExit("schema 2 transition handoff lacks authorization_basis")
 
 def require_sha256(name):
     value = payload.get(name)
