@@ -1,3 +1,50 @@
+# dual-video-diffused-lacwm
+
+Research code for adding a jointly denoised, phase-preserving
+time-frequency state to the production LACWM Wan video world model.  The goal
+is to test whether an auxiliary motion representation can improve temporal
+coherence, sample efficiency, and low-NFE generation without sacrificing
+action conditioning.
+
+This repository preserves the production LACWM history at commit
+`f227b3b5108cd63c0fc853a08a26ca705606387c`.  The completed reference LoRA run
+used 64 B200 GPUs and reached all 60,000 planned optimizer updates.  See
+[`docs/UPSTREAM_LACWM.md`](docs/UPSTREAM_LACWM.md) for exact provenance.
+
+## Current status
+
+The initial bootstrap implements and tests the contracts required before Wan
+integration:
+
+- complete per-view causal RFFT features on the pre-VAE 13-frame sequence;
+- localized per-view STFT features as an ablation;
+- separate video/TF Gaussian noise, clocks, velocity targets, and loss masks;
+- aligned, independent, TF-leading, and TF-first cascaded schedules;
+- a zero-initialized TF token adapter and velocity head that are exact no-ops at
+  initialization.
+
+The feature flag is intentionally **off** for production training.  This commit
+does not claim a quality improvement and does not launch a B200 job.  Run the
+CPU-safe contract checks with:
+
+```bash
+pytest -q \
+  robot_wm/tests/test_dual_time_frequency.py \
+  robot_wm/tests/test_dual_flow.py \
+  robot_wm/tests/test_dual_adapters.py
+python tools/dual_diffusion_contract_smoke.py
+```
+
+The implementation and experimental gates are documented in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+[`docs/RESEARCH_PLAN.md`](docs/RESEARCH_PLAN.md).  The mapping from Latent
+Forcing is explicit in
+[`docs/LATENT_FORCING_PORT.md`](docs/LATENT_FORCING_PORT.md).
+
+## Upstream LACWM baseline
+
+The remainder of this README describes the inherited production baseline.
+
 # lacwm-dit — Latent-Action World Model with a Wan2.1-Fun DiT forward model
 
 A latent-action world model whose forward (world) model is the

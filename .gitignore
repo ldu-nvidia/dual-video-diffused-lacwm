@@ -16,3 +16,18 @@ robot_wm/datasets/csv_files/
 
 # setup_training.sh generated env exports
 .lacwm_env
+
+# Dual-diffusion research outputs and large artifacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+runs/
+logs/
+data/
+artifacts/
+outputs/
+reports/generated/

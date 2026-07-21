@@ -1,0 +1,37 @@
+# Research contract only.  Production integration remains disabled until the
+# Phase 0/1 gates in docs/RESEARCH_PLAN.md pass.
+enabled: false
+phase: 0
+
+time_frequency:
+  source: rgb_pre_temporal_vae
+  split_views_before_transform: true
+  num_views: 3
+  representation: causal_rfft
+  preserve_coefficients: real_imaginary
+  window_size: 4
+  pad_multiple: 16
+  pad_value: -1.0
+  output_size: [24, 120]
+  target_frames: 4
+  normalization: none  # replace with frozen train-split statistics in Phase 2
+
+training_schedule:
+  mode: independent
+  logit_mean: 0.0
+  logit_std: 1.0
+  tf_loss_probability: 0.4
+  tf_condition_max_sigma: 0.25
+
+inference_schedule:
+  mode: aligned
+  num_wan_nfe: 20
+  tf_fraction: 0.5
+  tf_lead_power: 0.5
+
+integration:
+  preserve_wan_input_channels: 48
+  token_fusion: zero_gated_addition
+  hidden_size: 1536
+  patch_size: [1, 2, 2]
+  separate_tf_velocity_head: true
