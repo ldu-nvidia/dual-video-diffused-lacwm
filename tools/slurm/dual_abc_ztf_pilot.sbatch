@@ -13,12 +13,6 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROJECT_ROOT="$REPO_ROOT/projects/latent_action_models"
-HELPER="$REPO_ROOT/tools/dual_abc_pilot.py"
-ACTIVATE="$REPO_ROOT/tools/env/activate_b200.sh"
-VERIFY_RUNTIME="$REPO_ROOT/tools/env/verify_b200_runtime.py"
-
 die() {
   echo "ERROR: $*" >&2
   exit 2
@@ -35,6 +29,7 @@ EOF
 
 PAIR_ID=""
 EXPECTED_COMMIT=""
+REPO_ROOT=""
 PAIR_ROOT=""
 RUN_ROOT=""
 PYTHON_BIN=""
@@ -52,6 +47,7 @@ while (($#)); do
   case "$1" in
     --pair-id) [[ $# -ge 2 ]] || die "--pair-id requires a value"; PAIR_ID="$2"; shift 2 ;;
     --expected-commit) [[ $# -ge 2 ]] || die "--expected-commit requires a value"; EXPECTED_COMMIT="$2"; shift 2 ;;
+    --repo-root) [[ $# -ge 2 ]] || die "--repo-root requires a value"; REPO_ROOT="$2"; shift 2 ;;
     --pair-root) [[ $# -ge 2 ]] || die "--pair-root requires a value"; PAIR_ROOT="$2"; shift 2 ;;
     --run-root) [[ $# -ge 2 ]] || die "--run-root requires a value"; RUN_ROOT="$2"; shift 2 ;;
     --python) [[ $# -ge 2 ]] || die "--python requires a value"; PYTHON_BIN="$2"; shift 2 ;;
@@ -72,6 +68,7 @@ done
 for required_pair in \
   "pair ID:$PAIR_ID" \
   "expected commit:$EXPECTED_COMMIT" \
+  "repository root:$REPO_ROOT" \
   "pair root:$PAIR_ROOT" \
   "run root:$RUN_ROOT" \
   "Python:$PYTHON_BIN" \
@@ -85,6 +82,21 @@ for required_pair in \
   "W&B entity:$WANDB_ENTITY_VALUE" \
   "W&B project:$WANDB_PROJECT_VALUE"; do
   [[ -n "${required_pair#*:}" ]] || die "${required_pair%%:*} is required"
+done
+
+[[ "$REPO_ROOT" == /* ]] || die "repository root must be absolute"
+[[ -d "$REPO_ROOT/.git" && ! -L "$REPO_ROOT" ]] || \
+  die "repository root is unavailable or symlinked: $REPO_ROOT"
+CANONICAL_REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
+[[ "$CANONICAL_REPO_ROOT" == "$REPO_ROOT" ]] || \
+  die "repository root canonicalization changed: $CANONICAL_REPO_ROOT"
+PROJECT_ROOT="$REPO_ROOT/projects/latent_action_models"
+HELPER="$REPO_ROOT/tools/dual_abc_pilot.py"
+ACTIVATE="$REPO_ROOT/tools/env/activate_b200.sh"
+VERIFY_RUNTIME="$REPO_ROOT/tools/env/verify_b200_runtime.py"
+for required_repo_file in "$HELPER" "$ACTIVATE" "$VERIFY_RUNTIME"; do
+  [[ -f "$required_repo_file" && ! -L "$required_repo_file" ]] || \
+    die "required repository file is missing or symlinked: $required_repo_file"
 done
 
 [[ -n "${SLURM_JOB_ID:-}" ]] || die "this entrypoint requires a Slurm allocation"

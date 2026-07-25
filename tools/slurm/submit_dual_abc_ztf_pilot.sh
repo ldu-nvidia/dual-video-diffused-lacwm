@@ -202,6 +202,7 @@ SBATCH_ARGS=(
 JOB_ARGS=(
   --pair-id "$PAIR_ID"
   --expected-commit "$EXPECTED_COMMIT"
+  --repo-root "$REPO_ROOT"
   --pair-root "$PAIR_ROOT"
   --run-root "$RUN_ROOT"
   --python "$PYTHON_BIN"
