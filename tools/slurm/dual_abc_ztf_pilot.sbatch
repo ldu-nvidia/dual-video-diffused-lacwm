@@ -148,8 +148,23 @@ mkdir \
   "$RUN_DIR/wandb-data" \
   "$RUN_DIR/wandb-cache" \
   "$RUN_DIR/wandb-config" \
-  "$RUN_DIR/cache" \
-  "$RUN_DIR/tmp"
+  "$RUN_DIR/cache"
+
+# Python multiprocessing creates AF_UNIX sockets below TMPDIR when DataLoader
+# workers transfer tensor storage.  Lustre run paths exceed Linux's 107-byte
+# sockaddr_un payload once multiprocessing adds its own suffix, so keep IPC
+# ephemeral and node-local while all durable outputs remain under RUN_DIR.
+IPC_TMPDIR="/tmp/lacwm-${UID}-${SLURM_JOB_ID}"
+[[ ${#IPC_TMPDIR} -le 64 ]] || die "IPC TMPDIR is unexpectedly long: $IPC_TMPDIR"
+[[ ! -e "$IPC_TMPDIR" ]] || die "fresh IPC TMPDIR already exists: $IPC_TMPDIR"
+(umask 077 && mkdir "$IPC_TMPDIR") || die "could not create IPC TMPDIR: $IPC_TMPDIR"
+[[ ! -L "$IPC_TMPDIR" ]] || die "IPC TMPDIR must not be a symlink"
+[[ "$(stat -c %u "$IPC_TMPDIR")" == "$UID" ]] || die "IPC TMPDIR has the wrong owner"
+[[ "$(stat -c %a "$IPC_TMPDIR")" == "700" ]] || die "IPC TMPDIR must have mode 700"
+cleanup_ipc_tmpdir() {
+  rmdir "$IPC_TMPDIR" 2>/dev/null || true
+}
+trap cleanup_ipc_tmpdir EXIT
 
 export WAN_DIR="$WAN_DIR_VALUE"
 export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
@@ -172,9 +187,23 @@ export HF_HOME="$RUN_DIR/cache/huggingface"
 export TORCH_HOME="$RUN_DIR/cache/torch"
 export XDG_CACHE_HOME="$RUN_DIR/cache/xdg"
 export MPLCONFIGDIR="$RUN_DIR/cache/matplotlib"
-export TMPDIR="$RUN_DIR/tmp"
+export TMPDIR="$IPC_TMPDIR"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+"$PYTHON_BIN" - <<'PY' > "$RUN_DIR/ipc_tmp_preflight.txt"
+import multiprocessing.connection
+import os
+
+listener = multiprocessing.connection.Listener(authkey=b"dual-video-diffusion")
+try:
+    address = str(listener.address)
+    print(f"TMPDIR={os.environ['TMPDIR']}")
+    print(f"listener={address}")
+    print(f"listener_path_bytes={len(os.fsencode(address))}")
+finally:
+    listener.close()
+PY
 
 # This validates the pinned VideoX commit and establishes the B200 NCCL profile.
 source "$ACTIVATE"

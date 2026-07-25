@@ -13,6 +13,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SUBMIT = REPO_ROOT / "tools" / "slurm" / "submit_8xb200.sh"
 SLOT = REPO_ROOT / "tools" / "slurm" / "train_8xb200.sbatch"
 STATE = REPO_ROOT / "tools" / "slurm" / "validate_state.py"
+DUAL_PILOT_SLOT = (
+    REPO_ROOT / "tools" / "slurm" / "dual_abc_ztf_pilot.sbatch"
+)
 
 
 def executable(path: Path, source: str) -> None:
@@ -30,6 +33,14 @@ def allowed_run_root_env(root: Path, **updates: str) -> dict[str, str]:
 
 
 class SlurmResilienceTest(unittest.TestCase):
+    def test_dual_pilot_uses_short_node_local_tmpdir_for_worker_ipc(self):
+        source = DUAL_PILOT_SLOT.read_text(encoding="utf-8")
+
+        self.assertIn('IPC_TMPDIR="/tmp/lacwm-${UID}-${SLURM_JOB_ID}"', source)
+        self.assertIn('export TMPDIR="$IPC_TMPDIR"', source)
+        self.assertIn("multiprocessing.connection.Listener", source)
+        self.assertNotIn('export TMPDIR="$RUN_DIR/tmp"', source)
+
     def _training_args(self, root: Path) -> list[str]:
         smoke = root / "smoke.json"
         data = root / "data.json"
