@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import prod
+from math import log, prod
 from typing import Tuple
 
 import torch
@@ -88,3 +88,53 @@ class TFVelocityHead(nn.Module):
         return values.permute(0, 7, 1, 4, 2, 5, 3, 6).reshape(
             b, self.tf_channels, ft * pt, ht * ph, wt * pw
         )
+
+
+class TFSigmaTokenEmbedding(nn.Module):
+    """Embed the TF noise clock as a zero-initialized Wan-token residual.
+
+    A noisy TF tensor is not identifiable without its own noise level when the
+    video and TF clocks differ.  This module gives the shared Wan trunk that
+    clock while retaining the exact pretrained function at initialization.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        embedding_dim: int = 128,
+        max_period: float = 10_000.0,
+    ) -> None:
+        super().__init__()
+        if hidden_size < 1:
+            raise ValueError("hidden_size must be positive")
+        if embedding_dim < 2 or embedding_dim % 2:
+            raise ValueError("embedding_dim must be a positive even integer")
+        if max_period <= 1:
+            raise ValueError("max_period must exceed one")
+        self.hidden_size = hidden_size
+        self.embedding_dim = embedding_dim
+        frequencies = torch.exp(
+            -log(max_period)
+            * torch.arange(embedding_dim // 2, dtype=torch.float32)
+            / max(embedding_dim // 2 - 1, 1)
+        )
+        self.register_buffer("frequencies", frequencies, persistent=False)
+        self.net = nn.Sequential(
+            nn.Linear(embedding_dim, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+        self.gate = nn.Parameter(torch.zeros(()))
+
+    def forward(self, sigma: Tensor) -> Tensor:
+        if sigma.ndim > 1:
+            sigma = sigma.reshape(sigma.shape[0], -1)
+            if sigma.shape[1] != 1:
+                raise ValueError("TF sigma must be scalar per batch element")
+            sigma = sigma[:, 0]
+        if sigma.ndim != 1:
+            raise ValueError("TF sigma must have shape [B]")
+        angles = sigma.float().unsqueeze(-1) * self.frequencies.unsqueeze(0)
+        embedding = torch.cat([torch.cos(angles), torch.sin(angles)], dim=-1)
+        tokens = self.net(embedding).to(dtype=sigma.dtype)
+        return torch.tanh(self.gate) * tokens

@@ -47,6 +47,56 @@ class PairedSigmaSchedule:
         return self.video.numel() - 1
 
 
+def derive_tf_sigma(
+    video_sigma: Tensor,
+    *,
+    mode: Literal["aligned", "tf_leads"] = "tf_leads",
+    tf_lead_logit: float = 1.0,
+    eps: float = 1e-5,
+) -> Tensor:
+    """Derive the TF clock from the production video sigma.
+
+    This deliberately accepts the *actual* shifted Wan scheduler sigma instead
+    of resampling a second video clock.  LACWM uses sigma=1 for noise and
+    sigma=0 for clean data.  Endpoints are restored exactly after the logit
+    transform so joint inference starts from noise and ends at data.
+    """
+    if not video_sigma.is_floating_point():
+        raise TypeError("video_sigma must be floating point")
+    if tf_lead_logit < 0:
+        raise ValueError("tf_lead_logit must be non-negative")
+    if not 0 < eps < 0.5:
+        raise ValueError("eps must lie in (0, 0.5)")
+    if mode == "aligned":
+        return video_sigma.clone()
+    if mode != "tf_leads":
+        raise ValueError(f"unsupported derived TF clock mode: {mode}")
+    clipped = video_sigma.clamp(eps, 1.0 - eps)
+    tf_sigma = torch.sigmoid(torch.logit(clipped) - tf_lead_logit)
+    tf_sigma = torch.where(video_sigma <= 0, torch.zeros_like(tf_sigma), tf_sigma)
+    tf_sigma = torch.where(video_sigma >= 1, torch.ones_like(tf_sigma), tf_sigma)
+    return tf_sigma
+
+
+def pair_video_sigma_schedule(
+    video_sigmas: Tensor,
+    *,
+    mode: Literal["aligned", "tf_leads"] = "tf_leads",
+    tf_lead_logit: float = 1.0,
+) -> PairedSigmaSchedule:
+    """Pair a native, monotonically decreasing Wan schedule with a TF clock."""
+    if video_sigmas.ndim != 1 or video_sigmas.numel() < 2:
+        raise ValueError("video_sigmas must contain at least two scalar nodes")
+    if torch.any(torch.diff(video_sigmas) > 0):
+        raise ValueError("video sigma schedule must be monotonically non-increasing")
+    return PairedSigmaSchedule(
+        video=video_sigmas,
+        time_frequency=derive_tf_sigma(
+            video_sigmas, mode=mode, tf_lead_logit=tf_lead_logit
+        ),
+    )
+
+
 def _expand_sigma(sigma: Tensor, reference: Tensor) -> Tensor:
     if sigma.ndim == 0:
         sigma = sigma.expand(reference.shape[0])

@@ -3,8 +3,10 @@ import torch
 from robot_wm.modeling.dual_diffusion.flow import (
     DualClockSampler,
     corrupt_flow,
+    derive_tf_sigma,
     euler_flow_step,
     make_paired_sigma_schedule,
+    pair_video_sigma_schedule,
 )
 
 
@@ -77,3 +79,26 @@ def test_inference_schedules_have_correct_endpoints_and_order():
     video_updates = torch.diff(cascaded.video) != 0
     tf_updates = torch.diff(cascaded.time_frequency) != 0
     assert not torch.any(video_updates & tf_updates)
+
+
+def test_derived_tf_clock_preserves_native_video_schedule_and_exact_endpoints():
+    video = torch.tensor([1.0, 0.91, 0.70, 0.33, 0.0])
+    paired = pair_video_sigma_schedule(
+        video, mode="tf_leads", tf_lead_logit=1.0
+    )
+
+    torch.testing.assert_close(paired.video, video)
+    assert paired.time_frequency[0] == 1
+    assert paired.time_frequency[-1] == 0
+    assert torch.all(paired.time_frequency[1:-1] < video[1:-1])
+    assert torch.all(torch.diff(paired.time_frequency) <= 0)
+
+
+def test_derived_aligned_clock_is_an_exact_copy():
+    video = torch.rand(11).sort(descending=True).values
+    torch.testing.assert_close(
+        derive_tf_sigma(video, mode="aligned"),
+        video,
+        rtol=0,
+        atol=0,
+    )

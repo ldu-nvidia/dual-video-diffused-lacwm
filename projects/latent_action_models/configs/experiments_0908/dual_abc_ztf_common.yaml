@@ -1,0 +1,117 @@
+# @package _global_
+# Parameter-matched, causal ABC pilot. Arm files override only condition_on_tf.
+defaults:
+  - override /datasets@dataset: transformed_multi_abc_only
+  - override /datasets@val_dataset: transformed_multi_abc_only
+  - override /datasets@viz_dataset: transformed_multi_abc_only
+  - override /models@model: dual_explicit_action_dit_model
+  - override /tokenizers/rgb@model.rgb_tokenizer: wan_vae
+  - override /optimizers@optimizer_factory: adamw
+  - override /lr_schedulers@lr_scheduler_factory: linear_warmup_cosine_decay
+
+name: dual_abc_ztf_common
+seed: 1234
+
+dataset: &training_dataset
+  padding_dim: 157
+  seed: ${seed}
+  infinite: true
+  img_augment: true
+  emit_crop_rgb: false
+  transform: {sample_size: 13, chunk_size: 5}
+  datasets:
+    ABC:
+      subsample_traj: 1000
+      transform:
+        wrist_mask_prob: 0.0
+val_dataset:
+  <<: *training_dataset
+  img_augment: false
+viz_dataset:
+  <<: *training_dataset
+  img_augment: false
+
+data_loader:
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+val_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${val_dataset}
+    batch_size: 4
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: false
+viz_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${viz_dataset}
+    batch_size: 1
+    num_workers: 1
+    pin_memory: true
+    prefetch_factor: 1
+    persistent_workers: false
+
+model:
+  rgb_tokenizer:
+    output_dim: 16
+    input_mean: [0.5, 0.5, 0.5]
+    input_std: [0.5, 0.5, 0.5]
+  forward_model:
+    lora_rank: 64
+    lora_alpha: 128
+    lora_dropout: 0.05
+    gradient_checkpointing: true
+  num_history_frames: 5
+  num_future_frames: 8
+  action_encoder:
+    action_dim: ${dataset.padding_dim}
+    chunk_size: ${dataset.transform.chunk_size}
+  morphology_tokens:
+    _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
+    num_embeddings: 10
+    embedding_dim: 64
+
+optimizer_factory: {lr: 1e-4, betas: [0.9, 0.95]}
+lr_scheduler_factory:
+  lr_lambda:
+    warmup_steps: 20
+    total_steps: ${trainer.config.max_iter}
+    final_learning_rate: 1e-6
+
+wandb:
+  enabled: true
+  mode: online
+  entity: zijiandu
+  project: dual-video-diffusion-private
+  name: ${name}
+  tags: [abc, dual-video-diffusion, ztf-ablation, seed-1234]
+
+trainer:
+  config:
+    max_iter: 100
+    gradient_accumulation_steps: 1
+    throughput_warmup_steps: 5
+    # Supplied by the guarded launcher for both arms. This is a model-only
+    # warm start; save_path remains a fresh experiment snapshot.
+    load_path: null
+    exclude_keys:
+      - inverse_model
+      - rgb_pos_embed
+      - action_decoder
+      - action_pos_embed
+      - action_pool
+      - morphology_tokens
+    logging: {log_every: 5}
+    saving: {save_every: 50}
+    validation: {val_every: 10, n_val_samples: 1, save_best: false}
+    visualization: {viz_every: 50}
+    gradient_clipping: {max_norm: 1.0}
+
+hydra:
+  run:
+    dir: ${oc.env:LACWM_RUNS,/scr/ravenh/lacwm_runs}/${name}
+  sweep:
+    dir: ${oc.env:LACWM_RUNS,/scr/ravenh/lacwm_runs}/${name}

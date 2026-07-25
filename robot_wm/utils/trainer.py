@@ -24,6 +24,7 @@ import torch.nn as nn
 import wandb
 from einops import rearrange
 from omegaconf import DictConfig
+from safetensors.torch import save_file as save_safetensors
 from torch.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
@@ -1505,12 +1506,63 @@ class Trainer:
                     assert (
                         visualization.min() >= 0.0 and visualization.max() <= 1.0
                     ), f"Visualization out of [0, 1] range: {visualization.min()} {visualization.max()}"
+                latent_artifacts = None
+                if hasattr(self.model.module, "pop_visualization_artifacts"):
+                    latent_artifacts = (
+                        self.model.module.pop_visualization_artifacts()
+                    )
 
                 # create output directory with dataset name
                 output_folder: Path = (
                     self.viz_path / f"iter_{self._curr_iter}" / dataset_name
                 )
                 output_folder.mkdir(exist_ok=True, parents=True)
+
+                if latent_artifacts:
+                    invalid = {
+                        key: type(value).__name__
+                        for key, value in latent_artifacts.items()
+                        if not isinstance(key, str)
+                        or not isinstance(value, torch.Tensor)
+                    }
+                    if invalid:
+                        raise TypeError(
+                            f"latent artifacts must be string->Tensor, got {invalid}"
+                        )
+                    tensor_path = (
+                        output_folder
+                        / f"latent_trajectory_rank_{self.global_rank}.safetensors"
+                    )
+                    tensors = {
+                        key: value.detach().cpu().contiguous()
+                        for key, value in latent_artifacts.items()
+                    }
+                    save_safetensors(
+                        tensors,
+                        str(tensor_path),
+                        metadata={
+                            "iteration": str(self._curr_iter),
+                            "dataset": dataset_name,
+                            "sigma_convention": "1=noise,0=clean",
+                        },
+                    )
+                    manifest = {
+                        "iteration": self._curr_iter,
+                        "dataset": dataset_name,
+                        "global_rank": self.global_rank,
+                        "sigma_convention": "1=noise,0=clean",
+                        "tensors": {
+                            key: {
+                                "shape": list(value.shape),
+                                "dtype": str(value.dtype),
+                            }
+                            for key, value in tensors.items()
+                        },
+                    }
+                    self._atomic_write_json(
+                        tensor_path.with_suffix(".json"), manifest
+                    )
+                    logger.info("Saved latent denoising trajectory to %s", tensor_path)
 
                 visualization = rearrange(visualization, "N T C H W -> N T H W C")
                 logger.info(
@@ -1585,6 +1637,42 @@ class Trainer:
                         f"Sending {total_videos} video(s) to wandb from {len(wandb_videos)} dataset(s)"
                     )
                     wandb.log(log_dict, step=self.metrics.total_observations)
+
+                latent_paths = sorted(
+                    iter_folder.glob("*/latent_trajectory_rank_*.safetensors")
+                )
+                if latent_paths:
+                    artifact = wandb.Artifact(
+                        name=(
+                            f"{wandb.run.id}-latent-trajectories-"
+                            f"iter-{self._curr_iter}"
+                        ),
+                        type="dual-denoising-trajectories",
+                        metadata={
+                            "iteration": self._curr_iter,
+                            "total_observations": self.metrics.total_observations,
+                            "sigma_convention": "1=noise,0=clean",
+                        },
+                    )
+                    for latent_path in latent_paths:
+                        artifact.add_file(
+                            str(latent_path),
+                            name=f"{latent_path.parent.name}/{latent_path.name}",
+                        )
+                        manifest_path = latent_path.with_suffix(".json")
+                        if manifest_path.is_file():
+                            artifact.add_file(
+                                str(manifest_path),
+                                name=(
+                                    f"{manifest_path.parent.name}/"
+                                    f"{manifest_path.name}"
+                                ),
+                            )
+                    wandb.log_artifact(artifact)
+                    logger.info(
+                        "Sent %d raw latent trajectory file(s) to W&B",
+                        len(latent_paths),
+                    )
 
         self.model.train()
 

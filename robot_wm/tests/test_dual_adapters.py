@@ -1,6 +1,7 @@
 import torch
 
 from robot_wm.modeling.dual_diffusion.adapters import (
+    TFSigmaTokenEmbedding,
     TFVelocityHead,
     ZeroInitTFTokenAdapter,
 )
@@ -35,3 +36,19 @@ def test_zero_initialized_tf_velocity_head_shape():
 
     assert velocity.shape == (2, 12, 4, 8, 12)
     assert torch.count_nonzero(velocity) == 0
+
+
+def test_tf_sigma_embedding_is_exact_noop_then_receives_gradients():
+    embedding = TFSigmaTokenEmbedding(hidden_size=16, embedding_dim=8)
+    sigma = torch.tensor([0.0, 0.5, 1.0])
+
+    closed = embedding(sigma)
+    assert closed.shape == (3, 16)
+    assert torch.count_nonzero(closed) == 0
+
+    embedding.gate.data.fill_(0.1)
+    opened = embedding(sigma)
+    assert torch.count_nonzero(opened) > 0
+    opened.square().mean().backward()
+    assert embedding.net[0].weight.grad is not None
+    assert torch.isfinite(embedding.net[0].weight.grad).all()

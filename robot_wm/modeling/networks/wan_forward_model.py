@@ -11,6 +11,8 @@
 import logging
 import math
 import os
+from dataclasses import dataclass
+from typing import Mapping
 
 import torch
 import torch.nn as nn
@@ -20,7 +22,22 @@ from peft import LoraConfig, inject_adapter_in_model
 
 from videox_fun.models.wan_transformer3d import WanTransformer3DModel
 
+from robot_wm.modeling.dual_diffusion.adapters import (
+    TFSigmaTokenEmbedding,
+    TFVelocityHead,
+    ZeroInitTFTokenAdapter,
+)
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DualWanOutput:
+    """Velocities predicted from one shared Wan trunk evaluation."""
+
+    video_velocity: torch.Tensor
+    tf_velocity: torch.Tensor
+    tf_condition_tokens: torch.Tensor
 
 
 class ActionToControl(nn.Module):
@@ -60,6 +77,7 @@ class WanForwardModel(nn.Module):
         lora_dropout: float = 0.05,
         control_hidden: int = 256,
         gradient_checkpointing: bool = True,
+        dual_diffusion: Mapping | None = None,
     ):
         super().__init__()
         cfg = OmegaConf.load(config_path)
@@ -100,6 +118,34 @@ class WanForwardModel(nn.Module):
 
         self.action_to_control = ActionToControl(latent_action_dim, 16, control_hidden)
 
+        dual_config = dict(dual_diffusion or {})
+        self.dual_diffusion_enabled = bool(dual_config.get("enabled", False))
+        self.condition_on_tf = bool(dual_config.get("condition_on_tf", False))
+        if self.dual_diffusion_enabled:
+            if self.transformer.control_adapter is not None:
+                raise RuntimeError(
+                    "dual diffusion requires the pretrained Wan control_adapter seam "
+                    "to be unused"
+                )
+            self.transformer.control_adapter = nn.Identity()
+            hidden_size = int(self.transformer.dim)
+            patch_size = tuple(int(value) for value in self.transformer.patch_size)
+            tf_channels = int(dual_config.get("tf_channels", 12))
+            self.tf_token_adapter = ZeroInitTFTokenAdapter(
+                tf_channels=tf_channels,
+                hidden_size=hidden_size,
+                patch_size=patch_size,
+            )
+            self.tf_clock_embedding = TFSigmaTokenEmbedding(
+                hidden_size=hidden_size,
+                embedding_dim=int(dual_config.get("clock_embedding_dim", 128)),
+            )
+            self.tf_velocity_head = TFVelocityHead(
+                hidden_size=hidden_size,
+                tf_channels=tf_channels,
+                patch_size=patch_size,
+            )
+
     def init_weights(self):
         self.action_to_control.init_weights()
 
@@ -111,17 +157,85 @@ class WanForwardModel(nn.Module):
         ref_latents: torch.Tensor,    # [N, 16, Fp, h, w]
         context,                      # list of [L, text_dim]
         clip_fea: torch.Tensor = None,
-    ) -> torch.Tensor:
+        noisy_tf: torch.Tensor = None,
+        tf_sigma: torch.Tensor = None,
+        condition_on_tf: bool | None = None,
+    ) -> torch.Tensor | DualWanOutput:
         n, c, fp, h, w = noisy_latents.shape
         control = self.action_to_control(z_control, h, w).to(noisy_latents.dtype)
         y = torch.cat([control, ref_latents], dim=1)  # [N, 32, Fp, h, w]
         seq_len = int(math.ceil(h * w / (self.patch_size[1] * self.patch_size[2])) * fp)
-        out = self.transformer(
-            x=noisy_latents,
-            t=timesteps,
-            context=context,
-            seq_len=seq_len,
-            y=y,
-            clip_fea=clip_fea,
+        if not self.dual_diffusion_enabled:
+            if noisy_tf is not None or tf_sigma is not None:
+                raise RuntimeError("TF inputs require dual_diffusion.enabled=true")
+            out = self.transformer(
+                x=noisy_latents,
+                t=timesteps,
+                context=context,
+                seq_len=seq_len,
+                y=y,
+                clip_fea=clip_fea,
+            )
+            return out[0] if isinstance(out, (list, tuple)) else out
+
+        if noisy_tf is None or tf_sigma is None:
+            raise ValueError("dual diffusion requires noisy_tf and tf_sigma")
+        if noisy_tf.shape[0] != n or noisy_tf.shape[2:] != (fp, h, w):
+            raise ValueError(
+                "TF state must share the video batch and latent grid; "
+                f"got video={tuple(noisy_latents.shape)}, TF={tuple(noisy_tf.shape)}"
+            )
+        state_tokens, grid = self.tf_token_adapter(noisy_tf)
+        if state_tokens.shape[1] != seq_len:
+            raise RuntimeError(
+                f"TF token count {state_tokens.shape[1]} does not match Wan {seq_len}"
+            )
+        clock_tokens = self.tf_clock_embedding(tf_sigma).unsqueeze(1).expand(
+            -1, seq_len, -1
         )
-        return out[0] if isinstance(out, (list, tuple)) else out
+        use_tf = self.condition_on_tf if condition_on_tf is None else bool(condition_on_tf)
+        injected_tokens = clock_tokens + state_tokens * float(use_tf)
+        features = injected_tokens.transpose(1, 2).reshape(
+            n, injected_tokens.shape[-1], *grid
+        )
+        y_camera = [features[index : index + 1] for index in range(n)]
+
+        captured_tokens = []
+
+        def capture_shared_tokens(_module, inputs):
+            if not inputs or not isinstance(inputs[0], torch.Tensor):
+                raise RuntimeError("Wan head hook did not receive shared tokens")
+            captured_tokens.append(inputs[0])
+
+        handle = self.transformer.head.register_forward_pre_hook(capture_shared_tokens)
+        try:
+            out = self.transformer(
+                x=noisy_latents,
+                t=timesteps,
+                context=context,
+                seq_len=seq_len,
+                y=y,
+                y_camera=y_camera,
+                clip_fea=clip_fea,
+            )
+        finally:
+            handle.remove()
+        if len(captured_tokens) != 1:
+            raise RuntimeError(
+                f"expected one Wan shared-token capture, got {len(captured_tokens)}"
+            )
+        shared_tokens = captured_tokens[0]
+        if shared_tokens.shape != state_tokens.shape:
+            raise RuntimeError(
+                "Wan shared-token shape does not match TF token grid: "
+                f"{tuple(shared_tokens.shape)} != {tuple(state_tokens.shape)}"
+            )
+        # Both ablation arms give the TF head its own noisy state.  The causal
+        # difference is only whether that state entered the shared video trunk.
+        tf_velocity = self.tf_velocity_head(shared_tokens + state_tokens, grid)
+        video_velocity = out[0] if isinstance(out, (list, tuple)) else out
+        return DualWanOutput(
+            video_velocity=video_velocity,
+            tf_velocity=tf_velocity,
+            tf_condition_tokens=injected_tokens,
+        )

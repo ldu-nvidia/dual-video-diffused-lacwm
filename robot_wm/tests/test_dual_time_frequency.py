@@ -82,6 +82,25 @@ def test_invalid_temporal_contract_fails_closed():
         transform(torch.randn(1, 12, 3, 4, 12))
 
 
+def test_causal_history_bins_do_not_depend_on_hidden_future_frames():
+    first = torch.randn(1, 13, 3, 8, 24)
+    second = first.clone()
+    second[:, 5:] = torch.randn_like(second[:, 5:])
+    transform = PerViewCausalRFFT(
+        num_views=3,
+        output_size=(4, 12),
+        window_size=4,
+        pad_multiple=None,
+        normalization="none",
+    )
+
+    first_tf = transform(first)
+    second_tf = transform(second)
+
+    torch.testing.assert_close(first_tf[:, :, :2], second_tf[:, :, :2])
+    assert not torch.allclose(first_tf[:, :, 2:], second_tf[:, :, 2:])
+
+
 def test_production_padding_and_shape_contract():
     video = torch.ones(1, 13, 3, 180, 960)
     transform = PerViewCausalRFFT(

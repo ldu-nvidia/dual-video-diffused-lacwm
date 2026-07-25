@@ -13,8 +13,10 @@ from .flow import (
     PairedSigmaSchedule,
     corrupt_dual_flow,
     corrupt_flow,
+    derive_tf_sigma,
     euler_flow_step,
     make_paired_sigma_schedule,
+    pair_video_sigma_schedule,
 )
 from .time_frequency import PerViewCausalRFFT, PerViewTemporalSTFT
 
@@ -30,6 +32,8 @@ __all__ = [
     "ZeroInitTFTokenAdapter",
     "corrupt_dual_flow",
     "corrupt_flow",
+    "derive_tf_sigma",
     "euler_flow_step",
     "make_paired_sigma_schedule",
+    "pair_video_sigma_schedule",
 ]

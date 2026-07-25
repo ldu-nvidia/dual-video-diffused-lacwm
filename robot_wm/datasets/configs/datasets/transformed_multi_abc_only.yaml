@@ -1,0 +1,37 @@
+_target_: robot_wm.datasets.multi_dataset.MultiDataset
+padding_dim: 157
+seed: ${seed}
+infinite: true
+transform:
+  sample_size: 13
+  chunk_size: 5
+future_validity:
+  enabled: true
+  history_frames: 5
+  future_frames: 8
+  temporal_ratio: 4
+  num_views: 3
+  view_std_threshold: 0.001
+  max_retries: 8
+datasets:
+  ABC:
+    _target_: robot_wm.datasets.abc.dataset.ABCDataset
+    manifest: ${oc.env:LACWM_DATA,/scr/ravenh/lacwm_data}/abc_pp/manifest.txt
+    seed: ${seed}
+    infinite: ${dataset.infinite}
+    subsample_traj: 1000
+    transform:
+      _target_: robot_wm.datasets.abc.transform.ABCTransform
+      cameras: ["top", "left_wrist", "right_wrist"]
+      output_keys: ["rgb", "actions", "mask"]
+      sample_size: ${dataset.transform.sample_size}
+      chunk_size: ${dataset.transform.chunk_size}
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      resize_to: [180, 320]
+      action_type: action+camera
+      multiview: true
+      num_views: 3
+      wrist_mask_prob: 0.2
+      seed: ${seed}
+
