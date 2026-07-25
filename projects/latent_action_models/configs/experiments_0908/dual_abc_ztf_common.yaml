@@ -107,7 +107,7 @@ trainer:
     logging: {log_every: 5}
     saving: {save_every: 50}
     validation: {val_every: 10, n_val_samples: 1, save_best: false}
-    visualization: {viz_every: 50}
+    visualization: {viz_every: 50, require_success: true}
     gradient_clipping: {max_norm: 1.0}
 
 hydra:

@@ -162,6 +162,9 @@ class Trainer:
         self.save_best = self._parse_save_best(config)
         self.viz_every = config["visualization"]["viz_every"]
         self.viz_path = Path(config["visualization"]["viz_path"])
+        self.require_visualization_success = bool(
+            config["visualization"].get("require_success", False)
+        )
         self.save_every = config["saving"]["save_every"]
         self.save_path = Path(config["saving"]["save_path"])
         self.gradient_accumulation_steps = self._parse_gradient_accumulation_steps(
@@ -1483,6 +1486,7 @@ class Trainer:
     def _viz(self):
         logger.info(f"Running visualizations at iteration {self._curr_iter}")
         self.model.eval()
+        local_errors = []
 
         for i, (viz_iter, viz_loader) in enumerate(
             zip(self._viz_data_loader_iters, self.viz_data_loaders)
@@ -1510,6 +1514,10 @@ class Trainer:
                 if hasattr(self.model.module, "pop_visualization_artifacts"):
                     latent_artifacts = (
                         self.model.module.pop_visualization_artifacts()
+                    )
+                if self.require_visualization_success and not latent_artifacts:
+                    raise RuntimeError(
+                        "required latent denoising trajectory was not produced"
                     )
 
                 # create output directory with dataset name
@@ -1560,7 +1568,11 @@ class Trainer:
                         },
                     }
                     self._atomic_write_json(
-                        tensor_path.with_suffix(".json"), manifest
+                        tensor_path.with_suffix(".json"),
+                        {
+                            **manifest,
+                            "safetensors_sha256": self._sha256_file(tensor_path),
+                        },
                     )
                     logger.info("Saved latent denoising trajectory to %s", tensor_path)
 
@@ -1603,76 +1615,129 @@ class Trainer:
                     )
 
             except Exception as e:
+                local_errors.append(f"{dataset_name}: {type(e).__name__}: {e}")
                 logger.warning(f"Visualization failed for {dataset_name}: {e}")
 
-        # Ensure all writes are flushed before logging
+        # A required pilot visualization is part of the experiment result, not
+        # best-effort decoration.  Agree on failures before any rank exits so a
+        # single-rank encoder/artifact failure cannot leave the other DDP ranks
+        # hanging at their next collective.
+        all_errors = [local_errors]
+        if dist.is_initialized() and self.world_size > 1:
+            all_errors = [None] * self.world_size
+            torch.distributed.all_gather_object(all_errors, local_errors)
+        flattened_errors = [
+            error
+            for rank_errors in all_errors
+            for error in (rank_errors or [])
+        ]
+        if flattened_errors and self.require_visualization_success:
+            raise RuntimeError(
+                "required visualization failed on at least one rank: "
+                + " | ".join(flattened_errors)
+            )
+
+        # Ensure all successful writes are visible before rank zero logs them.
         if dist.is_initialized():
             dist.barrier()
 
         # Only main process collects and logs all videos
+        wandb_error = None
         if self.use_wandb and self.is_main_process:
-            iter_folder = self.viz_path / f"iter_{self._curr_iter}"
+            try:
+                iter_folder = self.viz_path / f"iter_{self._curr_iter}"
 
-            if iter_folder.exists():
-                wandb_videos = {}
-
-                for dataset_folder in iter_folder.iterdir():
-                    if dataset_folder.is_dir():
-                        dataset_name = dataset_folder.name
-                        video_paths = sorted(dataset_folder.glob("*.mp4"))
-
-                        if video_paths:
-                            wandb_videos[dataset_name] = [
-                                wandb.Video(str(path)) for path in video_paths
-                            ]
-
-                # Log with dataset-specific keys
-                if wandb_videos:
-                    log_dict = {}
-                    for dataset_name, videos in wandb_videos.items():
-                        log_dict[f"viz/{dataset_name}"] = videos
-
-                    total_videos = sum(len(v) for v in wandb_videos.values())
-                    logger.info(
-                        f"Sending {total_videos} video(s) to wandb from {len(wandb_videos)} dataset(s)"
-                    )
-                    wandb.log(log_dict, step=self.metrics.total_observations)
-
-                latent_paths = sorted(
-                    iter_folder.glob("*/latent_trajectory_rank_*.safetensors")
-                )
-                if latent_paths:
-                    artifact = wandb.Artifact(
-                        name=(
-                            f"{wandb.run.id}-latent-trajectories-"
-                            f"iter-{self._curr_iter}"
-                        ),
-                        type="dual-denoising-trajectories",
-                        metadata={
-                            "iteration": self._curr_iter,
-                            "total_observations": self.metrics.total_observations,
-                            "sigma_convention": "1=noise,0=clean",
-                        },
-                    )
-                    for latent_path in latent_paths:
-                        artifact.add_file(
-                            str(latent_path),
-                            name=f"{latent_path.parent.name}/{latent_path.name}",
+                if not iter_folder.exists():
+                    if self.require_visualization_success:
+                        raise RuntimeError(
+                            f"required visualization folder is missing: {iter_folder}"
                         )
-                        manifest_path = latent_path.with_suffix(".json")
-                        if manifest_path.is_file():
-                            artifact.add_file(
-                                str(manifest_path),
-                                name=(
-                                    f"{manifest_path.parent.name}/"
-                                    f"{manifest_path.name}"
-                                ),
-                            )
-                    wandb.log_artifact(artifact)
-                    logger.info(
-                        "Sent %d raw latent trajectory file(s) to W&B",
-                        len(latent_paths),
+                else:
+                    wandb_videos = {}
+
+                    for dataset_folder in iter_folder.iterdir():
+                        if dataset_folder.is_dir():
+                            dataset_name = dataset_folder.name
+                            video_paths = sorted(dataset_folder.glob("*.mp4"))
+
+                            if video_paths:
+                                wandb_videos[dataset_name] = [
+                                    wandb.Video(str(path)) for path in video_paths
+                                ]
+
+                    # Log with dataset-specific keys
+                    if wandb_videos:
+                        log_dict = {}
+                        for dataset_name, videos in wandb_videos.items():
+                            log_dict[f"viz/{dataset_name}"] = videos
+
+                        total_videos = sum(len(v) for v in wandb_videos.values())
+                        logger.info(
+                            f"Sending {total_videos} video(s) to wandb from {len(wandb_videos)} dataset(s)"
+                        )
+                        wandb.log(log_dict, step=self.metrics.total_observations)
+                    elif self.require_visualization_success:
+                        raise RuntimeError(
+                            "required decoded videos were not written for W&B"
+                        )
+
+                    latent_paths = sorted(
+                        iter_folder.glob("*/latent_trajectory_rank_*.safetensors")
                     )
+                    expected_latent_paths = (
+                        self.world_size * len(self.viz_data_loaders)
+                    )
+                    if self.require_visualization_success and len(latent_paths) != (
+                        expected_latent_paths
+                    ):
+                        raise RuntimeError(
+                            "required latent trajectory count mismatch: "
+                            f"{len(latent_paths)} != {expected_latent_paths}"
+                        )
+                    if latent_paths:
+                        artifact = wandb.Artifact(
+                            name=(
+                                f"{wandb.run.id}-latent-trajectories-"
+                                f"iter-{self._curr_iter}"
+                            ),
+                            type="dual-denoising-trajectories",
+                            metadata={
+                                "iteration": self._curr_iter,
+                                "total_observations": self.metrics.total_observations,
+                                "sigma_convention": "1=noise,0=clean",
+                            },
+                        )
+                        for latent_path in latent_paths:
+                            artifact.add_file(
+                                str(latent_path),
+                                name=f"{latent_path.parent.name}/{latent_path.name}",
+                            )
+                            manifest_path = latent_path.with_suffix(".json")
+                            if manifest_path.is_file():
+                                artifact.add_file(
+                                    str(manifest_path),
+                                    name=(
+                                        f"{manifest_path.parent.name}/"
+                                        f"{manifest_path.name}"
+                                    ),
+                                )
+                        wandb.log_artifact(artifact)
+                        logger.info(
+                            "Sent %d raw latent trajectory file(s) to W&B",
+                            len(latent_paths),
+                        )
+            except Exception as exc:
+                wandb_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("Visualization W&B logging failed: %s", wandb_error)
+
+        if dist.is_initialized() and self.world_size > 1:
+            result = [wandb_error]
+            torch.distributed.broadcast_object_list(result, src=0)
+            wandb_error = result[0]
+        if wandb_error is not None and self.require_visualization_success:
+            raise RuntimeError(
+                f"required visualization W&B logging failed: {wandb_error}"
+            )
 
         self.model.train()
 

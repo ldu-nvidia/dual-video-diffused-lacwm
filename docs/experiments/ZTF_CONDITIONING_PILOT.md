@@ -78,7 +78,7 @@ The 100-update result is a screening observation, not publication evidence.
 Phase 4 still requires controlled DROID splits, at least three seeds, and the
 random/parameter-matched representation controls in `docs/RESEARCH_PLAN.md`.
 
-## Primary metric
+## Denoising and autonomous-rollout metrics
 
 For rectified flow,
 
@@ -87,16 +87,38 @@ z_sigma = z_clean + sigma * (noise - z_clean)
 z_clean_hat = z_sigma - sigma * v_pred
 ```
 
-The primary endpoint is future-only, view-masked video-latent NMSE at native
-Wan scheduler nodes nearest `sigma_video = 0.90` and `0.75`. Validation also
-records `0.50` and `0.25`.
+The fixed-sigma forward-pass diagnostic is future-only, view-masked
+video-latent NMSE at native Wan scheduler nodes nearest
+`sigma_video = 0.90` and `0.75`; validation also records `0.50` and `0.25`.
+Those calls corrupt the TF state from the ground-truth clip, so their telemetry
+is explicitly prefixed `teacher_forced/`. They measure whether a usable TF
+condition could accelerate one-call video denoising, but cannot by themselves
+establish faster autonomous generation.
+
+The primary inference endpoint is therefore the corresponding future-only
+video-latent NMSE along the saved 8-NFE **joint rollout**, where both future
+video and future TF start from Gaussian noise and every later TF state is
+model-generated. Joint-rollout NMSE is computed from
+`video_x0_trajectory`, `video_clean`, and `history_latent_frames`; the raw
+trajectory remains the auditable source. Decoded video quality is evaluated at
+the same NFE.
 
 Interpret the pilot as positive only if the conditioned arm:
 
-1. has a lower high-noise video-NMSE learning curve;
-2. reaches the no-condition arm's final video NMSE in fewer observations;
+1. has lower teacher-forced high-noise video NMSE on the paired probe at the
+   same update;
+2. also has lower generated-TF joint-rollout video NMSE on the paired probe at
+   the same update and NFE;
 3. retains finite video/TF losses and gradients; and
 4. does not merely improve TF NMSE while video NMSE remains unchanged.
+
+This 100-update screen advances the validation/visualization loaders between
+checkpoints. Therefore it compares arms only at matching checkpoints; it does
+not estimate a within-run time-to-threshold across updates. A confirmatory
+learning-speed experiment must cache a fixed validation clip set and fixed
+video/TF noise across all checkpoints. At every pilot checkpoint, clean states
+and initial noise tensors must hash-identically across the two arms before a
+paired difference is interpreted.
 
 The later go gate remains the stricter Phase-4 criterion: at least a 5% early
 high-noise gain and a 3% preregistered temporal gain at 8 NFE without a material
@@ -113,9 +135,11 @@ group:   unset
 access:  PRIVATE (verified before upload)
 ```
 
-Scalars include video/TF flow loss, video/TF clean-estimate NMSE, video and TF
-sigma, state RMS, TF token RMS, state/clock gates, gradients, throughput, step
-time, and GPU memory.
+Scalars include video/TF flow loss, explicitly teacher-forced video/TF
+clean-estimate NMSE, video and TF sigma, state RMS, TF token RMS,
+state/clock gates, gradients, throughput, step time, and GPU memory.
+Autonomous joint-rollout NMSE is derived from each saved trajectory and is the
+inference-side endpoint.
 
 Each visualization checkpoint stores and uploads a safetensors artifact with:
 

@@ -61,7 +61,11 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--python", type=Path, required=True)
     parser.add_argument("--kind", choices=("gradient-smoke", "full-8xb200"), required=True)
-    parser.add_argument("--variant", choices=("latent", "explicit"), required=True)
+    parser.add_argument(
+        "--variant",
+        choices=("latent", "explicit", "dual-no-ztf", "dual-with-ztf"),
+        required=True,
+    )
     parser.add_argument("--data-mode", choices=("real", "synthetic"), required=True)
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--command-file", type=Path, required=True)

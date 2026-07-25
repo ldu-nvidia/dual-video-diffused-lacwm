@@ -190,8 +190,16 @@ class WanForwardModel(nn.Module):
             raise RuntimeError(
                 f"TF token count {state_tokens.shape[1]} does not match Wan {seq_len}"
             )
-        clock_tokens = self.tf_clock_embedding(tf_sigma).unsqueeze(1).expand(
-            -1, seq_len, -1
+        # The clock MLP deliberately evaluates from an FP32 sigma, but its
+        # residual must enter Wan in the same compute dtype as the patch/state
+        # tokens.  Leaving an exactly-zero clock residual in FP32 under AMP
+        # promotes ``patch_tokens + y_camera`` to FP32, so the nominal zero-gate
+        # path is neither functionally nor memory-identical to pretrained Wan.
+        clock_tokens = (
+            self.tf_clock_embedding(tf_sigma)
+            .to(dtype=state_tokens.dtype)
+            .unsqueeze(1)
+            .expand(-1, seq_len, -1)
         )
         use_tf = self.condition_on_tf if condition_on_tf is None else bool(condition_on_tf)
         injected_tokens = clock_tokens + state_tokens * float(use_tf)

@@ -10,14 +10,14 @@ Usage: tools/run_gradient_smoke.sh [options]
 
 Required:
   --gpu INDEX             One physical GPU index.
-  --variant NAME          latent or explicit.
+  --variant NAME          latent, explicit, dual-no-ztf, or dual-with-ztf.
   --data-mode MODE        real or synthetic. Synthetic loads the real model/weights
                           with deterministic tensors but cannot qualify a full launch.
   --python PATH           Python from the fully provisioned lacwm environment.
   --wan-dir PATH          Wan2.1-Fun-1.3B-Control asset directory.
   --videox-home PATH      VideoX-Fun checkout.
-  --data-root PATH        Root containing all four prepared datasets; required only
-                          for --data-mode real.
+  --data-root PATH        Root containing the configured prepared datasets (ABC
+                          only for dual variants); required for --data-mode real.
   --run-root PATH         Output root under /mnt/data1, /mnt/data2, or a root
                           explicitly allowed by LACWM_ALLOWED_RUN_ROOTS.
   --wandb-mode disabled   Gradient validation never contacts W&B; this explicit
@@ -25,6 +25,9 @@ Required:
 
 Optional:
   --run-name NAME         Provenance folder name (default is timestamped).
+  --warmstart-model PATH  Immutable production snapshot for a model-only dual
+                          warm start. Requires --warmstart-sha256.
+  --warmstart-sha256 HEX  Exact SHA-256 of --warmstart-model.
   --execute               Actually run four forward/backward/update checks.
                           Without this flag, preflight and command preview only.
   -h, --help              Show this help.
@@ -49,6 +52,8 @@ DATA_PATH=""
 RUN_ROOT=""
 WANDB_MODE_VALUE=""
 RUN_NAME=""
+WARMSTART_PATH=""
+WARMSTART_SHA256=""
 EXECUTE=0
 
 while (($#)); do
@@ -63,6 +68,8 @@ while (($#)); do
     --run-root) [[ $# -ge 2 ]] || die "--run-root requires a value"; RUN_ROOT="$2"; shift 2 ;;
     --wandb-mode) [[ $# -ge 2 ]] || die "--wandb-mode requires a value"; WANDB_MODE_VALUE="$2"; shift 2 ;;
     --run-name) [[ $# -ge 2 ]] || die "--run-name requires a value"; RUN_NAME="$2"; shift 2 ;;
+    --warmstart-model) [[ $# -ge 2 ]] || die "--warmstart-model requires a value"; WARMSTART_PATH="$2"; shift 2 ;;
+    --warmstart-sha256) [[ $# -ge 2 ]] || die "--warmstart-sha256 requires a value"; WARMSTART_SHA256="$2"; shift 2 ;;
     --execute) EXECUTE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -70,13 +77,25 @@ while (($#)); do
 done
 
 [[ "$GPU" =~ ^[0-9]+$ ]] || die "--gpu must be one non-negative integer"
-[[ "$VARIANT" == "latent" || "$VARIANT" == "explicit" ]] || die "--variant must be latent or explicit"
+[[ "$VARIANT" == "latent" || "$VARIANT" == "explicit" || "$VARIANT" == "dual-no-ztf" || "$VARIANT" == "dual-with-ztf" ]] || \
+  die "--variant must be latent, explicit, dual-no-ztf, or dual-with-ztf"
 [[ "$DATA_MODE" == "real" || "$DATA_MODE" == "synthetic" ]] || die "--data-mode must be real or synthetic"
 [[ -n "$PYTHON_BIN" && -n "$WAN_PATH" && -n "$VIDEOX_PATH" && -n "$RUN_ROOT" ]] || die "--python, --wan-dir, --videox-home, and --run-root are required"
 if [[ "$DATA_MODE" == "real" ]]; then
   [[ -n "$DATA_PATH" ]] || die "--data-root is required for --data-mode real"
 fi
 [[ "$WANDB_MODE_VALUE" == "disabled" ]] || die "gradient validation requires the explicit option: --wandb-mode disabled"
+if [[ -n "$WARMSTART_PATH" || -n "$WARMSTART_SHA256" ]]; then
+  [[ "$VARIANT" == "dual-no-ztf" || "$VARIANT" == "dual-with-ztf" ]] || \
+    die "model-only production warm start is supported only for dual variants"
+  [[ -n "$WARMSTART_PATH" && -n "$WARMSTART_SHA256" ]] || \
+    die "--warmstart-model and --warmstart-sha256 must be supplied together"
+  WARMSTART_SHA256="${WARMSTART_SHA256,,}"
+  [[ "$WARMSTART_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
+    die "--warmstart-sha256 must contain exactly 64 hex digits"
+  [[ ! -L "$WARMSTART_PATH" ]] || \
+    die "warm-start checkpoint must be an exact path, not a symlink: $WARMSTART_PATH"
+fi
 if [[ -z "$RUN_NAME" ]]; then
   RUN_NAME="gradient_smoke_${DATA_MODE}_${VARIANT}_$(date -u +%Y%m%dT%H%M%SZ)_pid$$"
 fi
@@ -92,7 +111,7 @@ import sys
 print(Path(sys.argv[1]).expanduser().absolute())
 PY
 )"
-mapfile -t NORMALIZED_PATHS < <("$PYTHON_BIN" - "$WAN_PATH" "$VIDEOX_PATH" "$DATA_PATH" "$RUN_ROOT" <<'PY'
+mapfile -t NORMALIZED_PATHS < <("$PYTHON_BIN" - "$WAN_PATH" "$VIDEOX_PATH" "$DATA_PATH" "$RUN_ROOT" "$WARMSTART_PATH" <<'PY'
 from pathlib import Path
 import sys
 for value in sys.argv[1:]:
@@ -103,6 +122,11 @@ WAN_PATH="${NORMALIZED_PATHS[0]}"
 VIDEOX_PATH="${NORMALIZED_PATHS[1]}"
 DATA_PATH="${NORMALIZED_PATHS[2]}"
 RUN_ROOT="${NORMALIZED_PATHS[3]}"
+WARMSTART_PATH="${NORMALIZED_PATHS[4]}"
+if [[ -n "$WARMSTART_PATH" ]]; then
+  [[ -f "$WARMSTART_PATH" && -r "$WARMSTART_PATH" ]] || \
+    die "warm-start checkpoint is not a readable regular file: $WARMSTART_PATH"
+fi
 
 export WAN_DIR="$WAN_PATH"
 export VIDEOX_HOME="$VIDEOX_PATH"
@@ -127,6 +151,9 @@ PREFLIGHT=(
 if [[ "$DATA_MODE" == "synthetic" ]]; then
   PREFLIGHT+=(--skip-data)
 fi
+if [[ "$VARIANT" == "dual-no-ztf" || "$VARIANT" == "dual-with-ztf" ]]; then
+  PREFLIGHT+=(--datasets abc)
+fi
 
 echo "Running guarded one-GPU preflight..."
 "$PYTHON_BIN" "$TOOLS_DIR/env/verify_b200_runtime.py" \
@@ -138,6 +165,9 @@ PREVIEW_REPORT="$RUN_ROOT/_launches/$RUN_NAME/gradient_report.json"
 LAUNCH_DIR="$RUN_ROOT/_launches/$RUN_NAME"
 [[ ! -e "$LAUNCH_DIR" ]] || die "smoke output already exists; choose another --run-name: $LAUNCH_DIR"
 COMMAND=("$PYTHON_BIN" "$TOOLS_DIR/gradient_smoke.py" --variant "$VARIANT" --data-mode "$DATA_MODE" --steps 4 --report "$PREVIEW_REPORT")
+if [[ -n "$WARMSTART_PATH" ]]; then
+  COMMAND+=(--warmstart-model "$WARMSTART_PATH" --warmstart-sha256 "$WARMSTART_SHA256")
+fi
 printf 'Validated command:'
 printf ' %q' "${COMMAND[@]}"
 printf '\n'
@@ -201,6 +231,9 @@ export TMPDIR="$LAUNCH_DIR/tmp"
 
 REPORT="$LAUNCH_DIR/gradient_report.json"
 COMMAND=("$PYTHON_BIN" "$TOOLS_DIR/gradient_smoke.py" --variant "$VARIANT" --data-mode "$DATA_MODE" --steps 4 --report "$REPORT")
+if [[ -n "$WARMSTART_PATH" ]]; then
+  COMMAND+=(--warmstart-model "$WARMSTART_PATH" --warmstart-sha256 "$WARMSTART_SHA256")
+fi
 {
   printf '#!/usr/bin/env bash\n'
   printf '%s\n' 'echo "This file records provenance only; rerun through tools/run_gradient_smoke.sh." >&2' 'exit 2' ''

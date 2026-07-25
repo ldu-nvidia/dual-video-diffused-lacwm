@@ -166,17 +166,24 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         tf_nmse: torch.Tensor,
         video_sigma: torch.Tensor,
     ) -> None:
-        self.aux_losses["video_x0_nmse"] = video_nmse.mean().detach()
-        self.aux_losses["tf_x0_nmse"] = tf_nmse.mean().detach()
+        # These one-call denoising diagnostics use TF states corrupted from the
+        # same ground-truth clip.  They measure the supervised denoising problem,
+        # not autonomous joint generation; keep that distinction explicit in
+        # telemetry so a teacher-forced gain cannot be reported as an inference
+        # acceleration result.
+        self.aux_losses["teacher_forced/video_x0_nmse"] = (
+            video_nmse.mean().detach()
+        )
+        self.aux_losses["teacher_forced/tf_x0_nmse"] = tf_nmse.mean().detach()
         if not self.training and self.validation_video_sigmas:
             for requested in self.validation_video_sigmas:
                 nearest = (video_sigma.float() - requested).abs()
                 selected = nearest == nearest.min()
                 self.aux_losses[
-                    f"video_x0_nmse/sigma_{requested:.2f}"
+                    f"teacher_forced/video_x0_nmse/sigma_{requested:.2f}"
                 ] = video_nmse[selected].mean().detach()
                 self.aux_losses[
-                    f"tf_x0_nmse/sigma_{requested:.2f}"
+                    f"teacher_forced/tf_x0_nmse/sigma_{requested:.2f}"
                 ] = tf_nmse[selected].mean().detach()
 
     def forward(
