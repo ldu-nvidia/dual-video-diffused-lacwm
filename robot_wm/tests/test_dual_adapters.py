@@ -117,3 +117,32 @@ def test_tf_sigma_embedding_is_exact_noop_then_receives_gradients():
     opened.square().mean().backward()
     assert embedding.net[0].weight.grad is not None
     assert torch.isfinite(embedding.net[0].weight.grad).all()
+
+
+def test_tf_sigma_gate_can_be_fixed_at_exact_zero_without_changing_checkpoint_key():
+    original = TFSigmaTokenEmbedding(hidden_size=16, embedding_dim=8)
+    fixed = TFSigmaTokenEmbedding(
+        hidden_size=16,
+        embedding_dim=8,
+        gate_init=0.0,
+        gate_trainable=False,
+    )
+
+    result = fixed.load_state_dict(original.state_dict(), strict=True)
+
+    assert not result.missing_keys
+    assert not result.unexpected_keys
+    assert fixed.gate.shape == torch.Size([])
+    assert torch.count_nonzero(fixed.effective_gate()) == 0
+    assert not fixed.gate.requires_grad
+    assert torch.count_nonzero(fixed(torch.tensor([0.0, 0.5, 1.0]))) == 0
+
+
+@pytest.mark.parametrize("gate_init", [-1.0, 1.0, float("inf"), float("nan")])
+def test_tf_sigma_embedding_rejects_invalid_effective_gate_init(gate_init):
+    with pytest.raises(ValueError, match="gate_init"):
+        TFSigmaTokenEmbedding(
+            hidden_size=16,
+            embedding_dim=8,
+            gate_init=gate_init,
+        )

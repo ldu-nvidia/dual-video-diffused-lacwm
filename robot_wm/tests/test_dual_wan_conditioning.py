@@ -80,6 +80,7 @@ class _FakeTransformer(nn.Module):
             bias=False,
         )
         nn.init.constant_(self.patch_embedding.weight, 0.05)
+        self.video_gain = nn.Parameter(torch.tensor(0.25))
         self.head = _FakeHead()
         self.last_shared_tokens = None
         self.last_native_patches = None
@@ -109,7 +110,10 @@ class _FakeTransformer(nn.Module):
         self.last_native_patches = native_patches
         self.last_shared_tokens = torch.cat(shared, dim=0)
         self.head(self.last_shared_tokens, None)
-        return torch.zeros_like(x)
+        shared_mean = self.last_shared_tokens.mean(dim=(1, 2)).reshape(
+            x.shape[0], 1, 1, 1, 1
+        )
+        return self.video_gain * x + shared_mean
 
 
 class _CapturingTFHead(nn.Module):
@@ -131,26 +135,35 @@ class _CapturingTFHead(nn.Module):
         )
 
 
-def _make_dual_model():
+def _make_dual_model(
+    *,
+    condition_on_tf=True,
+    state_gate_init=0.1,
+    state_gate_trainable=False,
+    clock_gate_init=0.0,
+    clock_gate_trainable=True,
+):
     model = WAN_FORWARD.WanForwardModel.__new__(
         WAN_FORWARD.WanForwardModel
     )
     nn.Module.__init__(model)
     model.patch_size = (1, 2, 2)
     model.dual_diffusion_enabled = True
-    model.condition_on_tf = True
+    model.condition_on_tf = condition_on_tf
     model.transformer = _FakeTransformer()
     model.action_to_control = _FakeActionToControl()
     model.tf_token_adapter = ZeroInitTFTokenAdapter(
         tf_channels=4,
         hidden_size=8,
         patch_size=model.patch_size,
-        gate_init=0.1,
-        gate_trainable=False,
+        gate_init=state_gate_init,
+        gate_trainable=state_gate_trainable,
     )
     model.tf_clock_embedding = TFSigmaTokenEmbedding(
         hidden_size=8,
         embedding_dim=8,
+        gate_init=clock_gate_init,
+        gate_trainable=clock_gate_trainable,
     )
     model.tf_velocity_head = _CapturingTFHead()
     return model
@@ -250,3 +263,115 @@ def test_conditioning_tf_shape_must_match_noisy_tf():
             conditioning_tf=torch.randn(2, 4, 2, 4, 2),
             tf_sigma=torch.tensor([0.3, 0.6]),
         )
+
+
+def test_frozen_zero_state_and_clock_make_video_loss_output_and_gradients_tf_invariant():
+    torch.manual_seed(11)
+    model = _make_dual_model(
+        condition_on_tf=False,
+        state_gate_init=0.0,
+        state_gate_trainable=False,
+        clock_gate_init=0.0,
+        clock_gate_trainable=False,
+    )
+    noisy_video = torch.randn(2, 16, 2, 4, 4)
+    reference = torch.randn_like(noisy_video)
+    actions = torch.randn(2, 2, 3)
+    timesteps = torch.tensor([100.0, 200.0])
+    context = [torch.zeros(1, 4), torch.zeros(1, 4)]
+    target = torch.randn_like(noisy_video)
+
+    def run(noisy_tf, conditioning_tf, tf_sigma):
+        model.zero_grad(set_to_none=True)
+        output = model(
+            noisy_video,
+            timesteps,
+            actions,
+            reference,
+            context,
+            noisy_tf=noisy_tf,
+            conditioning_tf=conditioning_tf,
+            tf_sigma=tf_sigma,
+            condition_on_tf=False,
+        )
+        video_loss = (output.video_velocity - target).square().mean()
+        # Keep a TF-dependent branch in the graph exactly as the training
+        # objective does, but give it the video-only arm's zero weight.
+        total_loss = (
+            video_loss
+            + 0.0 * model.tf_velocity_head.last_tokens.square().mean()
+        )
+        total_loss.backward()
+        gradients = {
+            name: (
+                None
+                if parameter.grad is None
+                else parameter.grad.detach().clone()
+            )
+            for name, parameter in model.named_parameters()
+        }
+        return (
+            output.video_velocity.detach().clone(),
+            video_loss.detach().clone(),
+            output.tf_condition_tokens.detach().clone(),
+            gradients,
+        )
+
+    def run_production_video_path():
+        model.zero_grad(set_to_none=True)
+        model.dual_diffusion_enabled = False
+        try:
+            video_velocity = model(
+                noisy_video,
+                timesteps,
+                actions,
+                reference,
+                context,
+            )
+        finally:
+            model.dual_diffusion_enabled = True
+        video_loss = (video_velocity - target).square().mean()
+        video_loss.backward()
+        gradients = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in model.transformer.named_parameters()
+            if parameter.grad is not None
+        }
+        return (
+            video_velocity.detach().clone(),
+            video_loss.detach().clone(),
+            gradients,
+        )
+
+    tf_a = torch.randn(2, 4, 2, 4, 4)
+    tf_b = torch.randn_like(tf_a) * 100.0 + 37.0
+    production = run_production_video_path()
+    first = run(tf_a, tf_a.flip(0), torch.tensor([0.0, 1.0]))
+    second = run(tf_b, -tf_b, torch.tensor([0.91, 0.17]))
+
+    assert torch.equal(production[0], first[0])
+    assert torch.equal(production[1], first[1])
+    assert torch.equal(first[0], second[0])
+    assert torch.equal(first[1], second[1])
+    assert torch.count_nonzero(first[2]) == 0
+    assert torch.count_nonzero(second[2]) == 0
+    assert first[3].keys() == second[3].keys()
+    for name in first[3]:
+        grad_a = first[3][name]
+        grad_b = second[3][name]
+        assert (grad_a is None) == (grad_b is None), name
+        if grad_a is not None:
+            assert torch.equal(grad_a, grad_b), name
+
+    for name, production_gradient in production[2].items():
+        dual_gradient = first[3][f"transformer.{name}"]
+        assert dual_gradient is not None
+        assert torch.equal(production_gradient, dual_gradient), name
+    assert model.transformer.video_gain.grad is not None
+    assert torch.count_nonzero(model.transformer.video_gain.grad) > 0
+    assert not model.tf_token_adapter.gate.requires_grad
+    assert not model.tf_clock_embedding.gate.requires_grad
+    for module in (model.tf_token_adapter, model.tf_clock_embedding):
+        for parameter in module.parameters():
+            if parameter.grad is not None:
+                assert torch.count_nonzero(parameter.grad) == 0

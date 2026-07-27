@@ -101,8 +101,8 @@ done
 
 [[ -n "${SLURM_JOB_ID:-}" ]] || die "this entrypoint requires a Slurm allocation"
 [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]] || die "SLURM_ARRAY_TASK_ID is unset"
-[[ "$SLURM_ARRAY_TASK_ID" =~ ^[0-5]$ ]] || \
-  die "array task must be 0, 1, 2, 3, 4, or 5"
+[[ "$SLURM_ARRAY_TASK_ID" =~ ^[0-6]$ ]] || \
+  die "array task must be 0, 1, 2, 3, 4, 5, or 6"
 [[ "${SLURM_RESTART_COUNT:-0}" == "0" ]] || \
   die "representation-screen jobs are non-requeueable; refusing restart ${SLURM_RESTART_COUNT}"
 [[ "${SLURM_JOB_NUM_NODES:-1}" == "1" ]] || die "each arm requires exactly one node"
@@ -114,6 +114,8 @@ fi
 
 IFS=$'\t' read -r \
   ARM REPRESENTATION CONDITION_ON_TF CONDITION_MODE STATE_GATE_INIT \
+  STATE_GATE_TRAINABLE CLOCK_GATE_INIT CLOCK_GATE_TRAINABLE TF_LOSS_WEIGHT \
+  VIDEO_ONLY_CONTROL \
   SMOKE_VARIANT SMOKE_REPORT_KEY \
   < <(
     "$PYTHON_BIN" "$HELPER" arm-contract \
@@ -122,6 +124,24 @@ IFS=$'\t' read -r \
   )
 [[ -n "$ARM" && -n "$REPRESENTATION" && -n "$CONDITION_MODE" && -n "$SMOKE_VARIANT" ]] || \
   die "arm helper returned an incomplete contract"
+for boolean_pair in \
+  "condition_on_tf:$CONDITION_ON_TF" \
+  "state_gate_trainable:$STATE_GATE_TRAINABLE" \
+  "clock_gate_trainable:$CLOCK_GATE_TRAINABLE" \
+  "video_only_control:$VIDEO_ONLY_CONTROL"; do
+  [[ "${boolean_pair#*:}" == "true" || "${boolean_pair#*:}" == "false" ]] || \
+    die "arm helper returned an invalid ${boolean_pair%%:*}: ${boolean_pair#*:}"
+done
+if [[ "$VIDEO_ONLY_CONTROL" == "true" ]]; then
+  [[ "$CONDITION_ON_TF" == "false" && "$CONDITION_MODE" == "off" ]] || \
+    die "video-only control must disable TF conditioning"
+  [[ "$STATE_GATE_INIT" == "0.00" && "$STATE_GATE_TRAINABLE" == "false" ]] || \
+    die "video-only control must freeze the state gate at exact zero"
+  [[ "$CLOCK_GATE_INIT" == "0.00" && "$CLOCK_GATE_TRAINABLE" == "false" ]] || \
+    die "video-only control must freeze the clock gate at exact zero"
+  [[ "$TF_LOSS_WEIGHT" == "0.00" ]] || \
+    die "video-only control must set TF loss weight to exact zero"
+fi
 case "$REPRESENTATION" in
   parseval_rfft|time_packed) ;;
   *) die "arm helper returned an invalid representation: $REPRESENTATION" ;;
@@ -258,7 +278,11 @@ TRAIN_OVERRIDES=(
   "model.dual_diffusion.condition_on_tf=$CONDITION_ON_TF"
   "model.dual_diffusion.condition_mode='$CONDITION_MODE'"
   "model.dual_diffusion.state_gate_init=$STATE_GATE_INIT"
-  "model.dual_diffusion.state_gate_trainable=false"
+  "model.dual_diffusion.state_gate_trainable=$STATE_GATE_TRAINABLE"
+  "model.dual_diffusion.clock_gate_init=$CLOCK_GATE_INIT"
+  "model.dual_diffusion.clock_gate_trainable=$CLOCK_GATE_TRAINABLE"
+  "model.dual_diffusion.tf_loss_weight=$TF_LOSS_WEIGHT"
+  "model.dual_diffusion.video_only_control=$VIDEO_ONLY_CONTROL"
   "model.dual_diffusion.evaluation_nfe_steps=[1,2,4,8]"
   "model.dual_diffusion.evaluation_noise_seed=20260726"
   "model.dual_diffusion.evaluation_condition_sources=[autonomous,off,oracle_matched,oracle_shuffled]"
@@ -322,7 +346,7 @@ printf 'Launching representation-screen arm %q from %q:' "$ARM" "$PROJECT_ROOT"
 printf ' %q' "${COMMAND[@]}"
 printf '\n'
 echo "Screen: $SCREEN_ID"
-echo "Arm: $ARM (representation=$REPRESENTATION, condition_mode=$CONDITION_MODE, fixed_state_gate=$STATE_GATE_INIT)"
+echo "Arm: $ARM (representation=$REPRESENTATION, condition_mode=$CONDITION_MODE, state_gate=$STATE_GATE_INIT/$STATE_GATE_TRAINABLE, clock_gate=$CLOCK_GATE_INIT/$CLOCK_GATE_TRAINABLE, tf_loss_weight=$TF_LOSS_WEIGHT, video_only=$VIDEO_ONLY_CONTROL)"
 echo "Evaluation: independent NFE=[1,2,4,8], noise_seed=20260726"
 echo "Inference diagnostics: autonomous, off, oracle_matched, oracle_shuffled (oracle=leakage)"
 echo "Clock: sigma=1 noise, sigma=0 clean"

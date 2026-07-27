@@ -83,6 +83,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self.tf_schedule_mode = str(config.get("schedule_mode", "tf_leads"))
         self.tf_lead_logit = float(config.get("tf_lead_logit", 1.0))
         self.tf_loss_weight = float(config.get("tf_loss_weight", 1.0))
+        self.video_only_control = bool(config.get("video_only_control", False))
         self.evaluation_nfe_steps = tuple(
             sorted(
                 {
@@ -141,6 +142,12 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             )
         if self.tf_loss_weight < 0:
             raise ValueError("tf_loss_weight must be non-negative")
+        self._assert_video_only_control_contract()
+        # Check once more on the first train/eval call, after any model-only
+        # warm start has loaded.  Frozen gates cannot subsequently open, and
+        # avoiding a scalar device sync on every update keeps speed telemetry
+        # representative.
+        self._video_only_runtime_validated = not self.video_only_control
         if not self.validation_video_sigmas or any(
             not 0 <= sigma <= 1 for sigma in self.validation_video_sigmas
         ):
@@ -148,15 +155,53 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self._visualization_artifacts = None
         logger.info(
             "DualExplicitActionDiTModel: condition_mode=%s, schedule=%s, "
-            "tf_lead_logit=%.3f, tf_loss_weight=%.3f, evaluation_nfe=%s, "
-            "evaluation_sources=%s",
+            "tf_lead_logit=%.3f, tf_loss_weight=%.3f, video_only_control=%s, "
+            "evaluation_nfe=%s, evaluation_sources=%s",
             self.tf_condition_mode,
             self.tf_schedule_mode,
             self.tf_lead_logit,
             self.tf_loss_weight,
+            self.video_only_control,
             self.evaluation_nfe_steps,
             self.evaluation_condition_sources,
         )
+
+    def _assert_video_only_control_contract(self) -> None:
+        """Fail closed if the declared video-only arm can consume TF signals."""
+        if not self.video_only_control:
+            return
+        state_gate = self.forward_model.tf_token_adapter.gate
+        clock_gate = self.forward_model.tf_clock_embedding.gate
+        problems = []
+        if self.tf_condition_mode != "off" or self.condition_on_tf:
+            problems.append("condition mode is not off")
+        if bool(getattr(self.forward_model, "condition_on_tf", False)):
+            problems.append("forward-model TF condition is enabled")
+        if self.tf_loss_weight != 0.0:
+            problems.append(f"TF loss weight is {self.tf_loss_weight}, not zero")
+        if state_gate.requires_grad:
+            problems.append("state gate is trainable")
+        if clock_gate.requires_grad:
+            problems.append("clock gate is trainable")
+        if float(
+            self.forward_model.tf_token_adapter.effective_gate().detach().float()
+        ) != 0.0:
+            problems.append("state gate is not exact zero")
+        if float(
+            self.forward_model.tf_clock_embedding.effective_gate().detach().float()
+        ) != 0.0:
+            problems.append("clock gate is not exact zero")
+        if problems:
+            raise RuntimeError(
+                "video-only control violates its causal no-op contract: "
+                + "; ".join(problems)
+            )
+
+    def _ensure_video_only_runtime_contract(self) -> None:
+        if getattr(self, "_video_only_runtime_validated", False):
+            return
+        self._assert_video_only_control_contract()
+        self._video_only_runtime_validated = True
 
     @staticmethod
     def _expand_sigma(sigma: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
@@ -264,6 +309,16 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             history_frames=history_frames,
         )
 
+    def _training_tf_noise(self, tf_clean: torch.Tensor) -> torch.Tensor:
+        """Draw TF corruption without perturbing the video-only RNG path."""
+        if self.video_only_control:
+            # The TF target is zero-weighted and both injection gates are
+            # frozen at zero.  A deterministic placeholder avoids advancing
+            # the global generator before Wan's LoRA-dropout masks are drawn,
+            # preserving the ordinary video RNG/scheduler path.
+            return torch.zeros_like(tf_clean)
+        return torch.randn_like(tf_clean)
+
     def _sampling_conditioning_tf(
         self,
         tf_state: torch.Tensor,
@@ -313,6 +368,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         **kwargs,
     ) -> torch.Tensor:
         """Train both future states; never condition on clean future TF."""
+        self._ensure_video_only_runtime_contract()
         self.aux_losses = {}
         morphology_index = kwargs.get("morphology_index", None)
         device = rgb.device
@@ -345,7 +401,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         video_target = video_noise - video_clean
 
         tf_clean = self._tf_clean(rgb, video_clean.shape)
-        tf_noise = torch.randn_like(tf_clean)
+        tf_noise = self._training_tf_noise(tf_clean)
         tf_sigma_expanded = self._expand_sigma(tf_sigma, tf_clean)
         tf_noisy = (1.0 - tf_sigma_expanded) * tf_clean + tf_sigma_expanded * tf_noise
         # Observed history is deterministic conditioning; only future bins diffuse.
@@ -426,6 +482,12 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self.aux_losses["condition/mode_code"] = video_loss.new_tensor(
             float(TF_CONDITION_MODE_CODES[self.tf_condition_mode])
         )
+        self.aux_losses["condition/video_only_control"] = video_loss.new_tensor(
+            float(self.video_only_control)
+        )
+        self.aux_losses["condition/tf_loss_weight"] = video_loss.new_tensor(
+            self.tf_loss_weight
+        )
         state_gate = self.forward_model.tf_token_adapter.effective_gate()
         clock_gate = self.forward_model.tf_clock_embedding.effective_gate()
         self.aux_losses["condition/state_gate"] = torch.as_tensor(
@@ -457,6 +519,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         matched and shuffled conditioning.  The first possible causal benefit
         from an autonomously denoised TF state is on the second Wan call.
         """
+        self._ensure_video_only_runtime_contract()
         video_clean = self._encode_clip(rgb).to(rgb.dtype)
         batch_size, _, latent_frames, _, _ = video_clean.shape
         history_frames = min(self.num_history_latent, latent_frames)
@@ -529,6 +592,26 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             "condition_on_tf": torch.tensor([int(self.condition_on_tf)]),
             "condition_mode_code": torch.tensor(
                 [TF_CONDITION_MODE_CODES[self.tf_condition_mode]]
+            ),
+            "video_only_control": torch.tensor(
+                [int(self.video_only_control)], dtype=torch.int64
+            ),
+            "tf_loss_weight": torch.tensor(
+                [self.tf_loss_weight], dtype=torch.float32
+            ),
+            "effective_state_gate": (
+                self.forward_model.tf_token_adapter.effective_gate()
+                .detach()
+                .cpu()
+                .float()
+                .reshape(1)
+            ),
+            "effective_clock_gate": (
+                self.forward_model.tf_clock_embedding.effective_gate()
+                .detach()
+                .cpu()
+                .float()
+                .reshape(1)
             ),
             "evaluation_noise_seed": torch.tensor(
                 [self.evaluation_noise_seed], dtype=torch.int64

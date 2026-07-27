@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import pytest
+from torch import nn
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +72,8 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
     model.num_future_frames = 2
     model.tf_condition_mode = "shuffled"
     model.condition_on_tf = True
+    model.video_only_control = False
+    model.tf_loss_weight = 1.0
     model.tf_schedule_mode = "aligned"
     model.tf_lead_logit = 1.0
     model.evaluation_noise_seed = 123
@@ -146,6 +150,12 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
         )
 
     model.forward_model = forward_model
+    model.forward_model.tf_token_adapter = types.SimpleNamespace(
+        effective_gate=lambda: torch.tensor(0.1)
+    )
+    model.forward_model.tf_clock_embedding = types.SimpleNamespace(
+        effective_gate=lambda: torch.tensor(0.0)
+    )
     rgb = torch.zeros(batch_size, 3, 13, 2, 2)
 
     model._sample_future(rgb)
@@ -160,3 +170,56 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
         rtol=0,
         atol=0,
     )
+
+
+def test_video_only_control_fails_closed_if_a_tf_path_can_open(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+
+    class Gate:
+        def __init__(self):
+            self.gate = nn.Parameter(torch.zeros(()), requires_grad=False)
+
+        def effective_gate(self):
+            return torch.tanh(self.gate)
+
+    model.video_only_control = True
+    model.tf_condition_mode = "off"
+    model.condition_on_tf = False
+    model.tf_loss_weight = 0.0
+    model.forward_model = types.SimpleNamespace(
+        condition_on_tf=False,
+        tf_token_adapter=Gate(),
+        tf_clock_embedding=Gate(),
+    )
+
+    model._assert_video_only_control_contract()
+
+    model.forward_model.tf_clock_embedding.gate.data.fill_(0.1)
+    with pytest.raises(RuntimeError, match="clock gate is not exact zero"):
+        model._assert_video_only_control_contract()
+
+    model.forward_model.tf_clock_embedding.gate.data.zero_()
+    model.tf_loss_weight = 1.0
+    with pytest.raises(RuntimeError, match="TF loss weight"):
+        model._assert_video_only_control_contract()
+
+
+def test_video_only_training_tf_placeholder_preserves_rng_state(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    clean = torch.ones(2, 12, 4, 2, 2)
+
+    torch.manual_seed(20260726)
+    before = torch.random.get_rng_state()
+    model.video_only_control = True
+    placeholder = model._training_tf_noise(clean)
+    after = torch.random.get_rng_state()
+
+    assert torch.count_nonzero(placeholder) == 0
+    assert torch.equal(before, after)
+
+    model.video_only_control = False
+    sampled = model._training_tf_noise(clean)
+    assert torch.count_nonzero(sampled) > 0
+    assert not torch.equal(after, torch.random.get_rng_state())

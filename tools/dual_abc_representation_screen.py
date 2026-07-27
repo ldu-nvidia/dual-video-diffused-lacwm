@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Provenance and contract checks for the six-arm ABC TF-representation screen.
+"""Provenance and contract checks for the seven-arm ABC TF-representation screen.
 
 This helper is intentionally separate from ``dual_abc_pilot.py``.  The
 original raw-RFFT screen remains immutable and is not accepted as evidence
 until its terminal artifacts pass a separate provenance-compatibility audit.
 This screen compares an orthonormal Parseval RFFT with a same-shape causal
 time-domain packing under exact-off, matched, and shuffled controls.
+The final arm is a representation-inert video-only control: both TF injection
+gates are frozen at exact zero and the TF objective has zero weight.
 """
 
 from __future__ import annotations
@@ -54,6 +56,11 @@ ARMS: tuple[dict[str, Any], ...] = (
         "condition_on_tf": False,
         "condition_mode": "off",
         "state_gate_init": 0.0,
+        "state_gate_trainable": False,
+        "clock_gate_init": 0.0,
+        "clock_gate_trainable": True,
+        "tf_loss_weight": 1.0,
+        "video_only_control": False,
         "smoke_variant": "dual-no-ztf",
         "smoke_report_key": "no_ztf",
     },
@@ -63,6 +70,11 @@ ARMS: tuple[dict[str, Any], ...] = (
         "condition_on_tf": True,
         "condition_mode": "matched",
         "state_gate_init": 0.10,
+        "state_gate_trainable": False,
+        "clock_gate_init": 0.0,
+        "clock_gate_trainable": True,
+        "tf_loss_weight": 1.0,
+        "video_only_control": False,
         "smoke_variant": "dual-with-ztf",
         "smoke_report_key": "with_ztf",
     },
@@ -72,6 +84,11 @@ ARMS: tuple[dict[str, Any], ...] = (
         "condition_on_tf": True,
         "condition_mode": "shuffled",
         "state_gate_init": 0.10,
+        "state_gate_trainable": False,
+        "clock_gate_init": 0.0,
+        "clock_gate_trainable": True,
+        "tf_loss_weight": 1.0,
+        "video_only_control": False,
         "smoke_variant": "dual-with-ztf",
         "smoke_report_key": "with_ztf",
     },
@@ -81,6 +98,11 @@ ARMS: tuple[dict[str, Any], ...] = (
         "condition_on_tf": False,
         "condition_mode": "off",
         "state_gate_init": 0.0,
+        "state_gate_trainable": False,
+        "clock_gate_init": 0.0,
+        "clock_gate_trainable": True,
+        "tf_loss_weight": 1.0,
+        "video_only_control": False,
         "smoke_variant": "dual-no-ztf",
         "smoke_report_key": "no_ztf",
     },
@@ -90,6 +112,11 @@ ARMS: tuple[dict[str, Any], ...] = (
         "condition_on_tf": True,
         "condition_mode": "matched",
         "state_gate_init": 0.10,
+        "state_gate_trainable": False,
+        "clock_gate_init": 0.0,
+        "clock_gate_trainable": True,
+        "tf_loss_weight": 1.0,
+        "video_only_control": False,
         "smoke_variant": "dual-with-ztf",
         "smoke_report_key": "with_ztf",
     },
@@ -99,8 +126,30 @@ ARMS: tuple[dict[str, Any], ...] = (
         "condition_on_tf": True,
         "condition_mode": "shuffled",
         "state_gate_init": 0.10,
+        "state_gate_trainable": False,
+        "clock_gate_init": 0.0,
+        "clock_gate_trainable": True,
+        "tf_loss_weight": 1.0,
+        "video_only_control": False,
         "smoke_variant": "dual-with-ztf",
         "smoke_report_key": "with_ztf",
+    },
+    {
+        "name": "video_only_s000",
+        # The transform is still instantiated to keep the architecture and
+        # parameter schema matched, but frozen-zero injection and zero TF loss
+        # make its representation causally irrelevant to the video path.
+        "representation": "parseval_rfft",
+        "condition_on_tf": False,
+        "condition_mode": "off",
+        "state_gate_init": 0.0,
+        "state_gate_trainable": False,
+        "clock_gate_init": 0.0,
+        "clock_gate_trainable": False,
+        "tf_loss_weight": 0.0,
+        "video_only_control": True,
+        "smoke_variant": "dual-no-ztf",
+        "smoke_report_key": "no_ztf",
     },
 )
 
@@ -153,7 +202,11 @@ def _arm_manifest_contract() -> dict[str, dict[str, Any]]:
             "condition_on_tf": arm["condition_on_tf"],
             "condition_mode": arm["condition_mode"],
             "state_gate_init": arm["state_gate_init"],
-            "state_gate_trainable": False,
+            "state_gate_trainable": arm["state_gate_trainable"],
+            "clock_gate_init": arm["clock_gate_init"],
+            "clock_gate_trainable": arm["clock_gate_trainable"],
+            "tf_loss_weight": arm["tf_loss_weight"],
+            "video_only_control": arm["video_only_control"],
             "evaluation_nfe_steps": EVALUATION_NFE_STEPS,
             "evaluation_noise_seed": EVALUATION_NOISE_SEED,
             "evaluation_condition_sources": EVALUATION_CONDITION_SOURCES,
@@ -168,7 +221,6 @@ def command_arm_contract(args: argparse.Namespace) -> int:
     payload = {
         "array_task_id": args.array_task_id,
         **arm,
-        "state_gate_trainable": False,
         "evaluation_nfe_steps": EVALUATION_NFE_STEPS,
         "evaluation_noise_seed": EVALUATION_NOISE_SEED,
         "evaluation_condition_sources": EVALUATION_CONDITION_SOURCES,
@@ -182,6 +234,11 @@ def command_arm_contract(args: argparse.Namespace) -> int:
             str(payload["condition_on_tf"]).lower(),
             payload["condition_mode"],
             f"{payload['state_gate_init']:.2f}",
+            str(payload["state_gate_trainable"]).lower(),
+            f"{payload['clock_gate_init']:.2f}",
+            str(payload["clock_gate_trainable"]).lower(),
+            f"{payload['tf_loss_weight']:.2f}",
+            str(payload["video_only_control"]).lower(),
             payload["smoke_variant"],
             payload["smoke_report_key"],
         )
@@ -282,6 +339,11 @@ def command_create_screen(args: argparse.Namespace) -> int:
                     "model.time_frequency_transform.representation",
                     "model.dual_diffusion.condition_mode",
                     "model.dual_diffusion.state_gate_init",
+                    "model.dual_diffusion.state_gate_trainable",
+                    "model.dual_diffusion.clock_gate_init",
+                    "model.dual_diffusion.clock_gate_trainable",
+                    "model.dual_diffusion.tf_loss_weight",
+                    "model.dual_diffusion.video_only_control",
                 ],
                 "matched_factors": [
                     "source_commit",
@@ -346,8 +408,26 @@ def command_create_screen(args: argparse.Namespace) -> int:
             "research_question": (
                 "At fixed state gates, do Parseval-scaled RFFT coefficients "
                 "or an invertible same-shape time packing supply more causally "
-                "useful conditioning than their exact-off and shuffled controls?"
+                "useful conditioning than their exact-off, shuffled, and "
+                "frozen-gate/zero-TF-loss video-only controls?"
             ),
+            "video_only_control_scope": {
+                "causal_guarantee": (
+                    "TF state, TF clock, and TF loss have zero contribution to "
+                    "video outputs or gradients; TF training corruption is a "
+                    "deterministic zero placeholder so it cannot advance the "
+                    "video dropout RNG."
+                ),
+                "matched_architecture": (
+                    "The dual wrapper, TF transform, adapter, and TF head remain "
+                    "instantiated for parameter-schema compatibility."
+                ),
+                "not_claimed": (
+                    "Runtime and memory are not identical to the non-dual "
+                    "production class because zero-weight TF side computations "
+                    "are still executed."
+                ),
+            },
             "wandb": {
                 **wandb_summary,
                 "group": None,
@@ -429,7 +509,15 @@ def _assert_resolved_contract(
         "model.dual_diffusion.enabled": True,
         "model.dual_diffusion.condition_on_tf": arm["condition_on_tf"],
         "model.dual_diffusion.condition_mode": arm["condition_mode"],
-        "model.dual_diffusion.state_gate_trainable": False,
+        "model.dual_diffusion.state_gate_trainable": arm[
+            "state_gate_trainable"
+        ],
+        "model.dual_diffusion.clock_gate_trainable": arm[
+            "clock_gate_trainable"
+        ],
+        "model.dual_diffusion.video_only_control": arm[
+            "video_only_control"
+        ],
         "model.dual_diffusion.evaluation_nfe_steps": EVALUATION_NFE_STEPS,
         "model.dual_diffusion.evaluation_noise_seed": EVALUATION_NOISE_SEED,
         "model.dual_diffusion.evaluation_condition_sources": (
@@ -441,7 +529,18 @@ def _assert_resolved_contract(
         "model.forward_model.dual_diffusion.condition_mode": arm[
             "condition_mode"
         ],
-        "model.forward_model.dual_diffusion.state_gate_trainable": False,
+        "model.forward_model.dual_diffusion.condition_on_tf": arm[
+            "condition_on_tf"
+        ],
+        "model.forward_model.dual_diffusion.state_gate_trainable": arm[
+            "state_gate_trainable"
+        ],
+        "model.forward_model.dual_diffusion.clock_gate_trainable": arm[
+            "clock_gate_trainable"
+        ],
+        "model.forward_model.dual_diffusion.video_only_control": arm[
+            "video_only_control"
+        ],
         "model.forward_model.dual_diffusion.evaluation_nfe_steps": (
             EVALUATION_NFE_STEPS
         ),
@@ -477,6 +576,22 @@ def _assert_resolved_contract(
         "model.forward_model.dual_diffusion.state_gate_init",
         float(arm["state_gate_init"]),
     )
+    for prefix in (
+        "model.dual_diffusion",
+        "model.forward_model.dual_diffusion",
+    ):
+        _assert_float(
+            problems,
+            config,
+            f"{prefix}.clock_gate_init",
+            float(arm["clock_gate_init"]),
+        )
+        _assert_float(
+            problems,
+            config,
+            f"{prefix}.tf_loss_weight",
+            float(arm["tf_loss_weight"]),
+        )
 
     for loader in ("dataset", "val_dataset", "viz_dataset"):
         names = list(_config_value(config, f"{loader}.datasets").keys())
@@ -660,7 +775,11 @@ def command_prepare_arm(args: argparse.Namespace) -> int:
             "condition_on_tf": arm["condition_on_tf"],
             "condition_mode": arm["condition_mode"],
             "state_gate_init": arm["state_gate_init"],
-            "state_gate_trainable": False,
+            "state_gate_trainable": arm["state_gate_trainable"],
+            "clock_gate_init": arm["clock_gate_init"],
+            "clock_gate_trainable": arm["clock_gate_trainable"],
+            "tf_loss_weight": arm["tf_loss_weight"],
+            "video_only_control": arm["video_only_control"],
             "git_commit": expected_commit,
             "repository_root": str(repo_root),
             "config": {
@@ -768,6 +887,10 @@ def _required_trajectory_tensor_names() -> set[str]:
         "history_latent_frames",
         "condition_on_tf",
         "condition_mode_code",
+        "video_only_control",
+        "tf_loss_weight",
+        "effective_state_gate",
+        "effective_clock_gate",
         "evaluation_noise_seed",
         "evaluation_nfe_steps",
         "evaluation_condition_source_codes",

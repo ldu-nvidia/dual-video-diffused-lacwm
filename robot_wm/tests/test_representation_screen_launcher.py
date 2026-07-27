@@ -76,7 +76,7 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
         self.assertIn("TIME_SECONDS <= 4 * 3600", source)
         self.assertIn("#SBATCH --time=04:00:00", SLOT.read_text())
 
-    def test_array_contract_has_exact_six_controlled_arms(self):
+    def test_array_contract_keeps_six_representation_arms_and_adds_video_only(self):
         observed = [
             (
                 arm["name"],
@@ -84,6 +84,11 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                 arm["condition_on_tf"],
                 arm["condition_mode"],
                 arm["state_gate_init"],
+                arm["state_gate_trainable"],
+                arm["clock_gate_init"],
+                arm["clock_gate_trainable"],
+                arm["tf_loss_weight"],
+                arm["video_only_control"],
                 arm["smoke_variant"],
             )
             for arm in self.helper.ARMS
@@ -97,6 +102,11 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                     False,
                     "off",
                     0.0,
+                    False,
+                    0.0,
+                    True,
+                    1.0,
+                    False,
                     "dual-no-ztf",
                 ),
                 (
@@ -105,6 +115,11 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                     True,
                     "matched",
                     0.10,
+                    False,
+                    0.0,
+                    True,
+                    1.0,
+                    False,
                     "dual-with-ztf",
                 ),
                 (
@@ -113,6 +128,11 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                     True,
                     "shuffled",
                     0.10,
+                    False,
+                    0.0,
+                    True,
+                    1.0,
+                    False,
                     "dual-with-ztf",
                 ),
                 (
@@ -121,6 +141,11 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                     False,
                     "off",
                     0.0,
+                    False,
+                    0.0,
+                    True,
+                    1.0,
+                    False,
                     "dual-no-ztf",
                 ),
                 (
@@ -129,6 +154,11 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                     True,
                     "matched",
                     0.10,
+                    False,
+                    0.0,
+                    True,
+                    1.0,
+                    False,
                     "dual-with-ztf",
                 ),
                 (
@@ -137,11 +167,40 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                     True,
                     "shuffled",
                     0.10,
+                    False,
+                    0.0,
+                    True,
+                    1.0,
+                    False,
                     "dual-with-ztf",
+                ),
+                (
+                    "video_only_s000",
+                    "parseval_rfft",
+                    False,
+                    "off",
+                    0.0,
+                    False,
+                    0.0,
+                    False,
+                    0.0,
+                    True,
+                    "dual-no-ztf",
                 ),
             ],
         )
-        self.assertEqual(len({arm["name"] for arm in self.helper.ARMS}), 6)
+        self.assertEqual(len({arm["name"] for arm in self.helper.ARMS}), 7)
+        self.assertEqual(
+            [arm["name"] for arm in self.helper.ARMS[:6]],
+            [
+                "parseval_off_s000",
+                "parseval_matched_s010",
+                "parseval_shuffled_s010",
+                "time_off_s000",
+                "time_matched_s010",
+                "time_shuffled_s010",
+            ],
+        )
 
     def test_arm_contract_cli_rejects_out_of_range_task(self):
         result = subprocess.run(
@@ -150,7 +209,7 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                 str(HELPER_PATH),
                 "arm-contract",
                 "--array-task-id",
-                "6",
+                "7",
             ],
             text=True,
             stdout=subprocess.PIPE,
@@ -158,7 +217,7 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 2, result.stdout)
-        self.assertIn("array task ID must be in [0, 5]", result.stdout)
+        self.assertIn("array task ID must be in [0, 6]", result.stdout)
 
     def test_arm_contract_cli_exposes_fixed_evaluation_contract(self):
         result = subprocess.run(
@@ -211,6 +270,11 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                 "false",
                 "off",
                 "0.00",
+                "false",
+                "0.00",
+                "true",
+                "1.00",
+                "false",
                 "dual-no-ztf",
                 "no_ztf",
             ],
@@ -229,9 +293,9 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
     def test_submitter_is_guarded_and_concurrency_is_configurable(self):
         source = SUBMIT.read_text(encoding="utf-8")
         self.assertIn('MAX_CONCURRENT_ARMS=4', source)
-        self.assertIn('--array="0-5%$MAX_CONCURRENT_ARMS"', source)
+        self.assertIn('--array="0-6%$MAX_CONCURRENT_ARMS"', source)
         self.assertIn(
-            '[[ "$MAX_CONCURRENT_ARMS" =~ ^[1-6]$ ]]',
+            '[[ "$MAX_CONCURRENT_ARMS" =~ ^[1-7]$ ]]',
             source,
         )
         self.assertIn("--no-requeue", source)
@@ -255,7 +319,11 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
             "seed=1234",
             "model.dual_diffusion.condition_mode='$CONDITION_MODE'",
             "model.dual_diffusion.state_gate_init=$STATE_GATE_INIT",
-            "model.dual_diffusion.state_gate_trainable=false",
+            "model.dual_diffusion.state_gate_trainable=$STATE_GATE_TRAINABLE",
+            "model.dual_diffusion.clock_gate_init=$CLOCK_GATE_INIT",
+            "model.dual_diffusion.clock_gate_trainable=$CLOCK_GATE_TRAINABLE",
+            "model.dual_diffusion.tf_loss_weight=$TF_LOSS_WEIGHT",
+            "model.dual_diffusion.video_only_control=$VIDEO_ONLY_CONTROL",
             "model.time_frequency_transform.representation='$REPRESENTATION'",
             "model.dual_diffusion.evaluation_nfe_steps=[1,2,4,8]",
             "model.dual_diffusion.evaluation_noise_seed=20260726",
@@ -266,7 +334,7 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
             "--nproc_per_node=8",
             "+wandb.resume=never",
             '[[ "${SLURM_RESTART_COUNT:-0}" == "0" ]]',
-            '[[ "$SLURM_ARRAY_TASK_ID" =~ ^[0-5]$ ]]',
+            '[[ "$SLURM_ARRAY_TASK_ID" =~ ^[0-6]$ ]]',
             'RUN_ID="${SCREEN_ID}-${ARM}"',
             '[[ ! -e "$RUN_DIR" ]]',
         )
@@ -322,6 +390,51 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
             slot_source,
         )
 
+    def test_video_only_arm_is_a_fail_closed_causal_noop_contract(self):
+        arm = self.helper.ARMS[6]
+        self.assertEqual(arm["name"], "video_only_s000")
+        self.assertFalse(arm["condition_on_tf"])
+        self.assertEqual(arm["condition_mode"], "off")
+        self.assertEqual(arm["state_gate_init"], 0.0)
+        self.assertFalse(arm["state_gate_trainable"])
+        self.assertEqual(arm["clock_gate_init"], 0.0)
+        self.assertFalse(arm["clock_gate_trainable"])
+        self.assertEqual(arm["tf_loss_weight"], 0.0)
+        self.assertTrue(arm["video_only_control"])
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(HELPER_PATH),
+                "arm-contract",
+                "--array-task-id",
+                "6",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        payload = json.loads(result.stdout)
+        for key in (
+            "condition_on_tf",
+            "state_gate_trainable",
+            "clock_gate_trainable",
+        ):
+            self.assertFalse(payload[key])
+        self.assertTrue(payload["video_only_control"])
+        self.assertEqual(payload["tf_loss_weight"], 0.0)
+
+        slot_source = SLOT.read_text(encoding="utf-8")
+        for failure_guard in (
+            "video-only control must disable TF conditioning",
+            "video-only control must freeze the state gate at exact zero",
+            "video-only control must freeze the clock gate at exact zero",
+            "video-only control must set TF loss weight to exact zero",
+        ):
+            self.assertIn(failure_guard, slot_source)
+
     def test_successful_outcome_requires_all_nfe_artifact_keys(self):
         required = self.helper._required_trajectory_tensor_names()
         for condition_source in (
@@ -336,6 +449,10 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
                 self.assertIn(f"tf_final{infix}_nfe_{nfe}", required)
                 self.assertIn(f"decoded_future{infix}_nfe_{nfe}", required)
         self.assertIn("tf_initial_noise", required)
+        self.assertIn("video_only_control", required)
+        self.assertIn("tf_loss_weight", required)
+        self.assertIn("effective_state_gate", required)
+        self.assertIn("effective_clock_gate", required)
         self.assertIn("oracle_sources_are_leakage", required)
         self.assertEqual(self.helper.VISUALIZATION_UPDATES, (0, 50, 100, 150, 199))
 

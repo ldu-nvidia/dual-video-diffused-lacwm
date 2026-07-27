@@ -40,7 +40,7 @@ usage() {
   cat <<'EOF'
 Usage: tools/slurm/submit_dual_abc_representation_screen.sh [options]
 
-Preview or submit the six-arm ABC TF-representation screen as a 0-5 Slurm array:
+Preview or submit the seven-arm ABC TF-representation screen as a 0-6 Slurm array:
 
   0  Parseval RFFT, off,      fixed state scale 0.00
   1  Parseval RFFT, matched,  fixed state scale 0.10
@@ -48,6 +48,7 @@ Preview or submit the six-arm ABC TF-representation screen as a 0-5 Slurm array:
   3  time packed,   off,      fixed state scale 0.00
   4  time packed,   matched,  fixed state scale 0.10
   5  time packed,   shuffled, fixed state scale 0.10
+  6  video only,    off,      state/clock scales fixed 0.00, TF loss 0.00
 
 All arms use the exact same clean commit, reviewed production warm start, ABC
 manifest, seed 1234, 200-update optimizer schedule, fixed evaluation noise, and
@@ -61,7 +62,7 @@ Options:
                            Passing exact-commit real-data dual-no-ztf report
   --with-ztf-smoke-report PATH
                            Passing exact-commit real-data dual-with-ztf report
-  --max-concurrent-arms N  Array concurrency in [1,6] (default: 4)
+  --max-concurrent-arms N  Array concurrency in [1,7] (default: 4)
   --partition NAME         Slurm partition (default: batch)
   --time HH:MM:SS          Per-arm limit (default: 04:00:00; batch QoS maximum)
   --cpus N                 CPUs per arm (default: 160)
@@ -107,8 +108,8 @@ for scalar_pair in \
     die "${scalar_pair%%=*} may not contain whitespace"
 done
 [[ "$CPUS" =~ ^[1-9][0-9]*$ ]] || die "--cpus must be a positive integer"
-[[ "$MAX_CONCURRENT_ARMS" =~ ^[1-6]$ ]] || \
-  die "--max-concurrent-arms must be an integer from 1 through 6"
+[[ "$MAX_CONCURRENT_ARMS" =~ ^[1-7]$ ]] || \
+  die "--max-concurrent-arms must be an integer from 1 through 7"
 [[ "$TIME_LIMIT" =~ ^([0-9]{2}):([0-5][0-9]):([0-5][0-9])$ ]] || \
   die "--time must use HH:MM:SS with a two-digit hour"
 TIME_SECONDS="$((10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))"
@@ -205,7 +206,7 @@ SBATCH_ARGS=(
   --mem="$MEMORY"
   --time="$TIME_LIMIT"
   --partition="$PARTITION"
-  --array="0-5%$MAX_CONCURRENT_ARMS"
+  --array="0-6%$MAX_CONCURRENT_ARMS"
   --no-requeue
   --open-mode=append
   --export=ALL
@@ -241,7 +242,7 @@ printf '\n'
 echo "Git commit: $EXPECTED_COMMIT (clean)"
 echo "Checkpoint: $CHECKPOINT ($CHECKPOINT_SHA256)"
 echo "Screen root: $SCREEN_ROOT (fresh)"
-for task_id in 0 1 2 3 4 5; do
+for task_id in 0 1 2 3 4 5 6; do
   "$PYTHON_BIN" "$HELPER" arm-contract --array-task-id "$task_id" --format json
 done
 echo "Schedule: ABC, seed=1234, 200 updates, one sample/GPU, 8xB200 per arm"

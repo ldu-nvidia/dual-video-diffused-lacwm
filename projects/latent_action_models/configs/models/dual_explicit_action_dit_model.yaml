@@ -38,9 +38,14 @@ dual_diffusion:
   # remains an exact zero residual with a trainable gate.
   state_gate_init: 0.0
   state_gate_trainable: true
+  # The TF clock residual has an independent checkpoint-compatible gate.
+  # Both gates are frozen at exact zero only in the true video-only control.
+  clock_gate_init: 0.0
+  clock_gate_trainable: true
   schedule_mode: tf_leads
   tf_lead_logit: 1.0
   tf_loss_weight: 1.0
+  video_only_control: false
   clock_embedding_dim: 128
   capture_latent_trajectories: true
   evaluation_nfe_steps: [8]

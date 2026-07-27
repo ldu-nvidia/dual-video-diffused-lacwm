@@ -131,6 +131,8 @@ class TFSigmaTokenEmbedding(nn.Module):
         hidden_size: int,
         embedding_dim: int = 128,
         max_period: float = 10_000.0,
+        gate_init: float = 0.0,
+        gate_trainable: bool = True,
     ) -> None:
         super().__init__()
         if hidden_size < 1:
@@ -139,6 +141,8 @@ class TFSigmaTokenEmbedding(nn.Module):
             raise ValueError("embedding_dim must be a positive even integer")
         if max_period <= 1:
             raise ValueError("max_period must exceed one")
+        if not isfinite(gate_init) or not -1.0 < gate_init < 1.0:
+            raise ValueError("gate_init must be finite and strictly between -1 and 1")
         self.hidden_size = hidden_size
         self.embedding_dim = embedding_dim
         frequencies = torch.exp(
@@ -152,7 +156,12 @@ class TFSigmaTokenEmbedding(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size),
         )
-        self.gate = nn.Parameter(torch.zeros(()))
+        # Keep the existing scalar checkpoint key and shape.  As with the state
+        # adapter, the configured value is the effective post-tanh multiplier.
+        self.gate = nn.Parameter(
+            torch.tensor(atanh(gate_init), dtype=torch.float32),
+            requires_grad=gate_trainable,
+        )
 
     def effective_gate(self) -> Tensor:
         """Return the bounded residual multiplier used by the clock embedding."""

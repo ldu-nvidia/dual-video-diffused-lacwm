@@ -144,6 +144,10 @@ class WanForwardModel(nn.Module):
             self.tf_clock_embedding = TFSigmaTokenEmbedding(
                 hidden_size=hidden_size,
                 embedding_dim=int(dual_config.get("clock_embedding_dim", 128)),
+                gate_init=float(dual_config.get("clock_gate_init", 0.0)),
+                gate_trainable=bool(
+                    dual_config.get("clock_gate_trainable", True)
+                ),
             )
             self.tf_velocity_head = TFVelocityHead(
                 hidden_size=hidden_size,
