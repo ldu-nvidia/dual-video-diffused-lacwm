@@ -223,3 +223,20 @@ def test_video_only_training_tf_placeholder_preserves_rng_state(monkeypatch):
     sampled = model._training_tf_noise(clean)
     assert torch.count_nonzero(sampled) > 0
     assert not torch.equal(after, torch.random.get_rng_state())
+
+
+def test_video_only_objective_has_no_tf_graph_or_nan_path(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.video_only_control = True
+    model.tf_loss_weight = 0.0
+    video_loss = torch.tensor(2.0, requires_grad=True)
+    tf_loss = torch.tensor(float("nan"), requires_grad=True)
+
+    objective = model._training_objective(video_loss, tf_loss)
+    objective.backward()
+
+    assert torch.isfinite(objective)
+    assert objective is video_loss
+    torch.testing.assert_close(video_loss.grad, torch.tensor(1.0))
+    assert tf_loss.grad is None

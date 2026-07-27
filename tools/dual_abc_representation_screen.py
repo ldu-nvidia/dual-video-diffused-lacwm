@@ -40,6 +40,7 @@ OPTIMIZER_UPDATES = 200
 WARMUP_UPDATES = 20
 VISUALIZATION_UPDATES = (0, 50, 100, 150, 199)
 ARRAY_JOB_ID_RE = re.compile(r"^[0-9]+([_;][A-Za-z0-9_.%+-]+)?$")
+NUMERIC_JOB_ID_RE = re.compile(r"^[1-9][0-9]*$")
 RAW_RFFT_CANDIDATE = {
     "slurm_array_job_id": "472562",
     "source_commit": "b1738f9e39e3c8b61403437aa512f8951411f8b3",
@@ -158,6 +159,20 @@ def _arm(task_id: int) -> dict[str, Any]:
     if task_id < 0 or task_id >= len(ARMS):
         raise ValueError(f"array task ID must be in [0, {len(ARMS) - 1}]")
     return ARMS[task_id]
+
+
+def _validated_allowed_active_job_ids(values: Sequence[str]) -> list[str]:
+    """Return a unique canonical allow-list containing numeric Slurm IDs only."""
+    normalized = [str(value) for value in values]
+    invalid = [value for value in normalized if not NUMERIC_JOB_ID_RE.fullmatch(value)]
+    if invalid:
+        raise ValueError(
+            "allowed active job IDs must be canonical positive decimal integers; "
+            f"invalid={invalid}"
+        )
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("allowed active job IDs must not contain duplicates")
+    return sorted(normalized, key=int)
 
 
 def _identity_is_valid(payload: dict[str, Any]) -> bool:
@@ -302,6 +317,9 @@ def command_create_screen(args: argparse.Namespace) -> int:
         raise ValueError(
             f"max concurrent arms must be between 1 and {len(ARMS)}"
         )
+    allowed_active_job_ids = _validated_allowed_active_job_ids(
+        args.allow_active_job_id
+    )
 
     payload = pilot._identity_payload(
         {
@@ -437,6 +455,7 @@ def command_create_screen(args: argparse.Namespace) -> int:
                 "gpus_per_node": 8,
                 "array": f"0-{len(ARMS) - 1}%{max_concurrent_arms}",
                 "requeue": False,
+                "allowed_preexisting_active_job_ids": allowed_active_job_ids,
             },
         }
     )
@@ -654,6 +673,17 @@ def _validate_screen_manifest(
             problems.append(f"raw-RFFT candidate {key} differs")
     if raw_candidate.get("accepted_as_screen_input") is not False:
         problems.append("raw-RFFT candidate was incorrectly accepted as input")
+    recorded_allowed = payload.get("slurm", {}).get(
+        "allowed_preexisting_active_job_ids"
+    )
+    try:
+        validated_allowed = _validated_allowed_active_job_ids(
+            recorded_allowed if isinstance(recorded_allowed, list) else [""]
+        )
+    except ValueError:
+        validated_allowed = None
+    if validated_allowed != recorded_allowed:
+        problems.append("allowed active job ID provenance is invalid")
     if not _identity_is_valid(payload):
         problems.append("identity SHA-256 is invalid")
     if problems:
@@ -856,6 +886,16 @@ def command_record_submission(args: argparse.Namespace) -> int:
         raise ValueError(
             f"max concurrent arms must be between 1 and {len(ARMS)}"
         )
+    allowed_active_job_ids = _validated_allowed_active_job_ids(
+        args.allow_active_job_id
+    )
+    recorded_allowed = screen_payload.get("slurm", {}).get(
+        "allowed_preexisting_active_job_ids"
+    )
+    if recorded_allowed != allowed_active_job_ids:
+        raise RuntimeError(
+            "submission allow-list differs from the immutable screen manifest"
+        )
     payload = {
         "schema_version": 1,
         "kind": "dual_abc_tf_representation_screen_slurm_submission",
@@ -868,6 +908,7 @@ def command_record_submission(args: argparse.Namespace) -> int:
         "slurm_array_job_id": args.job_id,
         "array": f"0-{len(ARMS) - 1}%{max_concurrent_arms}",
         "requeue": False,
+        "allowed_preexisting_active_job_ids": allowed_active_job_ids,
     }
     output = Path(args.output)
     if output.parent.resolve(strict=True) != screen_manifest.parent:
@@ -1114,6 +1155,9 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         screen_parser.add_argument(f"--{name}", required=True)
     screen_parser.set_defaults(func=command_create_screen)
+    screen_parser.add_argument(
+        "--allow-active-job-id", action="append", default=[]
+    )
 
     prepare_parser = subparsers.add_parser(
         "prepare-arm", help="resolve and validate one arm before torchrun"
@@ -1156,6 +1200,9 @@ def build_parser() -> argparse.ArgumentParser:
     submission_parser.add_argument("--screen-manifest", required=True)
     submission_parser.add_argument("--job-id", required=True)
     submission_parser.add_argument("--max-concurrent-arms", required=True, type=int)
+    submission_parser.add_argument(
+        "--allow-active-job-id", action="append", default=[]
+    )
     submission_parser.add_argument("--output", required=True)
     submission_parser.set_defaults(func=command_record_submission)
 

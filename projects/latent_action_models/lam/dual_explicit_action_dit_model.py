@@ -319,6 +319,16 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             return torch.zeros_like(tf_clean)
         return torch.randn_like(tf_clean)
 
+    def _training_objective(
+        self,
+        video_loss: torch.Tensor,
+        tf_loss: torch.Tensor,
+    ) -> torch.Tensor:
+        """Combine losses while keeping the video-only graph TF-independent."""
+        if self.video_only_control:
+            return video_loss
+        return video_loss + self.tf_loss_weight * tf_loss
+
     def _sampling_conditioning_tf(
         self,
         tf_state: torch.Tensor,
@@ -447,7 +457,11 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         )
         video_loss = video_per_sample.mean()
         tf_loss = tf_per_sample.mean()
-        total_loss = video_loss + self.tf_loss_weight * tf_loss
+        # Do not attach the zero-weight TF graph to the video-only objective.
+        # Besides avoiding needless TF gradients/weight decay, this prevents a
+        # non-finite diagnostic TF loss from contaminating a finite video loss
+        # through IEEE ``0 * NaN`` semantics.
+        total_loss = self._training_objective(video_loss, tf_loss)
 
         video_x0 = video_noisy - video_sigma_expanded * prediction.video_velocity
         tf_x0 = tf_noisy - tf_sigma_expanded * prediction.tf_velocity

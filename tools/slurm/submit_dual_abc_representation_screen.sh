@@ -29,6 +29,7 @@ EXPECTED_COMMIT=""
 NO_ZTF_SMOKE_REPORT=""
 WITH_ZTF_SMOKE_REPORT=""
 MAX_CONCURRENT_ARMS=4
+ALLOW_ACTIVE_JOB_IDS=()
 EXECUTE=0
 
 die() {
@@ -63,6 +64,8 @@ Options:
   --with-ztf-smoke-report PATH
                            Passing exact-commit real-data dual-with-ztf report
   --max-concurrent-arms N  Array concurrency in [1,7] (default: 4)
+  --allow-active-job-id ID Allow one pre-existing active numeric Slurm job ID.
+                           Repeat for each allowed ID; no wildcards or names.
   --partition NAME         Slurm partition (default: batch)
   --time HH:MM:SS          Per-arm limit (default: 04:00:00; batch QoS maximum)
   --cpus N                 CPUs per arm (default: 160)
@@ -85,6 +88,17 @@ while (($#)); do
     --no-ztf-smoke-report) [[ $# -ge 2 ]] || die "--no-ztf-smoke-report requires a value"; NO_ZTF_SMOKE_REPORT="$2"; shift 2 ;;
     --with-ztf-smoke-report) [[ $# -ge 2 ]] || die "--with-ztf-smoke-report requires a value"; WITH_ZTF_SMOKE_REPORT="$2"; shift 2 ;;
     --max-concurrent-arms) [[ $# -ge 2 ]] || die "--max-concurrent-arms requires a value"; MAX_CONCURRENT_ARMS="$2"; shift 2 ;;
+    --allow-active-job-id)
+      [[ $# -ge 2 ]] || die "--allow-active-job-id requires a value"
+      [[ "$2" =~ ^[1-9][0-9]*$ ]] || \
+        die "--allow-active-job-id must be a canonical positive decimal integer"
+      for existing_job_id in "${ALLOW_ACTIVE_JOB_IDS[@]}"; do
+        [[ "$existing_job_id" != "$2" ]] || \
+          die "--allow-active-job-id may not be repeated for the same ID: $2"
+      done
+      ALLOW_ACTIVE_JOB_IDS+=("$2")
+      shift 2
+      ;;
     --partition) [[ $# -ge 2 ]] || die "--partition requires a value"; PARTITION="$2"; shift 2 ;;
     --time) [[ $# -ge 2 ]] || die "--time requires a value"; TIME_LIMIT="$2"; shift 2 ;;
     --cpus) [[ $# -ge 2 ]] || die "--cpus requires a value"; CPUS="$2"; shift 2 ;;
@@ -95,6 +109,16 @@ while (($#)); do
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
+done
+
+if ((${#ALLOW_ACTIVE_JOB_IDS[@]})); then
+  mapfile -t ALLOW_ACTIVE_JOB_IDS < <(
+    printf '%s\n' "${ALLOW_ACTIVE_JOB_IDS[@]}" | LC_ALL=C sort -n
+  )
+fi
+ALLOW_ACTIVE_JOB_ARGS=()
+for allowed_job_id in "${ALLOW_ACTIVE_JOB_IDS[@]}"; do
+  ALLOW_ACTIVE_JOB_ARGS+=(--allow-active-job-id "$allowed_job_id")
 done
 
 for scalar_pair in \
@@ -251,6 +275,13 @@ echo "Inference diagnostics: autonomous, off, oracle_matched, oracle_shuffled (o
 echo "Clock: sigma=1 noise, sigma=0 clean"
 echo "W&B: $WANDB_ENTITY_VALUE/$WANDB_PROJECT_VALUE (PRIVATE), group=null"
 echo "Array concurrency: $MAX_CONCURRENT_ARMS"
+if ((${#ALLOW_ACTIVE_JOB_IDS[@]})); then
+  printf 'Explicitly allowed pre-existing active job IDs:'
+  printf ' %s' "${ALLOW_ACTIVE_JOB_IDS[@]}"
+  printf '\n'
+else
+  echo "Explicitly allowed pre-existing active job IDs: <none> (fail closed)"
+fi
 echo "Raw-RFFT candidate: Slurm 472562 at b1738f9 (not accepted until terminal provenance compatibility is validated)"
 
 if ((EXECUTE == 0)); then
@@ -261,17 +292,62 @@ fi
 command -v sbatch >/dev/null 2>&1 || die "sbatch is unavailable"
 command -v squeue >/dev/null 2>&1 || die "squeue is unavailable"
 
-# Check once immediately before creating any screen state. Checking from each
-# array element would make later elements see their siblings and fail.
-ACTIVE_JOBS="$(
-  squeue \
-    --noheader \
-    --user "${USER:?USER is unset}" \
-    --states=PENDING,RUNNING,CONFIGURING,COMPLETING,SUSPENDED \
-    --format='%i|%T|%j'
-)"
-[[ -z "$ACTIVE_JOBS" ]] || \
-  die "refusing to submit while user jobs are active: ${ACTIVE_JOBS//$'\n'/; }"
+is_allowed_active_job_id() {
+  local candidate="$1"
+  local allowed
+  for allowed in "${ALLOW_ACTIVE_JOB_IDS[@]}"; do
+    [[ "$candidate" != "$allowed" ]] || return 0
+  done
+  return 1
+}
+
+check_active_user_jobs() {
+  local active_records
+  if ! active_records="$(
+    squeue \
+      --noheader \
+      --user "${USER:?USER is unset}" \
+      --states=PENDING,RUNNING,CONFIGURING,COMPLETING,SUSPENDED \
+      --format='%A|%i|%T|%j'
+  )"; then
+    die "could not enumerate active user jobs"
+  fi
+
+  local rejected_records=()
+  local allowed_records=()
+  local base_job_id displayed_job_id job_state job_name
+  while IFS='|' read -r base_job_id displayed_job_id job_state job_name; do
+    [[ -n "$base_job_id" ]] || continue
+    [[ "$base_job_id" =~ ^[1-9][0-9]*$ ]] || \
+      die "squeue returned a non-numeric base job ID: $base_job_id"
+    if is_allowed_active_job_id "$base_job_id"; then
+      allowed_records+=(
+        "$base_job_id|$displayed_job_id|$job_state|$job_name"
+      )
+    else
+      rejected_records+=(
+        "$base_job_id|$displayed_job_id|$job_state|$job_name"
+      )
+    fi
+  done <<< "$active_records"
+
+  if ((${#rejected_records[@]})); then
+    local joined_rejected
+    printf -v joined_rejected '%s; ' "${rejected_records[@]}"
+    die "refusing to submit while non-allow-listed user jobs are active: ${joined_rejected%; }"
+  fi
+  if ((${#allowed_records[@]})); then
+    local joined_allowed
+    printf -v joined_allowed '%s; ' "${allowed_records[@]}"
+    echo "Pre-existing active jobs accepted only by numeric ID: ${joined_allowed%; }"
+  else
+    echo "No pre-existing active user jobs observed."
+  fi
+}
+
+# Check before creating immutable state, then enumerate again immediately before
+# sbatch so a newly active, non-allow-listed job cannot slip through the setup.
+check_active_user_jobs
 
 mkdir -p "$RUN_ROOT"
 [[ -d "$RUN_ROOT" && ! -L "$RUN_ROOT" ]] || \
@@ -300,8 +376,10 @@ SCREEN_MANIFEST="$SCREEN_ROOT/screen_manifest.json"
   --wandb-entity "$WANDB_ENTITY_VALUE" \
   --wandb-project "$WANDB_PROJECT_VALUE" \
   --max-concurrent-arms "$MAX_CONCURRENT_ARMS" \
+  "${ALLOW_ACTIVE_JOB_ARGS[@]}" \
   --output "$SCREEN_MANIFEST"
 
+check_active_user_jobs
 JOB_ID="$("${COMMAND[@]}")" || die "Slurm rejected the representation-screen submission"
 [[ "$JOB_ID" =~ ^[0-9]+([_;][A-Za-z0-9_.%+-]+)?$ ]] || \
   die "sbatch returned an unexpected job identifier: $JOB_ID"
@@ -310,6 +388,7 @@ JOB_ID="$("${COMMAND[@]}")" || die "Slurm rejected the representation-screen sub
   --screen-manifest "$SCREEN_MANIFEST" \
   --job-id "$JOB_ID" \
   --max-concurrent-arms "$MAX_CONCURRENT_ARMS" \
+  "${ALLOW_ACTIVE_JOB_ARGS[@]}" \
   --output "$SCREEN_ROOT/slurm_submission.json"
 
 echo "Submitted representation-screen Slurm array: $JOB_ID"

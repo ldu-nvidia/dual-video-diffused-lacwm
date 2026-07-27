@@ -2,8 +2,10 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -302,6 +304,20 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
         self.assertIn(
             "--states=PENDING,RUNNING,CONFIGURING,COMPLETING,SUSPENDED", source
         )
+        self.assertIn("--allow-active-job-id", source)
+        self.assertIn('[[ "$2" =~ ^[1-9][0-9]*$ ]]', source)
+        self.assertIn("--format='%A|%i|%T|%j'", source)
+        self.assertIn("is_allowed_active_job_id", source)
+        self.assertEqual(source.count("check_active_user_jobs"), 3)
+        self.assertIn(
+            "non-allow-listed user jobs are active",
+            source,
+        )
+        self.assertIn(
+            "Explicitly allowed pre-existing active job IDs: <none> (fail closed)",
+            source,
+        )
+        self.assertNotIn("--allow-active-job-name", source)
         self.assertIn('git -C "$REPO_ROOT" status --porcelain', source)
         self.assertIn('[[ ! -e "$SCREEN_ROOT" ]]', source)
         self.assertIn("CHECKPOINT_SHA256=", source)
@@ -311,6 +327,69 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
             source,
         )
         self.assertIn("+wandb.group=null", SLOT.read_text(encoding="utf-8"))
+
+    def test_active_job_allow_list_accepts_only_unique_numeric_ids(self):
+        validate = self.helper._validated_allowed_active_job_ids
+        self.assertEqual(
+            validate(["472695", "472683", "472688"]),
+            ["472683", "472688", "472695"],
+        )
+        for invalid in (
+            "0",
+            "0472683",
+            "-1",
+            "472683_*",
+            "472683_4",
+            "job-name",
+            "*",
+            "",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "positive decimal"):
+                    validate([invalid])
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            validate(["472683", "472683"])
+
+    def test_submission_provenance_must_match_screen_allow_list(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            screen_manifest = root / "screen_manifest.json"
+            payload = self.helper.pilot._identity_payload(
+                {
+                    "schema_version": 1,
+                    "kind": "dual_abc_tf_representation_screen",
+                    "slurm": {
+                        "allowed_preexisting_active_job_ids": [
+                            "472683",
+                            "472695",
+                        ]
+                    },
+                }
+            )
+            screen_manifest.write_text(
+                json.dumps(payload, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            output = root / "slurm_submission.json"
+            args = SimpleNamespace(
+                screen_manifest=str(screen_manifest),
+                job_id="500001",
+                max_concurrent_arms=4,
+                allow_active_job_id=["472695", "472683"],
+                output=str(output),
+            )
+
+            self.assertEqual(self.helper.command_record_submission(args), 0)
+            recorded = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                recorded["allowed_preexisting_active_job_ids"],
+                ["472683", "472695"],
+            )
+
+            args.allow_active_job_id = ["472683"]
+            args.output = str(root / "mismatched_submission.json")
+            with self.assertRaisesRegex(RuntimeError, "allow-list differs"):
+                self.helper.command_record_submission(args)
 
     def test_slot_pins_training_and_independent_evaluation_contract(self):
         source = SLOT.read_text(encoding="utf-8")
@@ -356,6 +435,7 @@ class RepresentationScreenLauncherTest(unittest.TestCase):
             '"resolved_sha256": resolved_sha256',
             "pilot._exclusive_json(output, payload)",
             "pilot._exclusive_bytes(resolved_output, resolved_content)",
+            '"allowed_preexisting_active_job_ids": allowed_active_job_ids',
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):

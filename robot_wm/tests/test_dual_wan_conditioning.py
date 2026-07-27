@@ -295,13 +295,9 @@ def test_frozen_zero_state_and_clock_make_video_loss_output_and_gradients_tf_inv
             condition_on_tf=False,
         )
         video_loss = (output.video_velocity - target).square().mean()
-        # Keep a TF-dependent branch in the graph exactly as the training
-        # objective does, but give it the video-only arm's zero weight.
-        total_loss = (
-            video_loss
-            + 0.0 * model.tf_velocity_head.last_tokens.square().mean()
-        )
-        total_loss.backward()
+        # The video-only objective is structurally just the video loss; it
+        # deliberately does not attach a nominally zero-weight TF graph.
+        video_loss.backward()
         gradients = {
             name: (
                 None
