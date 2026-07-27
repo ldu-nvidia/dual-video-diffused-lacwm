@@ -48,6 +48,12 @@ dual_diffusion:
   cascade_tf_condition_max_sigma: 0.25
   cascade_validation_tf_sigma: 0.125
   cascade_inference_tf_fraction: 0.5
+  # When enabled, matched/shuffled state content is injected only into
+  # video-loss examples. TF-loss examples retain their own noisy TF state and
+  # clock, but receive a zero TF-content residual in the shared Wan trunk.
+  # This prevents the experimental condition from directly changing auxiliary
+  # TF-denoiser training.
+  cascade_condition_only_video_loss_examples: false
   tf_loss_weight: 1.0
   clock_embedding_dim: 128
   capture_latent_trajectories: true

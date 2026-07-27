@@ -165,7 +165,7 @@ class WanForwardModel(nn.Module):
         noisy_tf: torch.Tensor = None,
         conditioning_tf: torch.Tensor = None,
         tf_sigma: torch.Tensor = None,
-        condition_on_tf: bool | None = None,
+        condition_on_tf: bool | torch.Tensor | None = None,
     ) -> torch.Tensor | DualWanOutput:
         n, c, fp, h, w = noisy_latents.shape
         control = self.action_to_control(z_control, h, w).to(noisy_latents.dtype)
@@ -232,10 +232,30 @@ class WanForwardModel(nn.Module):
             .unsqueeze(1)
             .expand(-1, seq_len, -1)
         )
-        use_tf = self.condition_on_tf if condition_on_tf is None else bool(condition_on_tf)
+        use_tf = self.condition_on_tf if condition_on_tf is None else condition_on_tf
+        if isinstance(use_tf, torch.Tensor):
+            if use_tf.ndim != 1 or use_tf.shape[0] != n:
+                raise ValueError(
+                    "tensor condition_on_tf must have shape [batch], "
+                    f"got {tuple(use_tf.shape)} for batch {n}"
+                )
+            state_mask = use_tf.to(
+                device=condition_state_tokens.device,
+                dtype=condition_state_tokens.dtype,
+            )
+            if not torch.all((state_mask == 0) | (state_mask == 1)):
+                raise ValueError(
+                    "tensor condition_on_tf values must be exactly zero or one"
+                )
+            state_mask = state_mask.reshape(n, 1, 1)
+        else:
+            state_mask = condition_state_tokens.new_full(
+                (n, 1, 1),
+                float(bool(use_tf)),
+            )
         state_residual = self.tf_token_adapter.residual_tokens(
             condition_state_tokens
-        ) * float(use_tf)
+        ) * state_mask
         injected_tokens = clock_tokens + state_residual
         features = injected_tokens.transpose(1, 2).reshape(
             n, injected_tokens.shape[-1], *grid

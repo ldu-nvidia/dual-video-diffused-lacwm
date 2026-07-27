@@ -78,6 +78,7 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
     model.evaluation_nfe_steps = (1,)
     model.viz_num_steps = 1
     model.capture_latent_trajectories = False
+    model.cascade_condition_only_video_loss_examples = False
     model._visualization_artifacts = None
     model._encode_clip = lambda _rgb: video_clean
     model._tf_clean = lambda _rgb, _shape: tf_clean
@@ -202,6 +203,7 @@ def test_strict_cascade_executes_exact_nfe_and_perfect_velocity_endpoints(
     model.evaluation_nfe_steps = (5,)
     model.viz_num_steps = 5
     model.capture_latent_trajectories = True
+    model.cascade_condition_only_video_loss_examples = True
     model._visualization_artifacts = None
     model._encode_clip = lambda _rgb: video_clean
     model._tf_clean = lambda _rgb, _shape: tf_clean
@@ -332,6 +334,36 @@ def test_strict_cascade_sampling_rejects_one_total_nfe(monkeypatch):
 
     with pytest.raises(ValueError, match="at least two"):
         model._sampling_schedule(1, device=torch.device("cpu"))
+
+
+def test_strict_training_masks_content_out_of_tf_loss_examples(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.condition_on_tf = True
+    model.cascade_condition_only_video_loss_examples = True
+
+    mask = model._training_condition_mask(
+        torch.tensor([1.0, 0.0, 1.0, 0.0])
+    )
+
+    assert isinstance(mask, torch.Tensor)
+    assert mask.dtype == torch.bool
+    torch.testing.assert_close(
+        mask,
+        torch.tensor([True, False, True, False]),
+    )
+
+
+def test_non_treatment_arm_keeps_content_disabled(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.condition_on_tf = False
+    model.cascade_condition_only_video_loss_examples = True
+
+    assert (
+        model._training_condition_mask(torch.tensor([1.0, 0.0]))
+        is False
+    )
 
 
 @pytest.mark.parametrize(

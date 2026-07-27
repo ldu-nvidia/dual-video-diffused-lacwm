@@ -107,6 +107,12 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self.cascade_inference_tf_fraction = float(
             config.get("cascade_inference_tf_fraction", 0.5)
         )
+        self.cascade_condition_only_video_loss_examples = bool(
+            config.get(
+                "cascade_condition_only_video_loss_examples",
+                False,
+            )
+        )
         self.evaluation_nfe_steps = tuple(
             sorted(
                 {
@@ -190,6 +196,14 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         if not 0 < self.cascade_inference_tf_fraction < 1:
             raise ValueError(
                 "cascade_inference_tf_fraction must lie strictly between 0 and 1"
+            )
+        if (
+            self.cascade_condition_only_video_loss_examples
+            and self.tf_schedule_mode != "tf_first_cascaded"
+        ):
+            raise ValueError(
+                "cascade_condition_only_video_loss_examples requires "
+                "schedule_mode=tf_first_cascaded"
             )
         if not self.validation_video_sigmas or any(
             not 0 <= sigma <= 1 for sigma in self.validation_video_sigmas
@@ -433,6 +447,18 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             history_frames=history_frames,
         )
 
+    def _training_condition_mask(
+        self,
+        video_loss_weight: torch.Tensor,
+    ) -> bool | torch.Tensor:
+        """Select which examples may inject TF state content into Wan."""
+        if (
+            self.condition_on_tf
+            and self.cascade_condition_only_video_loss_examples
+        ):
+            return video_loss_weight.bool()
+        return self.condition_on_tf
+
     def _sampling_conditioning_tf(
         self,
         tf_state: torch.Tensor,
@@ -534,6 +560,10 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             tf_sigma_expanded=tf_sigma_expanded,
             history_frames=history_frames,
         )
+        # The treatment is TF-state content entering the video-loss branch.
+        # Keep TF-loss examples content-neutral so matched versus shuffled does
+        # not directly alter auxiliary TF-denoiser supervision.
+        condition_on_tf = self._training_condition_mask(video_loss_weight)
 
         context = self._build_context(batch_size, device, rgb.dtype)
         clip_fea = self._build_clip(batch_size, device, rgb.dtype)
@@ -547,7 +577,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             noisy_tf=tf_noisy,
             conditioning_tf=conditioning_tf,
             tf_sigma=tf_sigma,
-            condition_on_tf=self.condition_on_tf,
+            condition_on_tf=condition_on_tf,
         )
         if not isinstance(prediction, DualWanOutput):
             raise RuntimeError("dual Wan forward did not return both velocities")
@@ -609,6 +639,11 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         )
         self.aux_losses["condition/ztf_enabled"] = video_loss.new_tensor(
             float(self.condition_on_tf)
+        )
+        self.aux_losses["condition/content_injection_fraction"] = (
+            video_loss.new_tensor(float(condition_on_tf))
+            if isinstance(condition_on_tf, bool)
+            else condition_on_tf.float().mean().to(video_loss).detach()
         )
         self.aux_losses["condition/mode_code"] = video_loss.new_tensor(
             float(TF_CONDITION_MODE_CODES[self.tf_condition_mode])
@@ -755,6 +790,9 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             ),
             "history_latent_frames": torch.tensor([history_frames]),
             "condition_on_tf": torch.tensor([int(self.condition_on_tf)]),
+            "condition_only_video_loss_examples": torch.tensor(
+                [int(self.cascade_condition_only_video_loss_examples)]
+            ),
             "condition_mode_code": torch.tensor(
                 [TF_CONDITION_MODE_CODES[self.tf_condition_mode]]
             ),

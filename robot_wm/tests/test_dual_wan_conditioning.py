@@ -250,3 +250,62 @@ def test_conditioning_tf_shape_must_match_noisy_tf():
             conditioning_tf=torch.randn(2, 4, 2, 4, 2),
             tf_sigma=torch.tensor([0.3, 0.6]),
         )
+
+
+def test_per_sample_condition_mask_neutralizes_tf_content_exactly():
+    torch.manual_seed(17)
+    model = _make_dual_model()
+    noisy_video = torch.randn(2, 16, 2, 4, 4)
+    reference = torch.randn_like(noisy_video)
+    noisy_tf = torch.randn(2, 4, 2, 4, 4)
+    conditioning_tf = torch.randn_like(noisy_tf) + 4.0
+    conditioning_tokens, _ = model.tf_token_adapter.project_tokens(
+        conditioning_tf
+    )
+
+    output = model(
+        noisy_video,
+        torch.tensor([100.0, 200.0]),
+        torch.randn(2, 2, 3),
+        reference,
+        [torch.zeros(1, 4), torch.zeros(1, 4)],
+        noisy_tf=noisy_tf,
+        conditioning_tf=conditioning_tf,
+        tf_sigma=torch.tensor([0.3, 0.6]),
+        condition_on_tf=torch.tensor([True, False]),
+    )
+
+    torch.testing.assert_close(
+        output.tf_condition_tokens[0],
+        conditioning_tokens[0] * 0.1,
+    )
+    torch.testing.assert_close(
+        output.tf_condition_tokens[1],
+        torch.zeros_like(output.tf_condition_tokens[1]),
+    )
+
+
+@pytest.mark.parametrize(
+    "condition_on_tf,match",
+    [
+        (torch.tensor([[True], [False]]), r"shape \[batch\]"),
+        (torch.tensor([1.0, 0.5]), "exactly zero or one"),
+    ],
+)
+def test_per_sample_condition_mask_rejects_ambiguous_values(
+    condition_on_tf,
+    match,
+):
+    model = _make_dual_model()
+    with pytest.raises(ValueError, match=match):
+        model(
+            torch.randn(2, 16, 2, 4, 4),
+            torch.tensor([100.0, 200.0]),
+            torch.randn(2, 2, 3),
+            torch.randn(2, 16, 2, 4, 4),
+            [torch.zeros(1, 4), torch.zeros(1, 4)],
+            noisy_tf=torch.randn(2, 4, 2, 4, 4),
+            conditioning_tf=torch.randn(2, 4, 2, 4, 4),
+            tf_sigma=torch.tensor([0.3, 0.6]),
+            condition_on_tf=condition_on_tf,
+        )
