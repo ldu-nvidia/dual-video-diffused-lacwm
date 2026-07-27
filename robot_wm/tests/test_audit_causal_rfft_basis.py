@@ -122,6 +122,8 @@ def test_artifact_audit_recovers_time_packing_and_energy(tmp_path):
     assert report[
         "sqrt2_weighted_coefficient_energy_over_time_packed_energy"
     ] == pytest.approx(1.0)
+    assert report["future_temporal_bins"] == [2, 3]
+    assert len(report["future_dc_mean_square_over_each_dynamic_component"]) == 3
     assert report["artifacts"][0]["sha256"]
 
 

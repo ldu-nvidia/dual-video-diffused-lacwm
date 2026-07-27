@@ -284,6 +284,9 @@ def _component_statistics(
         "population_variance": _float_list(flattened.var(dim=1, unbiased=False)),
         "mean_square": _float_list(flattened.square().mean(dim=1)),
         "rms": _float_list(flattened.square().mean(dim=1).sqrt()),
+        "mean_square_by_temporal_bin": [
+            _float_list(row.square().mean(dim=1)) for row in by_bin
+        ],
         "rms_by_temporal_bin": [
             _float_list(row.square().mean(dim=1).sqrt()) for row in by_bin
         ],
@@ -349,6 +352,12 @@ def audit_tf_clean_artifacts(
     weighted_energy = weighted.square().sum()
     time_energy = time_packed.square().sum()
     anchor_non_dc = grouped[:, :, 1:, 0]
+    future_statistics = _component_statistics(
+        coefficients[:, :, 2:], window_size=window_size
+    )
+    future_mean_square = torch.tensor(
+        future_statistics["mean_square"], dtype=torch.float64
+    )
 
     return {
         "source": "old-pilot tf_clean tensors; inputs opened read-only",
@@ -356,6 +365,14 @@ def audit_tf_clean_artifacts(
         "combined_shape": list(coefficients.shape),
         "component_statistics": _component_statistics(
             coefficients, window_size=window_size
+        ),
+        "future_temporal_bins": [2, 3],
+        "future_component_statistics": future_statistics,
+        "future_dc_mean_square_over_each_dynamic_component": _float_list(
+            future_mean_square[0] / future_mean_square[1:]
+        ),
+        "future_standard_gaussian_noise_variance_over_clean_mean_square": (
+            _float_list(future_mean_square.reciprocal())
         ),
         "round_trip_coefficient_max_abs_error": float(
             (reprojected - coefficients).abs().max()
