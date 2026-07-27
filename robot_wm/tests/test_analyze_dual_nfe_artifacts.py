@@ -37,6 +37,8 @@ def _tensors(
     evaluation_seed: int = 20_260_726,
     condition_sources: tuple[str, ...] = ("autonomous",),
     oracle_leakage_flag: int = 1,
+    condition_mode_code: int | None = None,
+    oracle_equal: bool = False,
 ):
     video_clean = (
         torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
@@ -66,6 +68,8 @@ def _tensors(
     )
     tf_initial = tf_initial_noise.clone()
     tf_initial[:, :, :1] = tf_clean[:, :, :1]
+    if condition_mode_code is None:
+        condition_mode_code = int(arm_gain < 1.0)
     tensors = {
         "video_clean": video_clean,
         "tf_clean": tf_clean,
@@ -74,9 +78,11 @@ def _tensors(
         "tf_initial_noise": tf_initial_noise,
         "ground_truth_future_uint8": ground_truth,
         "history_latent_frames": torch.tensor([1], dtype=torch.int64),
-        "condition_on_tf": torch.tensor([int(arm_gain < 1.0)], dtype=torch.int64),
+        "condition_on_tf": torch.tensor(
+            [int(condition_mode_code != 0)], dtype=torch.int64
+        ),
         "condition_mode_code": torch.tensor(
-            [int(arm_gain < 1.0)], dtype=torch.int64
+            [condition_mode_code], dtype=torch.int64
         ),
         "evaluation_noise_seed": torch.tensor([evaluation_seed], dtype=torch.int64),
         "evaluation_nfe_steps": torch.tensor(NFE_STEPS, dtype=torch.int64),
@@ -92,7 +98,7 @@ def _tensors(
         "autonomous": arm_gain,
         "off": 1.5,
         "oracle_matched": 0.2,
-        "oracle_shuffled": 0.8,
+        "oracle_shuffled": 0.2 if oracle_equal else 0.8,
     }
     for source in condition_sources:
         infix = "" if source == "autonomous" else f"_{source}"
@@ -124,6 +130,8 @@ def _write_artifact(
     evaluation_seed: int = 20_260_726,
     condition_sources: tuple[str, ...] = ("autonomous",),
     oracle_leakage_flag: int = 1,
+    condition_mode_code: int | None = None,
+    oracle_equal: bool = False,
     truncate_video_nfe_4: bool = False,
     drop_key: str | None = None,
 ) -> Path:
@@ -138,6 +146,8 @@ def _write_artifact(
         evaluation_seed=evaluation_seed,
         condition_sources=condition_sources,
         oracle_leakage_flag=oracle_leakage_flag,
+        condition_mode_code=condition_mode_code,
+        oracle_equal=oracle_equal,
     )
     if truncate_video_nfe_4:
         tensors["video_final_nfe_4"] = tensors["video_final_nfe_4"][:, :, :-1]
@@ -191,6 +201,35 @@ def _matched_arms(
             arm_gain=0.5,
             condition_sources=condition_sources,
         )
+    return arms
+
+
+def _causal_screen_arms(
+    root: Path,
+    *,
+    equivalent_s010: bool = False,
+) -> dict[str, Path]:
+    arm_specs = {
+        "off_s000": (1.2, 0),
+        "matched_s003": (0.45, 1),
+        "shuffled_s003": (1.0, 2),
+        "matched_s010": (1.0 if equivalent_s010 else 0.55, 1),
+        "shuffled_s010": (1.0, 2),
+    }
+    arms = {
+        name: root / "runs" / name / "visualization" / "iter_99"
+        for name in arm_specs
+    }
+    for rank in range(2):
+        for name, (arm_gain, condition_mode_code) in arm_specs.items():
+            _write_artifact(
+                arms[name],
+                rank=rank,
+                arm_gain=arm_gain,
+                condition_sources=ALL_CONDITION_SOURCES,
+                condition_mode_code=condition_mode_code,
+                oracle_equal=equivalent_s010,
+            )
     return arms
 
 
@@ -282,6 +321,135 @@ def test_reports_oracle_leakage_source_metrics_and_within_arm_deltas(tmp_path):
     ]
     assert set(per_unit_sources) == set(ALL_CONDITION_SOURCES)
     assert per_unit_sources["oracle_shuffled"]["oracle_leakage"]
+
+
+def test_reports_direct_same_scale_relative_effects_and_promising_gate(tmp_path):
+    arms = _causal_screen_arms(tmp_path)
+    output_dir = tmp_path / "analysis"
+    output_dir.mkdir()
+
+    payload = analyze(
+        arms,
+        baseline="off_s000",
+        output=output_dir / "result.json",
+        bootstrap_samples=500,
+        bootstrap_seed=123,
+    )
+
+    aggregate = payload["aggregate"]
+    inventory = aggregate["same_scale_pair_inventory"]
+    assert inventory["s003"] == {
+        "matched_arm": "matched_s003",
+        "shuffled_arm": "shuffled_s003",
+        "complete": True,
+        "missing_modes": [],
+    }
+    assert inventory["s010"]["complete"]
+
+    comparison = aggregate["direct_same_scale_matched_vs_shuffled"]["s003"]
+    assert comparison["definition"] == "matched_s003 minus shuffled_s003"
+    assert not comparison["oracle_leakage"]
+    assert comparison["nfe"]["4"]["video_future_nmse"]["mean"] < 0
+    temporal_relative = comparison["relative_nfe"]["4"][
+        "decoded_temporal_difference_mse_unit_range"
+    ]
+    assert temporal_relative["definition"].startswith(
+        "(mean(left) - mean(reference)) / mean(reference)"
+    )
+    assert temporal_relative["relative_effect"] < -0.03
+    assert temporal_relative["bootstrap_ci"]["high"] < 0
+    assert temporal_relative["ci_favors_left"]
+    assert temporal_relative["material_improvement_at_least_3pct"]
+    assert not temporal_relative["equivalence"][
+        "ci_entirely_within_margin"
+    ]
+
+    oracle = comparison["oracle_mechanism_diagnostic"]
+    assert oracle == {
+        "available": True,
+        "oracle_leakage": True,
+        "deployable_evidence": False,
+        "source": (
+            "aggregate.within_arm_source_deltas.matched_s003."
+            "oracle_matched_minus_oracle_shuffled"
+        ),
+    }
+    decision = comparison["preregistered_decision"]
+    assert decision["criteria"]["temporal_4nfe_at_least_3pct_better"]
+    assert decision["criteria"]["video_nmse_4nfe_no_regression"]
+    assert decision["criteria"]["temporal_8nfe_direction_agrees"]
+    assert decision["criteria"]["literal_preregistered_metric_gate_pass"]
+    assert decision["criteria"][
+        "bootstrap_sign_supported_metric_gate_pass"
+    ]
+    assert decision["metric_classification"] == "promising_metric_gate"
+    assert decision["external_requirements"]["exposure_qualified"] is None
+    assert aggregate["preregistered_decisions"][
+        "overall_metric_classification"
+    ] == "promising_metric_gate_at_one_or_more_scales"
+
+    # Existing baseline-oriented consumers retain the prior absolute-delta field.
+    baseline_comparison = aggregate["paired_deltas"]["matched_s003"]
+    assert "nfe" in baseline_comparison
+    assert "relative_nfe" in baseline_comparison
+
+
+def test_reports_two_percent_equivalence_and_scoped_null_metric_gate(tmp_path):
+    screen_arms = _causal_screen_arms(tmp_path, equivalent_s010=True)
+    arms = {
+        name: screen_arms[name]
+        for name in ("matched_s010", "shuffled_s010")
+    }
+    output_dir = tmp_path / "analysis"
+    output_dir.mkdir()
+
+    payload = analyze(
+        arms,
+        baseline="shuffled_s010",
+        output=output_dir / "result.json",
+        bootstrap_samples=500,
+        bootstrap_seed=123,
+    )
+
+    aggregate = payload["aggregate"]
+    comparison = aggregate["direct_same_scale_matched_vs_shuffled"]["s010"]
+    for nfe in ("4", "8"):
+        for metric in (
+            "video_future_nmse",
+            "decoded_temporal_difference_mse_unit_range",
+        ):
+            effect = comparison["relative_nfe"][nfe][metric]
+            assert effect["defined"]
+            assert effect["relative_effect"] == pytest.approx(0.0)
+            assert effect["bootstrap_ci"]["low"] == pytest.approx(0.0)
+            assert effect["bootstrap_ci"]["high"] == pytest.approx(0.0)
+            assert effect["equivalence"]["margin_fraction"] == 0.02
+            assert effect["equivalence"]["ci_entirely_within_margin"]
+
+    decision = comparison["preregistered_decision"]
+    assert not decision["criteria"]["literal_preregistered_metric_gate_pass"]
+    assert decision["equivalence_diagnostic"][
+        "autonomous_primary_4nfe_and_8nfe_equivalent_within_2pct"
+    ]
+    assert decision["equivalence_diagnostic"][
+        "oracle_primary_4nfe_and_8nfe_equivalent_within_2pct"
+    ]
+    assert decision["equivalence_diagnostic"][
+        "scoped_negative_metric_component_pass"
+    ]
+    assert decision["equivalence_diagnostic"][
+        "requires_verified_exposure_through_s010"
+    ]
+    assert decision["metric_classification"] == "scoped_null_metric_equivalence"
+    assert aggregate["preregistered_decisions"][
+        "overall_metric_classification"
+    ] == "scoped_null_metric_equivalence_requires_exposure"
+    assert aggregate["preregistered_decisions"][
+        "exposure_qualification_is_external"
+    ]
+    assert aggregate["preregistered_decisions"][
+        "oracle_results_are_leakage_only"
+    ]
 
 
 def test_rejects_incomplete_declared_oracle_source_keys(tmp_path):

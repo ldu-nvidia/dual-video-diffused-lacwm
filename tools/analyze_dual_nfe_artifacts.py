@@ -31,6 +31,7 @@ from safetensors import safe_open
 NFE_STEPS = (1, 2, 4, 8)
 SIGMA_CONVENTION = "1=noise,0=clean"
 ARM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$")
+SCALED_ARM_NAME_RE = re.compile(r"^(matched|shuffled)_s([0-9]+)$")
 ARTIFACT_NAME_RE = re.compile(r"^latent_trajectory_rank_([0-9]+)[.]safetensors$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_TENSOR_RE = re.compile(
@@ -52,6 +53,8 @@ EVALUATION_CONDITION_SOURCE_NAMES = {
     3: "oracle_shuffled",
 }
 ORACLE_SOURCES = {"oracle_matched", "oracle_shuffled"}
+PROMISING_RELATIVE_IMPROVEMENT = 0.03
+EQUIVALENCE_MARGIN = 0.02
 
 
 class ArtifactValidationError(RuntimeError):
@@ -760,6 +763,299 @@ def _summary(
     }
 
 
+def _relative_effect_summary(
+    left_values: Sequence[float],
+    reference_values: Sequence[float],
+    *,
+    favorable_when: str,
+    bootstrap_samples: int,
+    confidence: float,
+    seed: int,
+    label: str,
+) -> dict[str, Any]:
+    """Bootstrap a paired ratio-of-means relative effect.
+
+    The effect is ``(mean(left) - mean(reference)) / mean(reference)``.
+    Resampling always uses the same indices for both sides.
+    """
+
+    left = np.asarray(left_values, dtype=np.float64)
+    reference = np.asarray(reference_values, dtype=np.float64)
+    if (
+        left.ndim != 1
+        or reference.ndim != 1
+        or left.size == 0
+        or left.shape != reference.shape
+        or not np.isfinite(left).all()
+        or not np.isfinite(reference).all()
+    ):
+        raise ArtifactValidationError(
+            f"invalid paired values for relative effect {label!r}"
+        )
+    if favorable_when not in {"lower", "higher"}:
+        raise ArtifactValidationError(
+            f"invalid metric direction for relative effect {label!r}"
+        )
+
+    left_mean = float(left.mean())
+    reference_mean = float(reference.mean())
+    common = {
+        "n": int(left.size),
+        "definition": (
+            "(mean(left) - mean(reference)) / mean(reference), with paired "
+            "bootstrap resampling"
+        ),
+        "left_mean": left_mean,
+        "reference_mean": reference_mean,
+        "favorable_when": (
+            "relative_effect < 0"
+            if favorable_when == "lower"
+            else "relative_effect > 0"
+        ),
+        "equivalence": {
+            "margin_fraction": EQUIVALENCE_MARGIN,
+            "margin_percent": 100.0 * EQUIVALENCE_MARGIN,
+            "ci_entirely_within_margin": False,
+        },
+    }
+    if reference_mean <= 0:
+        return {
+            **common,
+            "defined": False,
+            "undefined_reason": "reference mean must be strictly positive",
+            "relative_effect": None,
+            "relative_effect_percent": None,
+            "bootstrap_ci": None,
+            "ci_favors_left": False,
+            "ci_favors_reference": False,
+            "material_improvement_at_least_3pct": False,
+            "material_harm_at_least_3pct": False,
+        }
+
+    effect = (left_mean - reference_mean) / reference_mean
+    rng = np.random.default_rng(_derived_seed(seed, label))
+    indices = rng.integers(
+        0, left.size, size=(bootstrap_samples, left.size), endpoint=False
+    )
+    left_means = left[indices].mean(axis=1)
+    reference_means = reference[indices].mean(axis=1)
+    if np.any(reference_means <= 0):
+        return {
+            **common,
+            "defined": False,
+            "undefined_reason": (
+                "at least one paired bootstrap resample has non-positive "
+                "reference mean"
+            ),
+            "relative_effect": float(effect),
+            "relative_effect_percent": float(100.0 * effect),
+            "bootstrap_ci": None,
+            "ci_favors_left": False,
+            "ci_favors_reference": False,
+            "material_improvement_at_least_3pct": False,
+            "material_harm_at_least_3pct": False,
+        }
+    bootstrap_effects = (
+        left_means - reference_means
+    ) / reference_means
+    tail = (1.0 - confidence) / 2.0
+    low, high = np.quantile(bootstrap_effects, [tail, 1.0 - tail])
+    if favorable_when == "lower":
+        ci_favors_left = high < 0
+        ci_favors_reference = low > 0
+        material_improvement = effect <= -PROMISING_RELATIVE_IMPROVEMENT
+        material_harm = effect >= PROMISING_RELATIVE_IMPROVEMENT
+    else:
+        ci_favors_left = low > 0
+        ci_favors_reference = high < 0
+        material_improvement = effect >= PROMISING_RELATIVE_IMPROVEMENT
+        material_harm = effect <= -PROMISING_RELATIVE_IMPROVEMENT
+    equivalent = low >= -EQUIVALENCE_MARGIN and high <= EQUIVALENCE_MARGIN
+    return {
+        **common,
+        "defined": True,
+        "undefined_reason": None,
+        "relative_effect": float(effect),
+        "relative_effect_percent": float(100.0 * effect),
+        "bootstrap_ci": {
+            "confidence": confidence,
+            "low": float(low),
+            "high": float(high),
+            "low_percent": float(100.0 * low),
+            "high_percent": float(100.0 * high),
+        },
+        "ci_favors_left": bool(ci_favors_left),
+        "ci_favors_reference": bool(ci_favors_reference),
+        "material_improvement_at_least_3pct": bool(material_improvement),
+        "material_harm_at_least_3pct": bool(material_harm),
+        "equivalence": {
+            "margin_fraction": EQUIVALENCE_MARGIN,
+            "margin_percent": 100.0 * EQUIVALENCE_MARGIN,
+            "ci_entirely_within_margin": bool(equivalent),
+        },
+    }
+
+
+def _effect_value(
+    relative_nfe: Mapping[str, Any], nfe: int, metric: str
+) -> dict[str, Any]:
+    value = relative_nfe.get(str(nfe), {}).get(metric)
+    if not isinstance(value, dict):
+        raise ArtifactValidationError(
+            f"relative effect is missing for NFE={nfe}, metric={metric}"
+        )
+    return value
+
+
+def _effect_at_most(value: Mapping[str, Any], threshold: float) -> bool:
+    effect = value.get("relative_effect")
+    return bool(value.get("defined")) and isinstance(effect, (int, float)) and (
+        effect <= threshold
+    )
+
+
+def _effect_at_least(value: Mapping[str, Any], threshold: float) -> bool:
+    effect = value.get("relative_effect")
+    return bool(value.get("defined")) and isinstance(effect, (int, float)) and (
+        effect >= threshold
+    )
+
+
+def _equivalent(value: Mapping[str, Any]) -> bool:
+    equivalence = value.get("equivalence")
+    return bool(
+        value.get("defined")
+        and isinstance(equivalence, dict)
+        and equivalence.get("ci_entirely_within_margin") is True
+    )
+
+
+def _preregistered_decision(
+    relative_nfe: Mapping[str, Any],
+    *,
+    scale: str,
+    oracle_relative_nfe: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    temporal_metric = "decoded_temporal_difference_mse_unit_range"
+    video_metric = "video_future_nmse"
+    temporal_4 = _effect_value(relative_nfe, 4, temporal_metric)
+    video_4 = _effect_value(relative_nfe, 4, video_metric)
+    temporal_8 = _effect_value(relative_nfe, 8, temporal_metric)
+    video_8 = _effect_value(relative_nfe, 8, video_metric)
+
+    temporal_4_improves_3pct = _effect_at_most(
+        temporal_4, -PROMISING_RELATIVE_IMPROVEMENT
+    )
+    video_4_no_regression = _effect_at_most(video_4, 0.0)
+    temporal_8_direction_agrees = _effect_at_most(temporal_8, 0.0)
+    # Strictly negative is required for direction agreement; an exact zero is
+    # not evidence that the favorable direction persisted.
+    if temporal_8.get("relative_effect") == 0:
+        temporal_8_direction_agrees = False
+    literal_metric_gate = (
+        temporal_4_improves_3pct
+        and video_4_no_regression
+        and temporal_8_direction_agrees
+    )
+    bootstrap_supported_gate = bool(
+        literal_metric_gate
+        and temporal_4.get("ci_favors_left")
+        and video_4.get("ci_favors_left")
+        and temporal_8.get("ci_favors_left")
+    )
+
+    symmetric_harm_signal = bool(
+        _effect_at_least(temporal_4, PROMISING_RELATIVE_IMPROVEMENT)
+        and _effect_at_least(video_4, 0.0)
+        and _effect_at_least(temporal_8, 0.0)
+        and temporal_4.get("ci_favors_reference")
+    )
+    autonomous_equivalence = all(
+        _equivalent(value)
+        for value in (temporal_4, video_4, temporal_8, video_8)
+    )
+
+    oracle_equivalence = None
+    if oracle_relative_nfe is not None:
+        oracle_equivalence = all(
+            _equivalent(
+                _effect_value(oracle_relative_nfe, nfe, metric)
+            )
+            for nfe in (4, 8)
+            for metric in (temporal_metric, video_metric)
+        )
+    scoped_negative_metric_component = bool(
+        scale == "s010"
+        and autonomous_equivalence
+        and oracle_equivalence is True
+    )
+    if literal_metric_gate:
+        metric_classification = "promising_metric_gate"
+    elif symmetric_harm_signal:
+        metric_classification = "harm_metric_signal"
+    elif scoped_negative_metric_component:
+        metric_classification = "scoped_null_metric_equivalence"
+    else:
+        metric_classification = "inconclusive"
+
+    return {
+        "schema_version": 1,
+        "scope": (
+            "metric-only screen decision; exposure qualification and training-"
+            "seed replication are external requirements"
+        ),
+        "scale": scale,
+        "primary_nfe": 4,
+        "confirmation_nfe": 8,
+        "primary_temporal_metric": temporal_metric,
+        "primary_video_metric": video_metric,
+        "thresholds": {
+            "temporal_relative_improvement_fraction": (
+                PROMISING_RELATIVE_IMPROVEMENT
+            ),
+            "temporal_relative_improvement_percent": (
+                100.0 * PROMISING_RELATIVE_IMPROVEMENT
+            ),
+            "video_nmse_no_regression_fraction": 0.0,
+            "equivalence_margin_fraction": EQUIVALENCE_MARGIN,
+            "equivalence_margin_percent": 100.0 * EQUIVALENCE_MARGIN,
+        },
+        "criteria": {
+            "temporal_4nfe_at_least_3pct_better": (
+                temporal_4_improves_3pct
+            ),
+            "video_nmse_4nfe_no_regression": video_4_no_regression,
+            "temporal_8nfe_direction_agrees": temporal_8_direction_agrees,
+            "literal_preregistered_metric_gate_pass": literal_metric_gate,
+            "bootstrap_sign_supported_metric_gate_pass": (
+                bootstrap_supported_gate
+            ),
+        },
+        "harm_diagnostic": {
+            "symmetric_material_harm_signal": symmetric_harm_signal,
+            "preregistered": False,
+        },
+        "equivalence_diagnostic": {
+            "autonomous_primary_4nfe_and_8nfe_equivalent_within_2pct": (
+                autonomous_equivalence
+            ),
+            "oracle_primary_4nfe_and_8nfe_equivalent_within_2pct": (
+                oracle_equivalence
+            ),
+            "scoped_negative_metric_component_pass": (
+                scoped_negative_metric_component
+            ),
+            "requires_verified_exposure_through_s010": True,
+        },
+        "external_requirements": {
+            "exposure_qualified": None,
+            "exposure_telemetry_required": True,
+            "three_fresh_training_seeds_required_after_promising_screen": True,
+        },
+        "metric_classification": metric_classification,
+    }
+
+
 def _parse_arm_spec(value: str) -> tuple[str, Path]:
     if "=" not in value:
         raise argparse.ArgumentTypeError("arm must use NAME=PATH")
@@ -972,19 +1268,30 @@ def analyze(
                 "deployable_evidence": False,
                 "paired_by": "identical arm, dataset/rank, and initial states",
                 "nfe": {},
+                "relative_nfe": {},
             }
             for nfe in NFE_STEPS:
                 nfe_key = str(nfe)
                 comparison["nfe"][nfe_key] = {}
+                comparison["relative_nfe"][nfe_key] = {}
                 for metric, favorable_when in METRIC_DIRECTIONS.items():
-                    deltas = [
+                    left_values = [
                         analyzed[arm][pair]["condition_source_metrics"][left][
                             nfe_key
                         ][metric]
-                        - analyzed[arm][pair]["condition_source_metrics"][right][
+                        for pair in ordered_pairs
+                    ]
+                    right_values = [
+                        analyzed[arm][pair]["condition_source_metrics"][right][
                             nfe_key
                         ][metric]
                         for pair in ordered_pairs
+                    ]
+                    deltas = [
+                        left_value - right_value
+                        for left_value, right_value in zip(
+                            left_values, right_values
+                        )
                     ]
                     summary = _summary(
                         deltas,
@@ -1015,6 +1322,21 @@ def analyze(
                         }
                     )
                     comparison["nfe"][nfe_key][metric] = summary
+                    comparison["relative_nfe"][nfe_key][metric] = (
+                        _relative_effect_summary(
+                            left_values,
+                            right_values,
+                            favorable_when=favorable_when,
+                            bootstrap_samples=bootstrap_samples,
+                            confidence=confidence,
+                            seed=bootstrap_seed,
+                            label=(
+                                f"within-arm-relative:{arm}:"
+                                f"{comparison_name}:nfe:{nfe}:"
+                                f"metric:{metric}"
+                            ),
+                        )
+                    )
             source_comparisons[comparison_name] = comparison
         within_arm_source_deltas[arm] = source_comparisons
 
@@ -1046,15 +1368,26 @@ def analyze(
             "condition_source": "autonomous",
             "oracle_leakage": False,
             "nfe": {},
+            "relative_nfe": {},
         }
         for nfe in NFE_STEPS:
             nfe_key = str(nfe)
             comparison["nfe"][nfe_key] = {}
+            comparison["relative_nfe"][nfe_key] = {}
             for metric, favorable_when in METRIC_DIRECTIONS.items():
-                deltas = [
+                left_values = [
                     analyzed[arm][pair]["metrics"][nfe_key][metric]
-                    - analyzed[baseline][pair]["metrics"][nfe_key][metric]
                     for pair in ordered_pairs
+                ]
+                reference_values = [
+                    analyzed[baseline][pair]["metrics"][nfe_key][metric]
+                    for pair in ordered_pairs
+                ]
+                deltas = [
+                    left_value - reference_value
+                    for left_value, reference_value in zip(
+                        left_values, reference_values
+                    )
                 ]
                 summary = _summary(
                     deltas,
@@ -1078,7 +1411,187 @@ def analyze(
                     }
                 )
                 comparison["nfe"][nfe_key][metric] = summary
+                comparison["relative_nfe"][nfe_key][metric] = (
+                    _relative_effect_summary(
+                        left_values,
+                        reference_values,
+                        favorable_when=favorable_when,
+                        bootstrap_samples=bootstrap_samples,
+                        confidence=confidence,
+                        seed=bootstrap_seed,
+                        label=(
+                            f"relative:{arm}-minus-{baseline}:"
+                            f"nfe:{nfe}:metric:{metric}"
+                        ),
+                    )
+                )
         paired_deltas[arm] = comparison
+
+    scaled_arm_inventory: dict[str, dict[str, str]] = {}
+    for arm in sorted(inventories):
+        match = SCALED_ARM_NAME_RE.fullmatch(arm)
+        if match is None:
+            continue
+        named_mode, digits = match.groups()
+        actual_mode = analyzed[arm][ordered_pairs[0]]["intervention"][
+            "condition_mode"
+        ]
+        if actual_mode != named_mode:
+            raise ArtifactValidationError(
+                f"scaled arm name {arm!r} declares mode {named_mode!r}, "
+                f"but artifact intervention is {actual_mode!r}"
+            )
+        scale = f"s{digits}"
+        scaled_arm_inventory.setdefault(scale, {})[named_mode] = arm
+
+    direct_same_scale_comparisons: dict[str, Any] = {}
+    same_scale_pair_inventory: dict[str, Any] = {}
+    for scale, modes in sorted(scaled_arm_inventory.items()):
+        missing_modes = sorted({"matched", "shuffled"} - set(modes))
+        same_scale_pair_inventory[scale] = {
+            "matched_arm": modes.get("matched"),
+            "shuffled_arm": modes.get("shuffled"),
+            "complete": not missing_modes,
+            "missing_modes": missing_modes,
+        }
+        if missing_modes:
+            continue
+        matched_arm = modes["matched"]
+        shuffled_arm = modes["shuffled"]
+        comparison: dict[str, Any] = {
+            "definition": f"{matched_arm} minus {shuffled_arm}",
+            "matched_arm": matched_arm,
+            "shuffled_arm": shuffled_arm,
+            "scale": scale,
+            "condition_source": "autonomous",
+            "oracle_leakage": False,
+            "paired_by": "identical dataset/rank and initial states",
+            "nfe": {},
+            "relative_nfe": {},
+        }
+        for nfe in NFE_STEPS:
+            nfe_key = str(nfe)
+            comparison["nfe"][nfe_key] = {}
+            comparison["relative_nfe"][nfe_key] = {}
+            for metric, favorable_when in METRIC_DIRECTIONS.items():
+                matched_values = [
+                    analyzed[matched_arm][pair]["metrics"][nfe_key][metric]
+                    for pair in ordered_pairs
+                ]
+                shuffled_values = [
+                    analyzed[shuffled_arm][pair]["metrics"][nfe_key][metric]
+                    for pair in ordered_pairs
+                ]
+                deltas = [
+                    matched_value - shuffled_value
+                    for matched_value, shuffled_value in zip(
+                        matched_values, shuffled_values
+                    )
+                ]
+                summary = _summary(
+                    deltas,
+                    bootstrap_samples=bootstrap_samples,
+                    confidence=confidence,
+                    seed=bootstrap_seed,
+                    label=(
+                        f"same-scale-delta:{scale}:{matched_arm}-minus-"
+                        f"{shuffled_arm}:nfe:{nfe}:metric:{metric}"
+                    ),
+                )
+                favorable_count = sum(
+                    delta < 0 if favorable_when == "lower" else delta > 0
+                    for delta in deltas
+                )
+                summary.update(
+                    {
+                        "favorable_when": (
+                            "delta < 0"
+                            if favorable_when == "lower"
+                            else "delta > 0"
+                        ),
+                        "favorable_fraction": favorable_count / len(deltas),
+                    }
+                )
+                comparison["nfe"][nfe_key][metric] = summary
+                comparison["relative_nfe"][nfe_key][metric] = (
+                    _relative_effect_summary(
+                        matched_values,
+                        shuffled_values,
+                        favorable_when=favorable_when,
+                        bootstrap_samples=bootstrap_samples,
+                        confidence=confidence,
+                        seed=bootstrap_seed,
+                        label=(
+                            f"same-scale-relative:{scale}:{matched_arm}-minus-"
+                            f"{shuffled_arm}:nfe:{nfe}:metric:{metric}"
+                        ),
+                    )
+                )
+
+        oracle_comparison = within_arm_source_deltas.get(
+            matched_arm, {}
+        ).get("oracle_matched_minus_oracle_shuffled")
+        oracle_relative_nfe = (
+            oracle_comparison.get("relative_nfe")
+            if isinstance(oracle_comparison, dict)
+            else None
+        )
+        comparison["oracle_mechanism_diagnostic"] = {
+            "available": oracle_relative_nfe is not None,
+            "oracle_leakage": True,
+            "deployable_evidence": False,
+            "source": (
+                f"aggregate.within_arm_source_deltas.{matched_arm}."
+                "oracle_matched_minus_oracle_shuffled"
+            ),
+        }
+        comparison["preregistered_decision"] = _preregistered_decision(
+            comparison["relative_nfe"],
+            scale=scale,
+            oracle_relative_nfe=oracle_relative_nfe,
+        )
+        direct_same_scale_comparisons[scale] = comparison
+
+    same_scale_decisions = {
+        scale: comparison["preregistered_decision"]
+        for scale, comparison in direct_same_scale_comparisons.items()
+    }
+    if any(
+        decision["criteria"]["literal_preregistered_metric_gate_pass"]
+        for decision in same_scale_decisions.values()
+    ):
+        overall_metric_classification = (
+            "promising_metric_gate_at_one_or_more_scales"
+        )
+    elif any(
+        decision["harm_diagnostic"]["symmetric_material_harm_signal"]
+        for decision in same_scale_decisions.values()
+    ):
+        overall_metric_classification = (
+            "harm_metric_signal_at_one_or_more_scales"
+        )
+    elif any(
+        decision["equivalence_diagnostic"][
+            "scoped_negative_metric_component_pass"
+        ]
+        for decision in same_scale_decisions.values()
+    ):
+        overall_metric_classification = (
+            "scoped_null_metric_equivalence_requires_exposure"
+        )
+    else:
+        overall_metric_classification = "inconclusive"
+    preregistered_decisions = {
+        "schema_version": 1,
+        "comparison": (
+            "autonomous matched minus autonomous shuffled at identical "
+            "fixed state scale"
+        ),
+        "same_scale": same_scale_decisions,
+        "overall_metric_classification": overall_metric_classification,
+        "exposure_qualification_is_external": True,
+        "oracle_results_are_leakage_only": True,
+    }
 
     per_pair = []
     for dataset, rank in ordered_pairs:
@@ -1209,6 +1722,11 @@ def analyze(
             "cross_arm_condition_source": "autonomous",
             "arms": arm_aggregates,
             "paired_deltas": paired_deltas,
+            "same_scale_pair_inventory": same_scale_pair_inventory,
+            "direct_same_scale_matched_vs_shuffled": (
+                direct_same_scale_comparisons
+            ),
+            "preregistered_decisions": preregistered_decisions,
             "within_arm_condition_sources": within_arm_condition_sources,
             "within_arm_source_deltas": within_arm_source_deltas,
         },
