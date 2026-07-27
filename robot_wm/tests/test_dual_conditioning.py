@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+import robot_wm.modeling.dual_diffusion.conditioning as conditioning_module
 from robot_wm.modeling.dual_diffusion.conditioning import (
     make_oracle_conditioning_tf,
     make_sampling_conditioning_tf,
@@ -97,6 +98,39 @@ def test_shuffled_sampling_preserves_local_noise_and_rolls_only_residual():
     expected = (1.0 - sigma) * torch.roll(clean, -1, 0) + sigma * noise
     torch.testing.assert_close(
         condition[:, :, 2:], expected[:, :, 2:]
+    )
+
+
+def test_shuffled_sampling_collective_receives_future_residual_only(
+    monkeypatch,
+):
+    state = torch.randn(2, 3, 5, 2, 2)
+    noise = torch.randn_like(state)
+    observed_shapes = []
+
+    def roll_future_only(value):
+        observed_shapes.append(tuple(value.shape))
+        return torch.roll(value, shifts=-1, dims=0)
+
+    monkeypatch.setattr(
+        conditioning_module,
+        "roll_across_global_batch",
+        roll_future_only,
+    )
+    conditioned = make_sampling_conditioning_tf(
+        mode="shuffled",
+        tf_state=state,
+        tf_noise=noise,
+        tf_sigma_expanded=torch.full((2, 1, 1, 1, 1), 0.4),
+        history_frames=2,
+    )
+
+    assert observed_shapes == [(2, 3, 3, 2, 2)]
+    torch.testing.assert_close(
+        conditioned[:, :, :2],
+        state[:, :, :2],
+        rtol=0,
+        atol=0,
     )
 
 

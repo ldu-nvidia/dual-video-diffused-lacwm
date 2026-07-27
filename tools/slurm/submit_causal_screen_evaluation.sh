@@ -24,6 +24,7 @@ EVALUATION_ID=""
 EXPECTED_EVALUATION_COMMIT=""
 BATCHES_PER_RANK=1
 ARMS="off_s000,matched_s003,shuffled_s003,matched_s010,shuffled_s010"
+ALLOW_ACTIVE_JOB_IDS=()
 EXECUTE=0
 
 die() {
@@ -38,7 +39,8 @@ Usage: tools/slurm/submit_causal_screen_evaluation.sh [options]
 Validate or submit a fresh eight-B200 post-training evaluation of completed
 causal-screen snapshots. The evaluator caches deterministic rank-sharded ABC
 batches once and replays them across every selected arm. Every selected arm
-always emits autonomous/off/oracle-matched/oracle-shuffled at NFE 1/2/4/8.
+always emits autonomous/off/oracle-matched/oracle-shuffled and the
+same-checkpoint autonomous-shuffled control at NFE 1/2/4/8.
 
 Options:
   --screen-root PATH       Completed five-arm causal-screen root (required)
@@ -53,8 +55,14 @@ Options:
   --mem VALUE              Memory (default: 1000G)
   --account NAME           Optional Slurm account
   --qos NAME               Optional Slurm QOS
-  --execute                Refuse active jobs, create a fresh evaluation
-                           manifest, and submit. Omit for a read-only dry run.
+  --allow-active-job-id NUMERIC_ID
+                           Repeat to allow exact active Slurm job IDs. The
+                           allowlist must exactly equal all active user job
+                           IDs at the submission gate. No wildcard or job-name
+                           bypass is supported; default is an empty allowlist.
+  --execute                Enforce the active-job gate, create a fresh
+                           evaluation manifest, and submit. Omit for a
+                           read-only dry run.
   -h, --help               Show this help
 
 Safe staged examples:
@@ -81,6 +89,7 @@ while (($#)); do
     --mem) [[ $# -ge 2 ]] || die "--mem requires a value"; MEMORY="$2"; shift 2 ;;
     --account) [[ $# -ge 2 ]] || die "--account requires a value"; ACCOUNT="$2"; shift 2 ;;
     --qos) [[ $# -ge 2 ]] || die "--qos requires a value"; QOS="$2"; shift 2 ;;
+    --allow-active-job-id) [[ $# -ge 2 ]] || die "--allow-active-job-id requires a value"; ALLOW_ACTIVE_JOB_IDS+=("$2"); shift 2 ;;
     --execute) EXECUTE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -103,6 +112,20 @@ for scalar_pair in \
     die "${scalar_pair%%=*} may not contain whitespace"
 done
 [[ "$CPUS" =~ ^[1-9][0-9]*$ ]] || die "--cpus must be a positive integer"
+
+declare -A SEEN_ALLOWED_ACTIVE_JOB_IDS=()
+for job_id in "${ALLOW_ACTIVE_JOB_IDS[@]}"; do
+  [[ "$job_id" =~ ^[1-9][0-9]*$ ]] || \
+    die "--allow-active-job-id must be a positive numeric Slurm job ID"
+  [[ -z "${SEEN_ALLOWED_ACTIVE_JOB_IDS[$job_id]+present}" ]] || \
+    die "--allow-active-job-id may not repeat job ID $job_id"
+  SEEN_ALLOWED_ACTIVE_JOB_IDS["$job_id"]=1
+done
+if ((${#ALLOW_ACTIVE_JOB_IDS[@]})); then
+  mapfile -t ALLOW_ACTIVE_JOB_IDS < <(
+    printf '%s\n' "${ALLOW_ACTIVE_JOB_IDS[@]}" | sort -n
+  )
+fi
 
 for required_file in \
   "$HELPER" \
@@ -161,6 +184,9 @@ MANIFEST_ARGS=(
   --batches-per-rank "$BATCHES_PER_RANK"
   --arms "$ARMS"
 )
+for job_id in "${ALLOW_ACTIVE_JOB_IDS[@]}"; do
+  MANIFEST_ARGS+=(--allow-active-job-id "$job_id")
+done
 
 LOG_DIR="$ANALYSIS_ROOT/_slurm/logs"
 JOB_NAME="dual-tf-posthoc-${EVALUATION_ID:0:65}"
@@ -205,8 +231,9 @@ echo "Evaluation root: $EVALUATION_ROOT (fresh, outside screen)"
 echo "Evaluation commit: $EXPECTED_EVALUATION_COMMIT (clean, corrected)"
 echo "Arms: $ARMS"
 echo "Paired units: 8 ranks x $BATCHES_PER_RANK batch(es)"
-echo "Sources: autonomous, off, oracle_matched, oracle_shuffled"
+echo "Sources: autonomous, off, oracle_matched, oracle_shuffled, autonomous_shuffled"
 echo "NFE: 1, 2, 4, 8"
+echo "Requested active-job allowlist: ${ALLOW_ACTIVE_JOB_IDS[*]:-(empty)}"
 echo "W&B: disabled; resume=false; requeue=false"
 
 if ((EXECUTE == 0)); then
@@ -218,17 +245,37 @@ fi
 command -v sbatch >/dev/null 2>&1 || die "sbatch is unavailable"
 command -v squeue >/dev/null 2>&1 || die "squeue is unavailable"
 
-# A post-training evaluation is submitted only after every user job has
-# finished. This is checked once immediately before creating evaluation state.
-ACTIVE_JOBS="$(
-  squeue \
-    --noheader \
-    --user "${USER:?USER is unset}" \
-    --states=PENDING,RUNNING,CONFIGURING,COMPLETING,SUSPENDED \
-    --format='%i|%T|%j'
-)"
-[[ -z "$ACTIVE_JOBS" ]] || \
-  die "refusing posthoc submission while user jobs are active: ${ACTIVE_JOBS//$'\n'/; }"
+# Enumerate every active job by Slurm's numeric base allocation ID. Array
+# tasks may repeat the same %F and are deliberately deduplicated. Submission
+# proceeds only when this observed set exactly equals the explicit allowlist.
+# Existing jobs are inspected read-only and are never modified.
+OBSERVED_ACTIVE_JOB_IDS=()
+assert_active_job_allowlist() {
+  local active_job_output job_id
+  active_job_output="$(
+    squeue \
+      --noheader \
+      --user "${USER:?USER is unset}" \
+      --format='%F'
+  )" || die "could not enumerate active user jobs"
+  declare -A seen_active_job_ids=()
+  while IFS= read -r job_id; do
+    [[ -n "$job_id" ]] || continue
+    [[ "$job_id" =~ ^[1-9][0-9]*$ ]] || \
+      die "squeue returned a non-numeric active base job ID: $job_id"
+    seen_active_job_ids["$job_id"]=1
+  done <<<"$active_job_output"
+  OBSERVED_ACTIVE_JOB_IDS=()
+  if ((${#seen_active_job_ids[@]})); then
+    mapfile -t OBSERVED_ACTIVE_JOB_IDS < <(
+      printf '%s\n' "${!seen_active_job_ids[@]}" | sort -n
+    )
+  fi
+  [[ "${OBSERVED_ACTIVE_JOB_IDS[*]-}" == "${ALLOW_ACTIVE_JOB_IDS[*]-}" ]] || \
+    die "active user job IDs do not exactly match --allow-active-job-id: observed=[${OBSERVED_ACTIVE_JOB_IDS[*]-}] allowed=[${ALLOW_ACTIVE_JOB_IDS[*]-}]"
+}
+assert_active_job_allowlist
+echo "Active-job coexistence gate passed: [${OBSERVED_ACTIVE_JOB_IDS[*]-}]"
 
 "$PYTHON_BIN" "$HELPER" prepare "${MANIFEST_ARGS[@]}"
 [[ -f "$EVALUATION_MANIFEST" && ! -L "$EVALUATION_MANIFEST" ]] || \
@@ -236,6 +283,11 @@ ACTIVE_JOBS="$(
 mkdir -p "$LOG_DIR"
 [[ -d "$LOG_DIR" && ! -L "$LOG_DIR" ]] || \
   die "Slurm log directory is unavailable or symlinked"
+
+# Source validation may be nontrivial, so close the race window by requiring
+# the exact same active-job set again immediately before calling sbatch.
+assert_active_job_allowlist
+echo "Immediate pre-sbatch active-job gate passed: [${OBSERVED_ACTIVE_JOB_IDS[*]-}]"
 
 JOB_ID="$("${COMMAND[@]}")" || die "Slurm rejected the posthoc evaluation"
 [[ "$JOB_ID" =~ ^[0-9]+([_;][A-Za-z0-9_.%+-]+)?$ ]] || \

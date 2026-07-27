@@ -114,14 +114,19 @@ def make_sampling_conditioning_tf(
     if mode != "shuffled":
         return tf_state
 
-    local_noise_component = tf_sigma_expanded * tf_noise
-    clean_residual = tf_state - local_noise_component
-    conditioning = (
-        roll_across_global_batch(clean_residual) + local_noise_component
-    ).clone()
-    conditioning[:, :, :history_frames] = tf_state[
-        :, :, :history_frames
-    ]
+    conditioning = tf_state.clone()
+    if history_frames == tf_state.shape[2]:
+        return conditioning
+    local_future_noise_component = (
+        tf_sigma_expanded * tf_noise
+    )[:, :, history_frames:]
+    generated_future_clean_residual = (
+        tf_state[:, :, history_frames:] - local_future_noise_component
+    )
+    conditioning[:, :, history_frames:] = (
+        roll_across_global_batch(generated_future_clean_residual)
+        + local_future_noise_component
+    )
     return conditioning
 
 

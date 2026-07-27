@@ -40,6 +40,7 @@ EVALUATION_CONDITION_SOURCES = (
     "off",
     "oracle_matched",
     "oracle_shuffled",
+    "autonomous_shuffled",
 )
 EVALUATION_CONDITION_SOURCE_CODES = {
     source: index
@@ -695,13 +696,34 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     tf_sigma_expanded = self._expand_sigma(
                         tf_batch_sigma, tf_state
                     )
-                    if condition_source == "autonomous":
-                        conditioning_tf = self._sampling_conditioning_tf(
-                            tf_state,
-                            initial_tf_noise,
-                            tf_sigma_expanded,
-                            history_frames,
-                        )
+                    if condition_source in {
+                        "autonomous",
+                        "autonomous_shuffled",
+                    }:
+                        # ``autonomous_shuffled`` is an evaluation-only,
+                        # same-checkpoint intervention.  It never reads
+                        # ``tf_clean``: at every call it keeps this sample's
+                        # corruption noise and observed history, while rolling
+                        # only the generated, noise-subtracted future residual
+                        # across the effective global batch.
+                        #
+                        # Keep the historical ``autonomous`` path byte-for-byte
+                        # equivalent when the new source is not requested.
+                        if condition_source == "autonomous":
+                            conditioning_tf = self._sampling_conditioning_tf(
+                                tf_state,
+                                initial_tf_noise,
+                                tf_sigma_expanded,
+                                history_frames,
+                            )
+                        else:
+                            conditioning_tf = make_sampling_conditioning_tf(
+                                mode="shuffled",
+                                tf_state=tf_state,
+                                tf_noise=initial_tf_noise,
+                                tf_sigma_expanded=tf_sigma_expanded,
+                                history_frames=history_frames,
+                            )
                         use_tf_condition = self.condition_on_tf
                     elif condition_source == "off":
                         conditioning_tf = tf_state

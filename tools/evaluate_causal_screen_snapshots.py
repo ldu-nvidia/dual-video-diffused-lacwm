@@ -38,24 +38,29 @@ import dual_abc_causal_screen as causal
 import dual_abc_pilot as pilot
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 WORLD_SIZE = 8
 COMPLETED_UPDATES = 200
 EVALUATION_ITERATION = 199
 SIGMA_CONVENTION = "1=noise,0=clean"
 BASE_EVALUATION_NOISE_SEED = 20_260_726
 NFE_STEPS = (1, 2, 4, 8)
-CONDITION_SOURCES = (
+SOURCE_SCREEN_CONDITION_SOURCES = (
     "autonomous",
     "off",
     "oracle_matched",
     "oracle_shuffled",
+)
+CONDITION_SOURCES = (
+    *SOURCE_SCREEN_CONDITION_SOURCES,
+    "autonomous_shuffled",
 )
 SOURCE_CODES = {
     "autonomous": 0,
     "off": 1,
     "oracle_matched": 2,
     "oracle_shuffled": 3,
+    "autonomous_shuffled": 4,
 }
 MODE_CODES = {"off": 0, "matched": 1, "shuffled": 2}
 MAX_BATCHES_PER_RANK = 4
@@ -64,24 +69,93 @@ SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 JOB_ID_RE = re.compile(r"^[0-9]+(?:[_.;][A-Za-z0-9_.%+-]+)?$")
+ACTIVE_JOB_ID_RE = re.compile(r"^[1-9][0-9]*$")
 CORRECTION_PATHS = (
     "robot_wm/modeling/dual_diffusion/conditioning.py",
     "projects/latent_action_models/lam/dual_explicit_action_dit_model.py",
 )
 CORRECTION_MARKERS = {
     CORRECTION_PATHS[0]: (
-        "local_noise_component = tf_sigma_expanded * tf_noise",
-        "roll_across_global_batch(clean_residual) + local_noise_component",
+        "local_future_noise_component",
+        "roll_across_global_batch(generated_future_clean_residual)",
     ),
     CORRECTION_PATHS[1]: (
         "initial_tf_noise,",
         "tf_sigma_expanded,",
+        '"autonomous_shuffled"',
     ),
 }
 
 
+def _required_evaluation_tensor_names() -> set[str]:
+    """Return the strict five-source posthoc artifact inventory.
+
+    The immutable training-screen contract intentionally remains four-source.
+    The fifth source exists only in this corrected posthoc evaluator, so do
+    not widen ``causal._required_trajectory_tensor_names()`` and retroactively
+    change what the historical training jobs were required to emit.
+    """
+    required = set(causal._required_trajectory_tensor_names())
+    for nfe in NFE_STEPS:
+        required.update(
+            {
+                f"video_final_autonomous_shuffled_nfe_{nfe}",
+                f"tf_final_autonomous_shuffled_nfe_{nfe}",
+                f"decoded_future_autonomous_shuffled_nfe_{nfe}",
+            }
+        )
+    return required
+
+
 class EvaluationContractError(RuntimeError):
     """Raised when immutable inputs or paired-evaluation contracts differ."""
+
+
+def _validated_allowed_active_job_ids(
+    values: Sequence[str] | None,
+) -> tuple[str, ...]:
+    raw = tuple(values or ())
+    if any(ACTIVE_JOB_ID_RE.fullmatch(value) is None for value in raw):
+        raise EvaluationContractError(
+            "allowed active job IDs must be positive decimal Slurm IDs"
+        )
+    if len(set(raw)) != len(raw):
+        raise EvaluationContractError(
+            "allowed active job IDs must be unique"
+        )
+    canonical = tuple(sorted(raw, key=int))
+    if raw != canonical:
+        raise EvaluationContractError(
+            "allowed active job IDs must be supplied in increasing numeric order"
+        )
+    return canonical
+
+
+def _validate_active_job_coexistence(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise EvaluationContractError(
+            "active-job coexistence provenance must be a mapping"
+        )
+    allowlisted = _validated_allowed_active_job_ids(
+        value.get("allowlisted_active_job_ids")
+    )
+    observed = _validated_allowed_active_job_ids(
+        value.get("active_user_job_ids_observed_at_submission_gate")
+    )
+    expected = {
+        "allowlisted_active_job_ids": list(allowlisted),
+        "active_user_job_ids_observed_at_submission_gate": list(observed),
+        "exact_set_match_required": True,
+        "wildcards_and_job_name_bypasses_supported": False,
+        "existing_jobs_are_read_only_and_untouched": True,
+        "empty_allowlist_requires_no_active_user_jobs": True,
+    }
+    if allowlisted != observed or dict(value) != expected:
+        raise EvaluationContractError(
+            "active-job coexistence provenance must record an exact "
+            "allowlist/observed-ID set match"
+        )
+    return expected
 
 
 def _now() -> str:
@@ -442,8 +516,10 @@ def _validate_corrected_commit(
     return {
         "training_commit_is_ancestor": True,
         "semantic_contract": (
-            "shuffled autonomous TF preserves each local sample's corruption "
-            "noise and shuffles only its noise-subtracted residual"
+            "evaluation source autonomous_shuffled preserves each local "
+            "sample's corruption noise and observed history, shuffles only "
+            "its generated noise-subtracted future residual at every step, "
+            "and never consumes clean hidden-future TF"
         ),
         "files": records,
     }
@@ -510,7 +586,7 @@ def _validate_resolved_evaluation_contract(
             BASE_EVALUATION_NOISE_SEED
         ),
         "model.dual_diffusion.evaluation_condition_sources": list(
-            CONDITION_SOURCES
+            SOURCE_SCREEN_CONDITION_SOURCES
         ),
         "model.dual_diffusion.capture_latent_trajectories": True,
         "model.dual_diffusion.schedule_mode": "tf_leads",
@@ -597,7 +673,9 @@ def _collect_source_inputs(
         "batch_size_per_gpu": 1,
         "evaluation_nfe_steps": list(NFE_STEPS),
         "evaluation_noise_seed": BASE_EVALUATION_NOISE_SEED,
-        "evaluation_condition_sources": list(CONDITION_SOURCES),
+        "evaluation_condition_sources": list(
+            SOURCE_SCREEN_CONDITION_SOURCES
+        ),
     }
     problems = [
         f"schedule.{key}: {screen.get('schedule', {}).get(key)!r} != {wanted!r}"
@@ -877,6 +955,9 @@ def _build_evaluation_manifest(args: argparse.Namespace) -> tuple[Path, dict[str
     )
     batches_per_rank = _validated_batches_per_rank(args.batches_per_rank)
     selected_arms = _selected_arm_names(args.arms)
+    allowed_active_job_ids = _validated_allowed_active_job_ids(
+        args.allow_active_job_id
+    )
     repo_root = _canonical_directory(args.repo_root, "repository root")
     if not (repo_root / ".git").is_dir():
         raise EvaluationContractError(f"not a Git repository: {repo_root}")
@@ -929,6 +1010,18 @@ def _build_evaluation_manifest(args: argparse.Namespace) -> tuple[Path, dict[str
                     for name in selected_arms
                 },
             },
+            "active_job_coexistence": {
+                "allowlisted_active_job_ids": list(
+                    allowed_active_job_ids
+                ),
+                "active_user_job_ids_observed_at_submission_gate": list(
+                    allowed_active_job_ids
+                ),
+                "exact_set_match_required": True,
+                "wildcards_and_job_name_bypasses_supported": False,
+                "existing_jobs_are_read_only_and_untouched": True,
+                "empty_allowlist_requires_no_active_user_jobs": True,
+            },
             "paired_evaluation": {
                 "world_size": WORLD_SIZE,
                 "batches_per_rank": batches_per_rank,
@@ -942,7 +1035,11 @@ def _build_evaluation_manifest(args: argparse.Namespace) -> tuple[Path, dict[str
                 "arm_subset_is_explicit": len(selected_arms) < len(causal.ARMS),
                 "evaluation_iteration": EVALUATION_ITERATION,
                 "nfe_steps": list(NFE_STEPS),
+                "source_screen_condition_sources": list(
+                    SOURCE_SCREEN_CONDITION_SOURCES
+                ),
                 "condition_sources": list(CONDITION_SOURCES),
+                "runtime_condition_source_override": True,
                 "oracle_sources_are_leakage": True,
                 "base_evaluation_noise_seed": BASE_EVALUATION_NOISE_SEED,
                 "model_seed_for_batch": (
@@ -984,6 +1081,9 @@ def command_validate(args: argparse.Namespace) -> int:
                 "paired_unit_count": payload["paired_evaluation"][
                     "paired_unit_count"
                 ],
+                "allowlisted_active_job_ids": payload[
+                    "active_job_coexistence"
+                ]["allowlisted_active_job_ids"],
                 "identity_sha256": payload["identity_sha256"],
             },
             sort_keys=True,
@@ -1021,6 +1121,9 @@ def command_record_submission(args: argparse.Namespace) -> int:
         raise EvaluationContractError("evaluation manifest is invalid")
     if not JOB_ID_RE.fullmatch(args.job_id):
         raise EvaluationContractError("Slurm returned an invalid job ID")
+    coexistence = _validate_active_job_coexistence(
+        manifest.get("active_job_coexistence")
+    )
     payload = _identity_payload(
         {
             "schema_version": SCHEMA_VERSION,
@@ -1032,6 +1135,7 @@ def command_record_submission(args: argparse.Namespace) -> int:
                 "identity_sha256": manifest.get("identity_sha256"),
             },
             "slurm_job_id": args.job_id,
+            "active_job_coexistence": coexistence,
             "requeue": False,
             "resume": False,
         }
@@ -1274,7 +1378,7 @@ def _validate_and_measure_artifacts(
     arm: Mapping[str, Any],
     expected_model_seed: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    required = causal._required_trajectory_tensor_names()
+    required = _required_evaluation_tensor_names()
     missing = sorted(required - set(artifacts))
     invalid_types = {
         key: type(value).__name__
@@ -1372,6 +1476,16 @@ def _validate_and_measure_artifacts(
                 ),
                 **_decoded_metrics(decoded, ground_truth),
             }
+
+    for prefix in ("video_final", "tf_final", "decoded_future"):
+        if not torch.equal(
+            artifacts[f"{prefix}_nfe_1"],
+            artifacts[f"{prefix}_autonomous_shuffled_nfe_1"],
+        ):
+            raise EvaluationContractError(
+                "autonomous_shuffled must be an exact pure-noise endpoint "
+                f"no-op at NFE=1: {prefix}"
+            )
 
     paired_identity = {
         "history_latent_frames": history_frames,
@@ -1519,6 +1633,19 @@ def _save_output_artifact(
             "source_contract": {
                 "nfe_steps": list(NFE_STEPS),
                 "condition_sources": list(CONDITION_SOURCES),
+                "source_screen_condition_sources": list(
+                    SOURCE_SCREEN_CONDITION_SOURCES
+                ),
+                "autonomous_shuffled": {
+                    "same_checkpoint": True,
+                    "uses_clean_hidden_future": False,
+                    "preserves_local_corruption_noise": True,
+                    "preserves_local_observed_history": True,
+                    "rolled_quantity": (
+                        "generated noise-subtracted future TF residual"
+                    ),
+                    "roll_scope": "global 8-rank batch at every denoising step",
+                },
                 "oracle_sources_are_leakage": True,
                 "all_sources_reuse_identical_initial_states": True,
             },
@@ -1601,6 +1728,9 @@ def _validate_runtime_inputs(
         raise EvaluationContractError(
             "evaluation runtime identity differs: " + "; ".join(problems)
         )
+    _validate_active_job_coexistence(
+        manifest.get("active_job_coexistence")
+    )
     _assert_clean_commit(repo_root, expected_evaluation_commit)
     screen_root = _canonical_directory(
         manifest["source_screen"]["screen_root"], "source screen root"
@@ -1708,13 +1838,33 @@ def _instantiate_and_load_model(
     device: torch.device,
 ) -> tuple[torch.nn.Module, torch.dtype, bool, dict[str, Any]]:
     import hydra
-    from omegaconf import OmegaConf
+    from omegaconf import OmegaConf, open_dict
 
     config = OmegaConf.load(config_path)
+    # The completed training screen is an immutable four-source input.  Widen
+    # only this in-memory evaluation coordinate to add the fifth, generated
+    # wrong-content control; the override is parameter-free and therefore
+    # preserves the strict checkpoint key/shape/dtype contract below.
+    with open_dict(config.model.dual_diffusion):
+        config.model.dual_diffusion.evaluation_condition_sources = list(
+            CONDITION_SOURCES
+        )
+    runtime_sources = tuple(
+        str(source)
+        for source in config.model.dual_diffusion.evaluation_condition_sources
+    )
+    if runtime_sources != CONDITION_SOURCES:
+        raise EvaluationContractError(
+            "runtime condition-source override did not resolve exactly"
+        )
     random.seed(int(config.seed))
     np.random.seed(int(config.seed))
     torch.manual_seed(int(config.seed))
     model = hydra.utils.instantiate(config.model)
+    if tuple(model.evaluation_condition_sources) != CONDITION_SOURCES:
+        raise EvaluationContractError(
+            "instantiated model did not retain the five-source runtime override"
+        )
     try:
         snapshot = torch.load(
             snapshot_path,
@@ -1770,6 +1920,11 @@ def _instantiate_and_load_model(
         "gradient_accumulation_steps": 1,
         "strict_key_shape_dtype_match": True,
         "effective_state_gate": effective_gate,
+        "source_screen_condition_sources": list(
+            SOURCE_SCREEN_CONDITION_SOURCES
+        ),
+        "runtime_condition_sources": list(CONDITION_SOURCES),
+        "runtime_override_is_parameter_free": True,
     }
 
 
@@ -2001,6 +2156,9 @@ def command_run(args: argparse.Namespace) -> int:
                             "identity_sha256"
                         ],
                         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+                        "active_job_coexistence": manifest[
+                            "active_job_coexistence"
+                        ],
                         "world_size": WORLD_SIZE,
                         "requeue": False,
                         "resume": False,
@@ -2150,7 +2308,7 @@ def command_run(args: argparse.Namespace) -> int:
                     dtype=dtype,
                     use_amp=use_amp,
                 )
-                # This measures one complete visualize call: all four condition
+                # This measures one complete visualize call: all five condition
                 # sources and every configured NFE. It is aggregate evaluation
                 # cost, not single-video generation latency.
                 torch.distributed.barrier()
@@ -2169,7 +2327,7 @@ def command_run(args: argparse.Namespace) -> int:
                 aggregate_sampling_timing = {
                     "definition": (
                         "synchronized wall-clock for one visualize call "
-                        "containing all 4 condition sources and NFE 1/2/4/8"
+                        "containing all 5 condition sources and NFE 1/2/4/8"
                     ),
                     "interpretation": (
                         "aggregate evaluation cost; not per-sample generation "
@@ -2348,6 +2506,9 @@ def command_run(args: argparse.Namespace) -> int:
                     },
                     "training_commit": manifest["training_commit"],
                     "evaluation_commit": expected_commit,
+                    "active_job_coexistence": manifest[
+                        "active_job_coexistence"
+                    ],
                     "source_inputs_unchanged": True,
                     "wandb_enabled": False,
                     "resume": False,
@@ -2413,6 +2574,16 @@ def _add_manifest_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--analysis-root", required=True)
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--batches-per-rank", type=int, default=1)
+    parser.add_argument(
+        "--allow-active-job-id",
+        action="append",
+        default=[],
+        metavar="NUMERIC_ID",
+        help=(
+            "repeatable exact active Slurm job ID observed and approved by "
+            "the launcher; IDs must be unique and numerically sorted"
+        ),
+    )
     parser.add_argument(
         "--arms",
         default=",".join(arm["name"] for arm in causal.ARMS),

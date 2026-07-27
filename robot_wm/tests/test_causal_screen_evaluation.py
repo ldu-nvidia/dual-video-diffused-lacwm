@@ -95,7 +95,11 @@ def make_artifacts(helper, *, mode: str, seed: int, error: float):
     for source_index, source in enumerate(helper.CONDITION_SOURCES):
         infix = "" if source == "autonomous" else f"_{source}"
         for nfe in helper.NFE_STEPS:
-            scale = error * (1.0 + 0.1 * source_index) / nfe
+            if source == "autonomous_shuffled" and nfe == 1:
+                # The residual-only roll is an exact no-op at sigma=1.
+                scale = error
+            else:
+                scale = error * (1.0 + 0.1 * source_index) / nfe
             artifacts[f"video_final{infix}_nfe_{nfe}"] = (
                 video_clean + scale
             )
@@ -147,6 +151,48 @@ class CausalScreenEvaluationTest(unittest.TestCase):
             self.helper._effective_generator_seed(7, 3),
             self.helper.BASE_EVALUATION_NOISE_SEED + 7 + 8 * 3,
         )
+
+    def test_active_job_allowlist_is_numeric_unique_sorted_and_exact(self):
+        self.assertEqual(
+            self.helper._validated_allowed_active_job_ids(
+                ["472562", "472700"]
+            ),
+            ("472562", "472700"),
+        )
+        for values in (
+            ["*"],
+            ["dual-tf-causal"],
+            ["0"],
+            ["472562_0"],
+            ["472562", "472562"],
+            ["472700", "472562"],
+        ):
+            with self.subTest(values=values):
+                with self.assertRaises(
+                    self.helper.EvaluationContractError
+                ):
+                    self.helper._validated_allowed_active_job_ids(values)
+        valid = {
+            "allowlisted_active_job_ids": ["472562"],
+            "active_user_job_ids_observed_at_submission_gate": ["472562"],
+            "exact_set_match_required": True,
+            "wildcards_and_job_name_bypasses_supported": False,
+            "existing_jobs_are_read_only_and_untouched": True,
+            "empty_allowlist_requires_no_active_user_jobs": True,
+        }
+        self.assertEqual(
+            self.helper._validate_active_job_coexistence(valid),
+            valid,
+        )
+        invalid = dict(valid)
+        invalid[
+            "active_user_job_ids_observed_at_submission_gate"
+        ] = ["472563"]
+        with self.assertRaisesRegex(
+            self.helper.EvaluationContractError,
+            "exact allowlist",
+        ):
+            self.helper._validate_active_job_coexistence(invalid)
 
     def test_arm_subset_is_guarded_and_put_in_fixed_collective_order(self):
         self.assertEqual(
@@ -413,6 +459,40 @@ class CausalScreenEvaluationTest(unittest.TestCase):
             identity["evaluation_condition_sources"],
             list(self.helper.CONDITION_SOURCES),
         )
+        self.assertTrue(
+            torch.equal(
+                artifacts["video_final_nfe_1"],
+                artifacts["video_final_autonomous_shuffled_nfe_1"],
+            )
+        )
+
+    def test_rejects_autonomous_shuffled_that_changes_local_noise_at_nfe_one(
+        self,
+    ):
+        arm = {
+            "name": "matched_s010",
+            "condition_on_tf": True,
+            "condition_mode": "matched",
+            "state_gate_init": 0.1,
+        }
+        artifacts = make_artifacts(
+            self.helper,
+            mode="matched",
+            seed=self.helper._model_noise_seed(0),
+            error=0.2,
+        )
+        artifacts["video_final_autonomous_shuffled_nfe_1"] = (
+            artifacts["video_final_autonomous_shuffled_nfe_1"] + 1
+        )
+        with self.assertRaisesRegex(
+            self.helper.EvaluationContractError,
+            "pure-noise endpoint",
+        ):
+            self.helper._validate_and_measure_artifacts(
+                artifacts,
+                arm=arm,
+                expected_model_seed=self.helper._model_noise_seed(0),
+            )
 
     def test_multiple_batches_are_consumed_by_existing_analyzer(self):
         from tools.analyze_dual_nfe_artifacts import analyze
@@ -522,11 +602,15 @@ class CausalScreenEvaluationTest(unittest.TestCase):
         submit = SUBMIT.read_text(encoding="utf-8")
         slot = SLOT.read_text(encoding="utf-8")
         for fragment in (
-            "--states=PENDING,RUNNING,CONFIGURING,COMPLETING,SUSPENDED",
+            '--user "${USER:?USER is unset}"',
             'git -C "$REPO_ROOT" status --porcelain',
             "--no-requeue",
             "--batches-per-rank",
             "--arms",
+            "--allow-active-job-id",
+            "--format='%F'",
+            "active user job IDs do not exactly match",
+            "wildcard or job-name",
             "W&B: disabled",
             '[[ ! -e "$EVALUATION_ROOT" ]]',
         ):

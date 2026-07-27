@@ -266,7 +266,11 @@ class CompletedEvaluationFixture:
             "arm_subset_is_explicit": True,
             "evaluation_iteration": self.evaluator.EVALUATION_ITERATION,
             "nfe_steps": list(self.evaluator.NFE_STEPS),
+            "source_screen_condition_sources": list(
+                self.evaluator.SOURCE_SCREEN_CONDITION_SOURCES
+            ),
             "condition_sources": list(self.evaluator.CONDITION_SOURCES),
+            "runtime_condition_source_override": True,
             "oracle_sources_are_leakage": True,
             "base_evaluation_noise_seed": (
                 self.evaluator.BASE_EVALUATION_NOISE_SEED
@@ -298,6 +302,14 @@ class CompletedEvaluationFixture:
             arm_root.mkdir(parents=True)
             arm_roots[arm_name] = str(arm_root)
         paired = self._paired_contract()
+        self.coexistence = {
+            "allowlisted_active_job_ids": ["472562"],
+            "active_user_job_ids_observed_at_submission_gate": ["472562"],
+            "exact_set_match_required": True,
+            "wildcards_and_job_name_bypasses_supported": False,
+            "existing_jobs_are_read_only_and_untouched": True,
+            "empty_allowlist_requires_no_active_user_jobs": True,
+        }
         training_repository = self.evaluator._validate_training_repository(
             str(self.training_repo),
             evaluation_repo_root=self.evaluation_repo,
@@ -318,6 +330,7 @@ class CompletedEvaluationFixture:
             "data": self.data,
             "assets": self.assets,
             "source_arm_inventory": self.source_arms,
+            "active_job_coexistence": self.coexistence,
             "arms": {
                 name: self.source_arms[name] for name in self.selected_arms
             },
@@ -343,6 +356,26 @@ class CompletedEvaluationFixture:
         self.manifest = self.evaluator._identity_payload(manifest_unsigned)
         self.manifest_path = self.evaluation_root / self.wrapper.MANIFEST_NAME
         self._write_json(self.manifest_path, self.manifest)
+        self.submission = self.evaluator._identity_payload(
+            {
+                "schema_version": self.evaluator.SCHEMA_VERSION,
+                "kind": self.wrapper.SUBMISSION_KIND,
+                "created_at_utc": "2026-07-26T00:00:30+00:00",
+                "evaluation_manifest": {
+                    "path": str(self.manifest_path),
+                    "sha256": self.evaluator._sha256(self.manifest_path),
+                    "identity_sha256": self.manifest["identity_sha256"],
+                },
+                "slurm_job_id": "999999",
+                "active_job_coexistence": self.coexistence,
+                "requeue": False,
+                "resume": False,
+            }
+        )
+        self._write_json(
+            self.evaluation_root / self.wrapper.SUBMISSION_NAME,
+            self.submission,
+        )
 
         self.input_records = []
         self.output_records = []
@@ -388,6 +421,13 @@ class CompletedEvaluationFixture:
                     "gradient_accumulation_steps": 1,
                     "strict_key_shape_dtype_match": True,
                     "effective_state_gate": arm_spec["state_gate_init"],
+                    "source_screen_condition_sources": list(
+                        self.evaluator.SOURCE_SCREEN_CONDITION_SOURCES
+                    ),
+                    "runtime_condition_sources": list(
+                        self.evaluator.CONDITION_SOURCES
+                    ),
+                    "runtime_override_is_parameter_free": True,
                 }
                 self.output_records.append(
                     self.evaluator._save_output_artifact(
@@ -426,7 +466,8 @@ class CompletedEvaluationFixture:
                 "evaluation_manifest_identity_sha256": self.manifest[
                     "identity_sha256"
                 ],
-                "slurm_job_id": "123",
+                "slurm_job_id": self.submission["slurm_job_id"],
+                "active_job_coexistence": self.coexistence,
                 "world_size": self.evaluator.WORLD_SIZE,
                 "requeue": False,
                 "resume": False,
@@ -449,6 +490,7 @@ class CompletedEvaluationFixture:
                 },
                 "training_commit": self.training_commit,
                 "evaluation_commit": self.evaluation_commit,
+                "active_job_coexistence": self.coexistence,
                 "source_inputs_unchanged": True,
                 "wandb_enabled": False,
                 "resume": False,
@@ -515,9 +557,20 @@ class CompletedEvaluationFixture:
                     name: {
                         "root": str(path),
                         "artifact_count": len(paired_units),
+                        "evaluation_condition_sources": list(
+                            self.evaluator.CONDITION_SOURCES
+                        ),
                     }
                     for name, path in arms.items()
                 },
+            },
+            "aggregate": {
+                "same_checkpoint_autonomous_vs_autonomous_shuffled": {
+                    "nfe_1_exact_endpoint_noop_required": True,
+                    "contrasts": {
+                        name: {"fixture": True} for name in arms
+                    },
+                }
             },
         }
         Path(output).write_text(
@@ -625,6 +678,34 @@ class CompletedEvaluationAnalysisTest(unittest.TestCase):
                 self.wrapper._validate_completed_evaluation(
                     fixture.evaluation_root,
                     expected_completion_identity=expected_identity,
+                )
+
+    def test_submission_active_job_allowlist_must_match_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.fixture(temporary)
+            unsigned = dict(fixture.submission)
+            unsigned.pop("identity_sha256")
+            unsigned["active_job_coexistence"] = {
+                **fixture.coexistence,
+                "allowlisted_active_job_ids": ["472563"],
+                "active_user_job_ids_observed_at_submission_gate": [
+                    "472563"
+                ],
+            }
+            tampered = fixture.evaluator._identity_payload(unsigned)
+            fixture._write_json(
+                fixture.evaluation_root / fixture.wrapper.SUBMISSION_NAME,
+                tampered,
+            )
+            with self.assertRaisesRegex(
+                self.wrapper.CompletedEvaluationError,
+                "submission provenance",
+            ):
+                self.wrapper._validate_completed_evaluation(
+                    fixture.evaluation_root,
+                    expected_completion_identity=fixture.completion[
+                        "identity_sha256"
+                    ],
                 )
 
     def test_artifact_hash_tamper_is_rejected(self):

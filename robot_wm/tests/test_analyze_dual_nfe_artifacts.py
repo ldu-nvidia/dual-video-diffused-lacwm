@@ -23,6 +23,10 @@ ALL_CONDITION_SOURCES = (
     "oracle_matched",
     "oracle_shuffled",
 )
+POSTHOC_CONDITION_SOURCES = (
+    *ALL_CONDITION_SOURCES,
+    "autonomous_shuffled",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -99,11 +103,14 @@ def _tensors(
         "off": 1.5,
         "oracle_matched": 0.2,
         "oracle_shuffled": 0.2 if oracle_equal else 0.8,
+        "autonomous_shuffled": 1.1,
     }
     for source in condition_sources:
         infix = "" if source == "autonomous" else f"_{source}"
         for nfe in NFE_STEPS:
             source_gain = source_gains[source]
+            if source == "autonomous_shuffled" and nfe == 1:
+                source_gain = source_gains["autonomous"]
             latent_error = source_gain * (0.40 / nfe + 0.01 * rank)
             pixel_error = max(1, round(source_gain * (12 / nfe + rank)))
             frame_error = torch.tensor(
@@ -325,6 +332,97 @@ def test_reports_oracle_leakage_source_metrics_and_within_arm_deltas(tmp_path):
     ]
     assert set(per_unit_sources) == set(ALL_CONDITION_SOURCES)
     assert per_unit_sources["oracle_shuffled"]["oracle_leakage"]
+
+
+def test_reports_same_checkpoint_generated_residual_causal_contrast(tmp_path):
+    arms = _matched_arms(
+        tmp_path, condition_sources=POSTHOC_CONDITION_SOURCES
+    )
+    output_dir = tmp_path / "analysis"
+    output_dir.mkdir()
+
+    payload = analyze(
+        arms,
+        baseline="zero",
+        output=output_dir / "result.json",
+        bootstrap_samples=500,
+        bootstrap_seed=123,
+    )
+
+    aggregate = payload["aggregate"][
+        "same_checkpoint_autonomous_vs_autonomous_shuffled"
+    ]
+    assert aggregate["nfe_1_exact_endpoint_noop_required"]
+    assert set(aggregate["contrasts"]) == {"zero", "correct"}
+    correct = aggregate["contrasts"]["correct"]
+    assert correct["same_checkpoint"]
+    assert correct["uses_clean_hidden_future"] is False
+    assert correct["eligible_direct_alignment_contrast"]
+    assert "noise-subtracted future TF residual" in correct["intervention"]
+    assert (
+        correct["nfe"]["1"]["video_future_nmse"]["mean"]
+        == pytest.approx(0.0)
+    )
+    assert correct["nfe"]["4"]["video_future_nmse"]["mean"] < 0
+    assert (
+        correct["relative_nfe"]["4"][
+            "decoded_temporal_difference_mse_unit_range"
+        ]["relative_effect"]
+        < 0
+    )
+    assert "correct" in aggregate["eligible_matched_checkpoint_decisions"]
+    assert not aggregate["contrasts"]["zero"][
+        "eligible_direct_alignment_contrast"
+    ]
+    assert (
+        payload["condition_source_definitions"]["autonomous_shuffled"]
+        .startswith("deployable same-checkpoint causal control")
+    )
+
+
+def test_rejects_non_noop_autonomous_shuffled_at_pure_noise(tmp_path):
+    arms = _matched_arms(
+        tmp_path, condition_sources=POSTHOC_CONDITION_SOURCES
+    )
+    path = _write_artifact(
+        arms["correct"],
+        rank=1,
+        arm_gain=0.5,
+        condition_sources=POSTHOC_CONDITION_SOURCES,
+    )
+    from safetensors.torch import load_file
+
+    tensors = load_file(str(path))
+    tensors["tf_final_autonomous_shuffled_nfe_1"] = (
+        tensors["tf_final_autonomous_shuffled_nfe_1"] + 1
+    )
+    save_file(
+        tensors,
+        str(path),
+        metadata={
+            "iteration": "99",
+            "dataset": "ABC_0",
+            "sigma_convention": SIGMA_CONVENTION,
+        },
+    )
+    sidecar_path = path.with_suffix(".json")
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["safetensors_sha256"] = _sha256(path)
+    sidecar["tensors"] = {
+        key: {"shape": list(value.shape), "dtype": str(value.dtype)}
+        for key, value in tensors.items()
+    }
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    output_dir = tmp_path / "analysis"
+    output_dir.mkdir()
+
+    with pytest.raises(ArtifactValidationError, match="pure-noise NFE=1"):
+        analyze(
+            arms,
+            baseline="zero",
+            output=output_dir / "result.json",
+            bootstrap_samples=100,
+        )
 
 
 def test_reports_direct_same_scale_relative_effects_and_promising_gate(tmp_path):

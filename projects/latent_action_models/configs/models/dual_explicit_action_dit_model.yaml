@@ -51,8 +51,9 @@ dual_diffusion:
   evaluation_nfe_steps: [8]
   evaluation_noise_seed: 20260726
   # Oracle sources are leakage-only diagnostics and remain disabled by
-  # default. Causal-screen configs may enable them to test whether aligned TF
-  # content is usable independently of autonomous TF-denoiser quality.
+  # default. ``autonomous_shuffled`` is also opt-in: it is the deployable
+  # same-checkpoint evaluation control that rolls only generated future TF
+  # residuals while retaining local history and corruption noise.
   evaluation_condition_sources: [autonomous]
   validation_video_sigmas: [0.90, 0.75, 0.50, 0.25]
 forward_model:

@@ -36,7 +36,8 @@ ARTIFACT_NAME_RE = re.compile(r"^latent_trajectory_rank_([0-9]+)[.]safetensors$"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_TENSOR_RE = re.compile(
     r"^(video_final|tf_final|decoded_future)"
-    r"(?:_(off|oracle_matched|oracle_shuffled))?_nfe_([0-9]+)$"
+    r"(?:_(off|oracle_matched|oracle_shuffled|autonomous_shuffled))?"
+    r"_nfe_([0-9]+)$"
 )
 METRIC_DIRECTIONS = {
     "video_future_nmse": "lower",
@@ -51,6 +52,7 @@ EVALUATION_CONDITION_SOURCE_NAMES = {
     1: "off",
     2: "oracle_matched",
     3: "oracle_shuffled",
+    4: "autonomous_shuffled",
 }
 ORACLE_SOURCES = {"oracle_matched", "oracle_shuffled"}
 PROMISING_RELATIVE_IMPROVEMENT = 0.03
@@ -697,6 +699,27 @@ def _analyze_record(
                         ),
                     }
 
+            if "autonomous_shuffled" in declared_sources:
+                # Both samplers begin at sigma=1 with the identical local TF
+                # noise.  The generated clean residual is exactly zero before
+                # the sole NFE=1 call, so the new intervention must be a strict
+                # endpoint no-op.  Fail closed on an implementation that rolls
+                # local noise or consumes hidden-future clean TF.
+                for prefix in (
+                    "video_final",
+                    "tf_final",
+                    "decoded_future",
+                ):
+                    autonomous = handle.get_tensor(f"{prefix}_nfe_1")
+                    shuffled = handle.get_tensor(
+                        f"{prefix}_autonomous_shuffled_nfe_1"
+                    )
+                    if not torch.equal(autonomous, shuffled):
+                        raise ArtifactValidationError(
+                            "autonomous_shuffled must equal autonomous exactly "
+                            f"at the pure-noise NFE=1 endpoint: {prefix}"
+                        )
+
             identity = {
                 "history_latent_frames": history_frames,
                 "video_clean_sha256": _hash_tensor(video_clean),
@@ -1256,6 +1279,7 @@ def analyze(
 
         source_comparisons: dict[str, Any] = {}
         for left, right in (
+            ("autonomous", "autonomous_shuffled"),
             ("autonomous", "off"),
             ("oracle_matched", "off"),
             ("oracle_matched", "oracle_shuffled"),
@@ -1272,6 +1296,20 @@ def analyze(
                 "nfe": {},
                 "relative_nfe": {},
             }
+            if comparison_name == "autonomous_minus_autonomous_shuffled":
+                comparison.update(
+                    {
+                        "strongest_same_checkpoint_causal_contrast": True,
+                        "same_checkpoint": True,
+                        "uses_clean_hidden_future": False,
+                        "intervention": (
+                            "roll only the generated, noise-subtracted future "
+                            "TF residual across the global batch at every "
+                            "denoising step; preserve local corruption noise "
+                            "and observed history"
+                        ),
+                    }
+                )
             for nfe in NFE_STEPS:
                 nfe_key = str(nfe)
                 comparison["nfe"][nfe_key] = {}
@@ -1341,6 +1379,89 @@ def analyze(
                     )
             source_comparisons[comparison_name] = comparison
         within_arm_source_deltas[arm] = source_comparisons
+
+    same_checkpoint_causal_contrasts: dict[str, Any] = {}
+    same_checkpoint_decisions: dict[str, Any] = {}
+    for arm in sorted(inventories):
+        contrast = within_arm_source_deltas[arm].get(
+            "autonomous_minus_autonomous_shuffled"
+        )
+        if contrast is None:
+            continue
+        intervention = analyzed[arm][ordered_pairs[0]]["intervention"]
+        eligible = (
+            intervention["condition_on_tf"]
+            and intervention["condition_mode"] == "matched"
+        )
+        same_checkpoint_causal_contrasts[arm] = {
+            **contrast,
+            "checkpoint_condition_mode": intervention["condition_mode"],
+            "checkpoint_condition_on_tf": intervention["condition_on_tf"],
+            "eligible_direct_alignment_contrast": eligible,
+            "eligibility_reason": (
+                "autonomous uses local generated TF while "
+                "autonomous_shuffled rolls only generated future residual"
+                if eligible
+                else (
+                    "TF injection is disabled"
+                    if not intervention["condition_on_tf"]
+                    else (
+                        "the checkpoint's autonomous source is already "
+                        "shuffled by its training condition mode"
+                    )
+                )
+            ),
+        }
+        if not eligible:
+            continue
+        oracle_comparison = within_arm_source_deltas[arm].get(
+            "oracle_matched_minus_oracle_shuffled"
+        )
+        oracle_relative_nfe = (
+            oracle_comparison.get("relative_nfe")
+            if isinstance(oracle_comparison, dict)
+            else None
+        )
+        match = SCALED_ARM_NAME_RE.fullmatch(arm)
+        scale = f"s{match.group(2)}" if match is not None else "unscaled"
+        same_checkpoint_decisions[arm] = _preregistered_decision(
+            contrast["relative_nfe"],
+            scale=scale,
+            oracle_relative_nfe=oracle_relative_nfe,
+        )
+        same_checkpoint_causal_contrasts[arm][
+            "preregistered_decision"
+        ] = same_checkpoint_decisions[arm]
+
+    if any(
+        decision["criteria"]["literal_preregistered_metric_gate_pass"]
+        for decision in same_checkpoint_decisions.values()
+    ):
+        same_checkpoint_classification = (
+            "promising_metric_gate_at_one_or_more_matched_checkpoints"
+        )
+    elif any(
+        decision["harm_diagnostic"]["symmetric_material_harm_signal"]
+        for decision in same_checkpoint_decisions.values()
+    ):
+        same_checkpoint_classification = (
+            "harm_metric_signal_at_one_or_more_matched_checkpoints"
+        )
+    elif any(
+        decision["equivalence_diagnostic"][
+            "scoped_negative_metric_component_pass"
+        ]
+        for decision in same_checkpoint_decisions.values()
+    ):
+        same_checkpoint_classification = (
+            "scoped_null_metric_equivalence_requires_exposure"
+        )
+    elif same_checkpoint_decisions:
+        same_checkpoint_classification = "inconclusive"
+    else:
+        same_checkpoint_classification = (
+            "unavailable_no_eligible_matched_checkpoint"
+        )
 
     arm_aggregates: dict[str, Any] = {}
     for arm in sorted(inventories):
@@ -1649,9 +1770,11 @@ def analyze(
     preregistered_decisions = {
         "schema_version": 1,
         "comparison": (
-            "autonomous matched minus autonomous shuffled at identical "
-            "fixed state scale"
+            "autonomous sampling from the separately matched-trained model "
+            "minus autonomous sampling from the separately shuffled-trained "
+            "model at identical fixed state scale"
         ),
+        "cross_checkpoint_training_intervention": True,
         "same_scale": same_scale_decisions,
         "overall_metric_classification": overall_metric_classification,
         "exposure_qualification_is_external": True,
@@ -1708,6 +1831,12 @@ def analyze(
         "condition_source_definitions": {
             "autonomous": (
                 "deployable joint sampler using its independently denoised TF state"
+            ),
+            "autonomous_shuffled": (
+                "deployable same-checkpoint causal control that preserves each "
+                "sample's observed history and local corruption noise while "
+                "rolling only the generated noise-subtracted future TF "
+                "residual across the global batch at every denoising step"
             ),
             "off": "same trained model sampled with TF-to-video injection disabled",
             "oracle_matched": (
@@ -1794,6 +1923,26 @@ def analyze(
             "preregistered_decisions": preregistered_decisions,
             "within_arm_condition_sources": within_arm_condition_sources,
             "within_arm_source_deltas": within_arm_source_deltas,
+            "same_checkpoint_autonomous_vs_autonomous_shuffled": {
+                "definition": (
+                    "autonomous minus autonomous_shuffled within one fixed "
+                    "checkpoint; this is the strongest clean-future-free "
+                    "causal test of whether aligned generated TF content helps"
+                ),
+                "paired_by": (
+                    "identical checkpoint, dataset/rank, initial video state, "
+                    "local TF noise, observed history, schedule, and NFE"
+                ),
+                "nfe_1_exact_endpoint_noop_required": True,
+                "contrasts": same_checkpoint_causal_contrasts,
+                "eligible_matched_checkpoint_decisions": (
+                    same_checkpoint_decisions
+                ),
+                "overall_metric_classification": (
+                    same_checkpoint_classification
+                ),
+                "exposure_qualification_is_external": True,
+            },
         },
     }
     _exclusive_json(output_path, payload)

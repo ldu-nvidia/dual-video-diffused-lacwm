@@ -29,10 +29,12 @@ import analyze_dual_nfe_artifacts as generic
 import evaluate_causal_screen_snapshots as evaluator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MANIFEST_NAME = "evaluation_manifest.json"
+SUBMISSION_NAME = "slurm_submission.json"
 COMPLETION_NAME = "evaluation_complete.json"
 MANIFEST_KIND = "dual_abc_tf_causal_screen_posthoc_evaluation"
+SUBMISSION_KIND = "dual_abc_tf_causal_screen_posthoc_submission"
 COMPLETION_KIND = "dual_abc_tf_causal_screen_posthoc_evaluation_complete"
 INPUT_KIND = "dual_abc_tf_causal_screen_posthoc_input"
 ARTIFACT_KIND = "dual_abc_tf_causal_screen_posthoc_artifact"
@@ -394,7 +396,11 @@ def _selected_arm_contract(
     expected_paired = {
         "batch_size": 1,
         "nfe_steps": list(evaluator.NFE_STEPS),
+        "source_screen_condition_sources": list(
+            evaluator.SOURCE_SCREEN_CONDITION_SOURCES
+        ),
         "condition_sources": list(evaluator.CONDITION_SOURCES),
+        "runtime_condition_source_override": True,
         "oracle_sources_are_leakage": True,
         "base_evaluation_noise_seed": evaluator.BASE_EVALUATION_NOISE_SEED,
         "sigma_convention": evaluator.SIGMA_CONVENTION,
@@ -650,6 +656,11 @@ def _validate_output_sidecar(
         "gradient_accumulation_steps": 1,
         "strict_key_shape_dtype_match": True,
         "effective_state_gate": arm.get("state_gate_init"),
+        "source_screen_condition_sources": list(
+            evaluator.SOURCE_SCREEN_CONDITION_SOURCES
+        ),
+        "runtime_condition_sources": list(evaluator.CONDITION_SOURCES),
+        "runtime_override_is_parameter_free": True,
     }
     if any(
         snapshot.get(key) != value
@@ -660,10 +671,22 @@ def _validate_output_sidecar(
         sidecar.get("source_contract"),
         "artifact source contract",
     )
+    expected_autonomous_shuffled = {
+        "same_checkpoint": True,
+        "uses_clean_hidden_future": False,
+        "preserves_local_corruption_noise": True,
+        "preserves_local_observed_history": True,
+        "rolled_quantity": "generated noise-subtracted future TF residual",
+        "roll_scope": "global 8-rank batch at every denoising step",
+    }
     if (
         source_contract.get("nfe_steps") != list(evaluator.NFE_STEPS)
         or source_contract.get("condition_sources")
         != list(evaluator.CONDITION_SOURCES)
+        or source_contract.get("source_screen_condition_sources")
+        != list(evaluator.SOURCE_SCREEN_CONDITION_SOURCES)
+        or source_contract.get("autonomous_shuffled")
+        != expected_autonomous_shuffled
         or source_contract.get("oracle_sources_are_leakage") is not True
         or source_contract.get("all_sources_reuse_identical_initial_states")
         is not True
@@ -891,29 +914,63 @@ def _validate_completed_evaluation(
         evaluation_root / MANIFEST_NAME,
         "evaluation manifest",
     )
+    submission_path = _canonical_file(
+        evaluation_root / SUBMISSION_NAME,
+        "Slurm submission provenance",
+    )
     completion_path = _canonical_file(
         evaluation_root / COMPLETION_NAME,
         "evaluation completion",
     )
     if (
         manifest_path.parent != evaluation_root
+        or submission_path.parent != evaluation_root
         or completion_path.parent != evaluation_root
     ):
         _fail("manifest and completion must be direct evaluation-root children")
     manifest = _identity_json(manifest_path, "evaluation manifest")
+    submission = _identity_json(
+        submission_path,
+        "Slurm submission provenance",
+    )
     completion = _identity_json(completion_path, "evaluation completion")
     if manifest.get("kind") != MANIFEST_KIND:
         _fail("evaluation manifest kind differs")
     if completion.get("kind") != COMPLETION_KIND:
         _fail("evaluation completion kind differs")
+    if submission.get("kind") != SUBMISSION_KIND:
+        _fail("Slurm submission kind differs")
     if manifest.get("schema_version") != evaluator.SCHEMA_VERSION:
         _fail("evaluation manifest schema differs")
     if completion.get("schema_version") != evaluator.SCHEMA_VERSION:
         _fail("evaluation completion schema differs")
+    if submission.get("schema_version") != evaluator.SCHEMA_VERSION:
+        _fail("Slurm submission schema differs")
     if manifest.get("evaluation_root") != str(evaluation_root):
         _fail("manifest evaluation root differs")
     if completion.get("identity_sha256") != expected_identity:
         _fail("evaluation completion does not match the externally expected identity")
+    try:
+        coexistence = evaluator._validate_active_job_coexistence(
+            manifest.get("active_job_coexistence")
+        )
+    except Exception as exc:
+        raise CompletedEvaluationError(str(exc)) from exc
+    expected_manifest_reference = {
+        "path": str(manifest_path),
+        "sha256": _sha256(manifest_path),
+        "identity_sha256": manifest.get("identity_sha256"),
+    }
+    if (
+        submission.get("evaluation_manifest")
+        != expected_manifest_reference
+        or submission.get("active_job_coexistence") != coexistence
+        or submission.get("requeue") is not False
+        or submission.get("resume") is not False
+        or not isinstance(submission.get("slurm_job_id"), str)
+        or evaluator.JOB_ID_RE.fullmatch(submission["slurm_job_id"]) is None
+    ):
+        _fail("Slurm submission provenance differs")
 
     execution_path = _canonical_file(
         evaluation_root / "execution_started.json",
@@ -930,6 +987,8 @@ def _validate_completed_evaluation(
         "evaluation_manifest_identity_sha256": manifest.get(
             "identity_sha256"
         ),
+        "slurm_job_id": submission["slurm_job_id"],
+        "active_job_coexistence": coexistence,
         "world_size": evaluator.WORLD_SIZE,
         "requeue": False,
         "resume": False,
@@ -945,16 +1004,12 @@ def _validate_completed_evaluation(
         completion.get("evaluation_manifest"),
         "completion manifest reference",
     )
-    expected_manifest_reference = {
-        "path": str(manifest_path),
-        "sha256": _sha256(manifest_path),
-        "identity_sha256": manifest.get("identity_sha256"),
-    }
     if completion_manifest != expected_manifest_reference:
         _fail("completion does not reference the exact evaluation manifest")
     expected_completion = {
         "training_commit": manifest.get("training_commit"),
         "evaluation_commit": manifest.get("evaluation_commit"),
+        "active_job_coexistence": coexistence,
         "source_inputs_unchanged": True,
         "wandb_enabled": False,
         "resume": False,
@@ -1004,6 +1059,9 @@ def _validate_completed_evaluation(
         "manifest_path": manifest_path,
         "manifest": manifest,
         "manifest_sha256": _sha256(manifest_path),
+        "submission_path": submission_path,
+        "submission": submission,
+        "submission_sha256": _sha256(submission_path),
         "completion_path": completion_path,
         "completion": completion,
         "completion_sha256": _sha256(completion_path),
@@ -1093,8 +1151,31 @@ def _validate_generic_result(
             arm.get("root") != str(validated["arm_roots"][name])
             or arm.get("artifact_count")
             != inventory["paired_unit_count"]
+            or arm.get("evaluation_condition_sources")
+            != list(evaluator.CONDITION_SOURCES)
         ):
             _fail(f"generic analyzer returned different provenance for {name}")
+    aggregate = _mapping(payload.get("aggregate"), "generic aggregate")
+    same_checkpoint = _mapping(
+        aggregate.get(
+            "same_checkpoint_autonomous_vs_autonomous_shuffled"
+        ),
+        "same-checkpoint autonomous-shuffled analysis",
+    )
+    if (
+        same_checkpoint.get("nfe_1_exact_endpoint_noop_required") is not True
+        or set(
+            _mapping(
+                same_checkpoint.get("contrasts"),
+                "same-checkpoint contrasts",
+            )
+        )
+        != set(validated["arm_order"])
+    ):
+        _fail(
+            "generic analyzer omitted the mandatory same-checkpoint "
+            "autonomous-shuffled contrast"
+        )
 
 
 def analyze_completed_evaluation(
@@ -1165,6 +1246,7 @@ def analyze_completed_evaluation(
     )
     for key in (
         "manifest_sha256",
+        "submission_sha256",
         "completion_sha256",
         "execution_sha256",
         "arm_order",
@@ -1202,6 +1284,19 @@ def analyze_completed_evaluation(
                     "path": str(validated["completion_path"]),
                     "sha256": validated["completion_sha256"],
                     "identity_sha256": expected_completion_identity,
+                },
+                "submission": {
+                    "path": str(validated["submission_path"]),
+                    "sha256": validated["submission_sha256"],
+                    "identity_sha256": validated["submission"][
+                        "identity_sha256"
+                    ],
+                    "slurm_job_id": validated["submission"][
+                        "slurm_job_id"
+                    ],
+                    "active_job_coexistence": validated["submission"][
+                        "active_job_coexistence"
+                    ],
                 },
                 "execution_started": {
                     "path": str(validated["execution_path"]),
