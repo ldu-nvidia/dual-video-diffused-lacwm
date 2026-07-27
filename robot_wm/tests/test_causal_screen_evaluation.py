@@ -223,6 +223,94 @@ class CausalScreenEvaluationTest(unittest.TestCase):
         self.assertEqual(second, "MultiDatasetABC_0__batch_001")
         self.assertNotEqual(first, second)
 
+    def test_resolved_contract_reads_real_yaml_list_indices_fail_closed(self):
+        from omegaconf import OmegaConf
+
+        arm = {
+            "name": "matched_s010",
+            "condition_on_tf": True,
+            "condition_mode": "matched",
+            "state_gate_init": 0.1,
+        }
+        payload = {
+            "seed": 1234,
+            "viz_data_loader": [
+                {
+                    "_target_": (
+                        "torchdata.stateful_dataloader.StatefulDataLoader"
+                    ),
+                    "batch_size": 1,
+                }
+            ],
+            "viz_dataset": {
+                "img_augment": False,
+                "datasets": {"ABC": {"subsample_traj": 1000}},
+            },
+            "model": {
+                "dual_diffusion": {
+                    "enabled": True,
+                    "condition_on_tf": True,
+                    "condition_mode": "matched",
+                    "state_gate_init": 0.1,
+                    "state_gate_trainable": False,
+                    "evaluation_nfe_steps": [1, 2, 4, 8],
+                    "evaluation_noise_seed": 20260726,
+                    "evaluation_condition_sources": [
+                        "autonomous",
+                        "off",
+                        "oracle_matched",
+                        "oracle_shuffled",
+                    ],
+                    "capture_latent_trajectories": True,
+                    "schedule_mode": "tf_leads",
+                    "tf_lead_logit": 1.0,
+                },
+                "forward_model": {
+                    "dual_diffusion": {"state_gate_init": 0.1}
+                },
+            },
+            "trainer": {
+                "config": {"dtype": "bfloat16", "amp_enabled": True}
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "resolved_config.yaml"
+            OmegaConf.save(OmegaConf.create(payload), path)
+            _, record = self.helper._validate_resolved_evaluation_contract(
+                path, arm=arm
+            )
+            self.assertEqual(record["viz_loader"]["batch_size"], 1)
+            self.assertEqual(
+                self.helper._config_value(
+                    OmegaConf.load(path), "viz_data_loader.0.batch_size"
+                ),
+                1,
+            )
+
+            broken = OmegaConf.create(payload)
+            del broken.viz_data_loader[0].batch_size
+            OmegaConf.save(broken, path)
+            with self.assertRaisesRegex(
+                self.helper.EvaluationContractError,
+                r"missing viz_data_loader\.0\.batch_size",
+            ):
+                self.helper._validate_resolved_evaluation_contract(
+                    path, arm=arm
+                )
+
+        config = OmegaConf.create(payload)
+        for dotted in (
+            "viz_data_loader.1.batch_size",
+            "viz_data_loader.batch_size",
+            "viz_data_loader.00.batch_size",
+        ):
+            with self.subTest(dotted=dotted):
+                with self.assertRaisesRegex(
+                    self.helper.EvaluationContractError,
+                    "resolved configuration is missing",
+                ):
+                    self.helper._config_value(config, dotted)
+
     def test_strict_state_contract_rejects_key_shape_and_dtype_changes(self):
         model_state = TinyStateModel().state_dict()
         self.helper._strict_state_dict_contract(

@@ -537,28 +537,45 @@ def _file_record(path: Path) -> dict[str, Any]:
     }
 
 
+def _config_path_value(config: Any, dotted: str) -> Any:
+    """Resolve a dotted path through mappings and explicitly indexed lists."""
+    current = config
+    for part in dotted.split("."):
+        if isinstance(current, Mapping):
+            if part not in current:
+                raise EvaluationContractError(
+                    f"resolved configuration is missing {dotted}"
+                )
+            current = current[part]
+            continue
+        if (
+            isinstance(current, Sequence)
+            and not isinstance(current, (str, bytes, bytearray))
+            and part.isdecimal()
+            and str(int(part)) == part
+        ):
+            index = int(part)
+            if index >= len(current):
+                raise EvaluationContractError(
+                    f"resolved configuration is missing {dotted}"
+                )
+            current = current[index]
+            continue
+        raise EvaluationContractError(
+            f"resolved configuration is missing {dotted}"
+        )
+    return current
+
+
 def _config_container(config: Any, dotted: str) -> Any:
     from omegaconf import OmegaConf
 
-    current = config
-    for part in dotted.split("."):
-        if part not in current:
-            raise EvaluationContractError(
-                f"resolved configuration is missing {dotted}"
-            )
-        current = current[part]
+    current = _config_path_value(config, dotted)
     return OmegaConf.to_container(current, resolve=True)
 
 
 def _config_value(config: Any, dotted: str) -> Any:
-    current = config
-    for part in dotted.split("."):
-        if part not in current:
-            raise EvaluationContractError(
-                f"resolved configuration is missing {dotted}"
-            )
-        current = current[part]
-    return current
+    return _config_path_value(config, dotted)
 
 
 def _hash_config_value(value: Any) -> str:
