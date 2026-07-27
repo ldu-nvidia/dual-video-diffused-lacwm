@@ -1,11 +1,14 @@
+import pytest
 import torch
 
 from robot_wm.modeling.dual_diffusion.flow import (
     DualClockSampler,
+    cascaded_step_counts,
     corrupt_flow,
     derive_tf_sigma,
     euler_flow_step,
     make_paired_sigma_schedule,
+    pair_native_cascaded_sigma_schedule,
     pair_video_sigma_schedule,
 )
 
@@ -61,6 +64,9 @@ def test_cascaded_noised_training_contract():
     assert tf_examples.any() and video_examples.any()
     assert torch.all(clocks.video_sigma[tf_examples] == 1)
     assert torch.all(clocks.tf_sigma[video_examples] <= 0.25)
+    assert not DualClockSampler(
+        mode="tf_first_cascaded_noised"
+    ).state_dict()
 
 
 def test_inference_schedules_have_correct_endpoints_and_order():
@@ -79,6 +85,45 @@ def test_inference_schedules_have_correct_endpoints_and_order():
     video_updates = torch.diff(cascaded.video) != 0
     tf_updates = torch.diff(cascaded.time_frequency) != 0
     assert not torch.any(video_updates & tf_updates)
+
+
+def test_native_cascade_preserves_every_video_scheduler_node():
+    native_video = torch.tensor([1.0, 0.82, 0.31, 0.0])
+    schedule = pair_native_cascaded_sigma_schedule(
+        native_video,
+        total_steps=8,
+        tf_fraction=0.6,
+    )
+    tf_steps, video_steps = cascaded_step_counts(8, tf_fraction=0.6)
+
+    assert (tf_steps, video_steps) == (5, 3)
+    assert schedule.num_steps == 8
+    torch.testing.assert_close(
+        schedule.video[tf_steps:],
+        native_video,
+        rtol=0,
+        atol=0,
+    )
+    assert torch.all(schedule.video[: tf_steps + 1] == 1)
+    assert torch.all(schedule.time_frequency[tf_steps:] == 0)
+    video_updates = torch.diff(schedule.video) != 0
+    tf_updates = torch.diff(schedule.time_frequency) != 0
+    assert not torch.any(video_updates & tf_updates)
+
+
+def test_native_cascade_rejects_one_nfe_and_invalid_native_schedule():
+    with pytest.raises(ValueError, match="at least two"):
+        cascaded_step_counts(1)
+    with pytest.raises(ValueError, match="video_steps"):
+        pair_native_cascaded_sigma_schedule(
+            torch.tensor([1.0, 0.0]),
+            total_steps=4,
+        )
+    with pytest.raises(ValueError, match="endpoints"):
+        pair_native_cascaded_sigma_schedule(
+            torch.tensor([0.9, 0.0]),
+            total_steps=2,
+        )
 
 
 def test_derived_tf_clock_preserves_native_video_schedule_and_exact_endpoints():

@@ -1,8 +1,8 @@
-"""Causal explicit-action LACWM with a jointly denoised TF state.
+"""Causal explicit-action LACWM with a jointly denoised auxiliary video state.
 
-The two pilot arms instantiate this exact class and train the same TF objective.
-Their sole causal difference is ``condition_on_tf``: whether the current noisy
-or generated TF state can enter Wan's shared video-token stream.
+The historical pilot uses an overlapping ``tf_leads`` clock. Research configs
+may instead select a strict Latent-Forcing-style TF-first cascade while keeping
+the current production-safe defaults and parameter schema unchanged.
 
 LACWM clock convention: sigma=1 is Gaussian noise and sigma=0 is clean data.
 """
@@ -24,8 +24,11 @@ from robot_wm.modeling.dual_diffusion.conditioning import (
     roll_across_global_batch,
 )
 from robot_wm.modeling.dual_diffusion.flow import (
+    DualClockSampler,
+    cascaded_step_counts,
     derive_tf_sigma,
     euler_flow_step,
+    pair_native_cascaded_sigma_schedule,
     pair_video_sigma_schedule,
 )
 from robot_wm.modeling.networks.wan_forward_model import DualWanOutput
@@ -48,7 +51,7 @@ EVALUATION_CONDITION_SOURCE_CODES = {
 
 
 class DualExplicitActionDiTModel(ExplicitActionDiTModel):
-    """Explicit-action world model with video and causal-RFFT flow states."""
+    """Explicit-action world model with video and causal auxiliary flow states."""
 
     def __init__(
         self,
@@ -83,6 +86,27 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self.tf_schedule_mode = str(config.get("schedule_mode", "tf_leads"))
         self.tf_lead_logit = float(config.get("tf_lead_logit", 1.0))
         self.tf_loss_weight = float(config.get("tf_loss_weight", 1.0))
+        self.cascade_tf_loss_probability = float(
+            config.get("cascade_tf_loss_probability", 0.4)
+        )
+        self.cascade_logit_mean = float(
+            config.get("cascade_logit_mean", 0.0)
+        )
+        self.cascade_logit_std = float(
+            config.get("cascade_logit_std", 1.0)
+        )
+        self.cascade_tf_condition_max_sigma = float(
+            config.get("cascade_tf_condition_max_sigma", 0.25)
+        )
+        self.cascade_validation_tf_sigma = float(
+            config.get(
+                "cascade_validation_tf_sigma",
+                0.5 * self.cascade_tf_condition_max_sigma,
+            )
+        )
+        self.cascade_inference_tf_fraction = float(
+            config.get("cascade_inference_tf_fraction", 0.5)
+        )
         self.evaluation_nfe_steps = tuple(
             sorted(
                 {
@@ -135,16 +159,49 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 "validation_video_sigmas", (0.90, 0.75, 0.50, 0.25)
             )
         )
-        if self.tf_schedule_mode not in {"aligned", "tf_leads"}:
+        if self.tf_schedule_mode not in {
+            "aligned",
+            "tf_leads",
+            "tf_first_cascaded",
+        }:
             raise ValueError(
-                "pilot supports schedule_mode in {'aligned', 'tf_leads'}"
+                "schedule_mode must be aligned, tf_leads, or "
+                "tf_first_cascaded"
+            )
+        if (
+            self.tf_schedule_mode == "tf_first_cascaded"
+            and 1 in self.evaluation_nfe_steps
+        ):
+            raise ValueError(
+                "strict TF-first cascades require at least two NFE; remove NFE=1"
             )
         if self.tf_loss_weight < 0:
             raise ValueError("tf_loss_weight must be non-negative")
+        if not (
+            0
+            <= self.cascade_validation_tf_sigma
+            <= self.cascade_tf_condition_max_sigma
+            <= 1
+        ):
+            raise ValueError(
+                "cascade validation/max TF sigmas must satisfy "
+                "0 <= validation <= max <= 1"
+            )
+        if not 0 < self.cascade_inference_tf_fraction < 1:
+            raise ValueError(
+                "cascade_inference_tf_fraction must lie strictly between 0 and 1"
+            )
         if not self.validation_video_sigmas or any(
             not 0 <= sigma <= 1 for sigma in self.validation_video_sigmas
         ):
             raise ValueError("validation_video_sigmas must lie in [0,1]")
+        self._cascade_clock_sampler = DualClockSampler(
+            mode="tf_first_cascaded_noised",
+            logit_mean=self.cascade_logit_mean,
+            logit_std=self.cascade_logit_std,
+            tf_loss_probability=self.cascade_tf_loss_probability,
+            tf_condition_max_sigma=self.cascade_tf_condition_max_sigma,
+        )
         self._visualization_artifacts = None
         logger.info(
             "DualExplicitActionDiTModel: condition_mode=%s, schedule=%s, "
@@ -168,7 +225,43 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
 
     def _paired_training_clocks(
         self, batch_size: int, device, dtype
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        if self.training and self.tf_schedule_mode == "tf_first_cascaded":
+            native_timesteps, native_video_sigma = (
+                self._sample_native_cascade_video_clocks(
+                    batch_size,
+                    device=device,
+                )
+            )
+            clocks = self._cascade_clock_sampler(
+                batch_size,
+                device=device,
+                dtype=dtype,
+                native_video_sigma=native_video_sigma,
+            )
+            tf_examples = clocks.tf_loss_weight.bool()
+            schedule_timesteps = self.noise_scheduler.timesteps.to(
+                device=device
+            )
+            timesteps = torch.where(
+                tf_examples,
+                schedule_timesteps[0].expand_as(native_timesteps),
+                native_timesteps,
+            )
+            return (
+                timesteps,
+                clocks.video_sigma,
+                clocks.tf_sigma,
+                clocks.video_loss_weight,
+                clocks.tf_loss_weight,
+            )
+
         if not self.training and self.validation_video_sigmas:
             requested = torch.tensor(
                 self.validation_video_sigmas, device=device, dtype=torch.float32
@@ -192,12 +285,68 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 timesteps, n_dim=2, dtype=dtype, device=device
             )
             video_sigma = expanded[:, 0]
-        tf_sigma = derive_tf_sigma(
-            video_sigma.float(),
-            mode=self.tf_schedule_mode,
-            tf_lead_logit=self.tf_lead_logit,
-        ).to(dtype=dtype)
-        return timesteps, video_sigma, tf_sigma
+        if self.tf_schedule_mode == "tf_first_cascaded":
+            # Validation is a deterministic teacher-forced video diagnostic:
+            # evaluate every requested video noise bin with the same imperfect,
+            # near-clean TF condition. The TF prediction remains available for
+            # telemetry, but its out-of-branch loss must not enter checkpoint
+            # selection because TF is supervised only with pure-noise video.
+            tf_sigma = torch.full_like(
+                video_sigma,
+                self.cascade_validation_tf_sigma,
+            )
+        else:
+            tf_sigma = derive_tf_sigma(
+                video_sigma.float(),
+                mode=self.tf_schedule_mode,
+                tf_lead_logit=self.tf_lead_logit,
+            ).to(dtype=dtype)
+        ones = torch.ones_like(video_sigma)
+        tf_loss_weight = (
+            torch.zeros_like(video_sigma)
+            if self.tf_schedule_mode == "tf_first_cascaded"
+            else ones
+        )
+        return timesteps, video_sigma, tf_sigma, ones, tf_loss_weight
+
+    def _sample_native_cascade_video_clocks(
+        self,
+        batch_size: int,
+        *,
+        device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample the cascade video branch with Wan's native index law.
+
+        Production Wan samples a logit-normal schedule *index*, whose native
+        sigma already includes the configured scheduler shift. Sampling sigma
+        directly would both omit that shift and reverse the meaning of a
+        nonzero logit mean.
+        """
+        schedule_timesteps = self.noise_scheduler.timesteps.to(device=device)
+        schedule_sigmas = self.noise_scheduler.sigmas.to(
+            device=device,
+            dtype=torch.float32,
+        )
+        if (
+            schedule_timesteps.ndim != 1
+            or schedule_timesteps.numel() < 1
+            or schedule_sigmas.ndim != 1
+            or schedule_sigmas.numel() < schedule_timesteps.numel()
+        ):
+            raise RuntimeError("native Wan training schedule is malformed")
+        schedule_fraction = torch.normal(
+            mean=self.cascade_logit_mean,
+            std=self.cascade_logit_std,
+            size=(batch_size,),
+        )
+        schedule_fraction = torch.sigmoid(schedule_fraction)
+        indices = (
+            schedule_fraction * schedule_timesteps.numel()
+        ).long().clamp(
+            0,
+            schedule_timesteps.numel() - 1,
+        ).to(device=device)
+        return schedule_timesteps[indices], schedule_sigmas[indices]
 
     @staticmethod
     def _masked_per_sample_mse(
@@ -227,6 +376,26 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         )
         denominator = (clean.float().square() * weights).sum(dim=reduce_dims)
         return numerator / denominator.clamp_min(eps)
+
+    @staticmethod
+    def _branch_weighted_mean(
+        per_sample: torch.Tensor,
+        branch_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Average a branch-selected loss over the unchanged global batch."""
+        if (
+            per_sample.ndim != 1
+            or branch_weight.ndim != 1
+            or per_sample.shape != branch_weight.shape
+        ):
+            raise ValueError(
+                "per-sample loss and branch weight must have identical [B] shape"
+            )
+        if not bool(torch.isfinite(branch_weight).all()) or bool(
+            (branch_weight < 0).any()
+        ):
+            raise ValueError("branch weights must be finite and nonnegative")
+        return (per_sample * branch_weight.to(per_sample.dtype)).mean()
 
     @torch.no_grad()
     def _tf_clean(self, rgb: torch.Tensor, latent_shape) -> torch.Tensor:
@@ -334,7 +503,13 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
 
         # Preserve the production video RNG/scheduler path, then draw TF noise.
         video_noise = torch.randn_like(video_clean)
-        timesteps, video_sigma, tf_sigma = self._paired_training_clocks(
+        (
+            timesteps,
+            video_sigma,
+            tf_sigma,
+            video_loss_weight,
+            tf_loss_weight,
+        ) = self._paired_training_clocks(
             batch_size, device, video_clean.dtype
         )
         video_sigma_expanded = self._expand_sigma(video_sigma, video_clean)
@@ -389,8 +564,14 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             tf_target[:, :, history_frames:],
             future_mask,
         )
-        video_loss = video_per_sample.mean()
-        tf_loss = tf_per_sample.mean()
+        video_loss = self._branch_weighted_mean(
+            video_per_sample,
+            video_loss_weight,
+        )
+        tf_loss = self._branch_weighted_mean(
+            tf_per_sample,
+            tf_loss_weight,
+        )
         total_loss = video_loss + self.tf_loss_weight * tf_loss
 
         video_x0 = video_noisy - video_sigma_expanded * prediction.video_velocity
@@ -411,6 +592,12 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self.aux_losses["tf_flow_loss"] = tf_loss.detach()
         self.aux_losses["clock/video_sigma_mean"] = video_sigma.float().mean().detach()
         self.aux_losses["clock/tf_sigma_mean"] = tf_sigma.float().mean().detach()
+        self.aux_losses["clock/video_loss_weight_mean"] = (
+            video_loss_weight.float().mean().detach()
+        )
+        self.aux_losses["clock/tf_loss_weight_mean"] = (
+            tf_loss_weight.float().mean().detach()
+        )
         self.aux_losses["state/video_noisy_rms"] = (
             video_noisy.float().square().mean().sqrt().detach()
         )
@@ -447,15 +634,56 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             )
         return total_loss
 
+    def _sampling_schedule(
+        self,
+        num_steps: int,
+        *,
+        device: torch.device,
+    ):
+        """Return paired sigmas, model timesteps, and TF-only step count."""
+        if self.tf_schedule_mode != "tf_first_cascaded":
+            self.sample_scheduler.set_timesteps(num_steps, device=device)
+            native_video_sigmas = self.sample_scheduler.sigmas.to(
+                device=device, dtype=torch.float32
+            )[: num_steps + 1]
+            schedule = pair_video_sigma_schedule(
+                native_video_sigmas,
+                mode=self.tf_schedule_mode,
+                tf_lead_logit=self.tf_lead_logit,
+            )
+            return schedule, self.sample_scheduler.timesteps, 0
+
+        tf_steps, video_steps = cascaded_step_counts(
+            num_steps,
+            tf_fraction=self.cascade_inference_tf_fraction,
+        )
+        self.sample_scheduler.set_timesteps(video_steps, device=device)
+        video_timesteps = self.sample_scheduler.timesteps
+        native_video_sigmas = self.sample_scheduler.sigmas.to(
+            device=device, dtype=torch.float32
+        )[: video_steps + 1]
+        schedule = pair_native_cascaded_sigma_schedule(
+            native_video_sigmas,
+            total_steps=num_steps,
+            tf_fraction=self.cascade_inference_tf_fraction,
+        )
+        model_timesteps = torch.cat(
+            [
+                video_timesteps[:1].expand(tf_steps),
+                video_timesteps,
+            ]
+        )
+        return schedule, model_timesteps, tf_steps
+
     @torch.no_grad()
     def _sample_future(self, rgb, actions=None, morphology_index=None):
         """Run independent joint samplers at each requested NFE.
 
-        Every NFE starts from the same deterministic video/TF noise.  A
-        one-step result is therefore a deliberate paired negative control: its
-        sole Wan call sees the same local future TF noise at ``sigma=1`` for
-        matched and shuffled conditioning.  The first possible causal benefit
-        from an autonomously denoised TF state is on the second Wan call.
+        Every NFE starts from the same deterministic video/TF noise. Under the
+        overlapping schedules, one step is a paired negative control because
+        matched and shuffled see identical local future TF noise at sigma=1.
+        A strict cascade requires at least two calls so both branches receive
+        a nonempty phase.
         """
         video_clean = self._encode_clip(rgb).to(rgb.dtype)
         batch_size, _, latent_frames, _, _ = video_clean.shape
@@ -558,14 +786,11 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             for num_steps in self.evaluation_nfe_steps:
                 video_state = initial_video_state.clone()
                 tf_state = initial_tf_state.clone()
-                self.sample_scheduler.set_timesteps(num_steps, device=rgb.device)
-                native_video_sigmas = self.sample_scheduler.sigmas.to(
-                    device=rgb.device, dtype=torch.float32
-                )[: num_steps + 1]
-                schedule = pair_video_sigma_schedule(
-                    native_video_sigmas,
-                    mode=self.tf_schedule_mode,
-                    tf_lead_logit=self.tf_lead_logit,
+                schedule, model_timesteps, tf_only_steps = (
+                    self._sampling_schedule(
+                        num_steps,
+                        device=rgb.device,
+                    )
                 )
 
                 capture_this_trajectory = (
@@ -585,9 +810,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 video_x0_trajectory = []
                 tf_x0_trajectory = []
 
-                for index, timestep in enumerate(
-                    self.sample_scheduler.timesteps
-                ):
+                for index, timestep in enumerate(model_timesteps):
                     video_sigma = schedule.video[index]
                     tf_sigma = schedule.time_frequency[index]
                     next_tf_sigma = schedule.time_frequency[index + 1]
@@ -666,11 +889,12 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                             tf_x0[:1].detach().cpu().to(torch.float16)
                         )
 
-                    video_state = self.sample_scheduler.step(
-                        prediction.video_velocity.float(),
-                        timestep,
-                        video_state.float(),
-                    ).prev_sample.to(rgb.dtype)
+                    if index >= tf_only_steps:
+                        video_state = self.sample_scheduler.step(
+                            prediction.video_velocity.float(),
+                            timestep,
+                            video_state.float(),
+                        ).prev_sample.to(rgb.dtype)
                     tf_state = euler_flow_step(
                         tf_state.float(),
                         prediction.tf_velocity.float(),

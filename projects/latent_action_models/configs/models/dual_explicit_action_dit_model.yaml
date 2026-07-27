@@ -40,6 +40,14 @@ dual_diffusion:
   state_gate_trainable: true
   schedule_mode: tf_leads
   tf_lead_logit: 1.0
+  # Used only when schedule_mode=tf_first_cascaded. Strict cascade inference
+  # needs NFE>=2 and counts TF-only plus video-only calls in the NFE budget.
+  cascade_tf_loss_probability: 0.4
+  cascade_logit_mean: 0.0
+  cascade_logit_std: 1.0
+  cascade_tf_condition_max_sigma: 0.25
+  cascade_validation_tf_sigma: 0.125
+  cascade_inference_tf_fraction: 0.5
   tf_loss_weight: 1.0
   clock_embedding_dim: 128
   capture_latent_trajectories: true
