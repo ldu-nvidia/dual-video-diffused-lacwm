@@ -77,8 +77,9 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
     model.evaluation_condition_sources = ("autonomous",)
     model.evaluation_nfe_steps = (1,)
     model.viz_num_steps = 1
-    model.capture_latent_trajectories = False
+    model.capture_latent_trajectories = True
     model.cascade_condition_only_video_loss_examples = False
+    model.evaluation_disable_tf_clock = True
     model._visualization_artifacts = None
     model._encode_clip = lambda _rgb: video_clean
     model._tf_clean = lambda _rgb, _shape: tf_clean
@@ -137,11 +138,13 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
         conditioning_tf,
         tf_sigma,
         condition_on_tf,
+        condition_on_tf_clock,
     ):
         captured["noisy_tf"] = noisy_tf.detach().clone()
         captured["conditioning_tf"] = conditioning_tf.detach().clone()
         captured["tf_sigma"] = tf_sigma.detach().clone()
         captured["condition_on_tf"] = condition_on_tf
+        captured["condition_on_tf_clock"] = condition_on_tf_clock
         return module.DualWanOutput(
             video_velocity=torch.zeros_like(video_state),
             tf_velocity=torch.zeros_like(noisy_tf),
@@ -150,9 +153,44 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
     model.forward_model = forward_model
     rgb = torch.zeros(batch_size, 3, 13, 2, 2)
 
-    model._sample_future(rgb)
+    raw_actions = torch.tensor(
+        [[[0.125, -0.25]], [[0.375, -0.5]]],
+        dtype=rgb.dtype,
+    )
+    raw_morphology_index = torch.tensor([3, 7], dtype=torch.int64)
+    model._sample_future(
+        rgb,
+        actions=raw_actions,
+        morphology_index=raw_morphology_index,
+    )
+    artifacts = model.pop_visualization_artifacts()
 
     assert captured["condition_on_tf"] is True
+    assert captured["condition_on_tf_clock"] is False
+    assert artifacts["evaluation_disable_tf_clock"].tolist() == [1]
+    assert artifacts["evaluation_tf_clock_enabled"].tolist() == [0]
+    assert artifacts["evaluation_all_video_schedule"].tolist() == [1]
+    assert artifacts["raw_actions_present"].tolist() == [1]
+    assert artifacts["raw_morphology_index_present"].tolist() == [1]
+    torch.testing.assert_close(
+        artifacts["raw_actions"],
+        raw_actions[:1],
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        artifacts["raw_morphology_index"],
+        raw_morphology_index[:1],
+        rtol=0,
+        atol=0,
+    )
+    assert artifacts["z_control"].dtype == rgb.dtype
+    torch.testing.assert_close(
+        artifacts["z_control"],
+        torch.zeros_like(video_clean[:1]),
+        rtol=0,
+        atol=0,
+    )
     torch.testing.assert_close(
         captured["tf_sigma"], torch.ones(batch_size), rtol=0, atol=0
     )
@@ -266,10 +304,12 @@ def test_strict_cascade_executes_exact_nfe_and_perfect_velocity_endpoints(
         conditioning_tf,
         tf_sigma,
         condition_on_tf,
+        condition_on_tf_clock,
     ):
         assert conditioning_tf.shape == noisy_tf.shape
         assert tf_sigma.shape == (batch_size,)
         assert condition_on_tf is True
+        assert condition_on_tf_clock is True
         captured["forward_calls"] += 1
         if captured["video_velocity"] is None:
             captured["video_velocity"] = video_state.detach().clone()
@@ -480,6 +520,7 @@ def test_stage_faithful_cascade_shuffles_once_after_tf_freezes(monkeypatch):
         conditioning_tf,
         tf_sigma,
         condition_on_tf,
+        condition_on_tf_clock,
     ):
         calls.append(
             {
@@ -488,6 +529,7 @@ def test_stage_faithful_cascade_shuffles_once_after_tf_freezes(monkeypatch):
                 "conditioning_tf": conditioning_tf.detach().clone(),
                 "tf_sigma": tf_sigma.detach().clone(),
                 "condition_on_tf": condition_on_tf,
+                "condition_on_tf_clock": condition_on_tf_clock,
             }
         )
         return module.DualWanOutput(
@@ -666,6 +708,7 @@ def test_current_aligned_sampling_schedule_is_unchanged(monkeypatch):
     torch.testing.assert_close(schedule.video, model.sample_scheduler.sigmas)
     torch.testing.assert_close(schedule.time_frequency, schedule.video)
     torch.testing.assert_close(timesteps, model.sample_scheduler.timesteps)
+    assert torch.all(torch.diff(schedule.video) != 0)
 
 
 def test_current_tf_leads_sampling_preserves_native_video_schedule(monkeypatch):

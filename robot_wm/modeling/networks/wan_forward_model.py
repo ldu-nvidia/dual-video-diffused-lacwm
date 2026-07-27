@@ -166,6 +166,7 @@ class WanForwardModel(nn.Module):
         conditioning_tf: torch.Tensor = None,
         tf_sigma: torch.Tensor = None,
         condition_on_tf: bool | torch.Tensor | None = None,
+        condition_on_tf_clock: bool | torch.Tensor | None = None,
     ) -> torch.Tensor | DualWanOutput:
         n, c, fp, h, w = noisy_latents.shape
         control = self.action_to_control(z_control, h, w).to(noisy_latents.dtype)
@@ -226,12 +227,48 @@ class WanForwardModel(nn.Module):
         # tokens.  Leaving an exactly-zero clock residual in FP32 under AMP
         # promotes ``patch_tokens + y_camera`` to FP32, so the nominal zero-gate
         # path is neither functionally nor memory-identical to pretrained Wan.
-        clock_tokens = (
+        raw_clock_tokens = (
             self.tf_clock_embedding(tf_sigma)
             .to(dtype=condition_state_tokens.dtype)
             .unsqueeze(1)
             .expand(-1, seq_len, -1)
         )
+        use_tf_clock = (
+            True
+            if condition_on_tf_clock is None
+            else condition_on_tf_clock
+        )
+        if isinstance(use_tf_clock, torch.Tensor):
+            if (
+                use_tf_clock.ndim != 1
+                or use_tf_clock.shape[0] != n
+            ):
+                raise ValueError(
+                    "tensor condition_on_tf_clock must have shape [batch], "
+                    f"got {tuple(use_tf_clock.shape)} for batch {n}"
+                )
+            if not torch.all(
+                (use_tf_clock == 0) | (use_tf_clock == 1)
+            ):
+                raise ValueError(
+                    "tensor condition_on_tf_clock values must be exactly "
+                    "zero or one"
+                )
+            clock_mask = use_tf_clock.to(
+                device=condition_state_tokens.device,
+                dtype=condition_state_tokens.dtype,
+            ).reshape(n, 1, 1)
+        elif isinstance(use_tf_clock, bool):
+            clock_mask = condition_state_tokens.new_full(
+                (n, 1, 1),
+                float(use_tf_clock),
+            )
+        else:
+            raise TypeError(
+                "condition_on_tf_clock must be bool, a [batch] tensor, "
+                "or None"
+            )
+        clock_tokens = raw_clock_tokens * clock_mask
         use_tf = self.condition_on_tf if condition_on_tf is None else condition_on_tf
         if isinstance(use_tf, torch.Tensor):
             if use_tf.ndim != 1 or use_tf.shape[0] != n:
@@ -329,6 +366,7 @@ class WanForwardModel(nn.Module):
             "raw_state_rms": rms(condition_state_tokens),
             "state_residual_rms": rms(state_residual),
             "clock_residual_rms": rms(clock_tokens),
+            "clock_injection_fraction": clock_mask.detach().float().mean(),
             "combined_rms": combined_rms,
             "native_patch_embedding_rms": native_patch_rms,
             "state_to_native_ratio": rms(state_residual)

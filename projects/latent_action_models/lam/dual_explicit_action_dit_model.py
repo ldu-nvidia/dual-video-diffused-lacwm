@@ -118,6 +118,13 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self.cascade_stage_faithful_inference = bool(
             config.get("cascade_stage_faithful_inference", False)
         )
+        # Evaluation-only ablation: remove the independently trained TF clock
+        # residual from Wan while leaving training behavior untouched. The
+        # default is false so historical configs and checkpoints sample exactly
+        # as before.
+        self.evaluation_disable_tf_clock = bool(
+            config.get("evaluation_disable_tf_clock", False)
+        )
         self.evaluation_nfe_steps = tuple(
             sorted(
                 {
@@ -818,6 +825,19 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         initial_tf_state[:, :, :history_frames] = tf_clean[
             :, :, :history_frames
         ]
+        evaluation_disable_tf_clock = bool(
+            getattr(self, "evaluation_disable_tf_clock", False)
+        )
+        raw_actions = (
+            actions[:1].detach().cpu()
+            if actions is not None
+            else torch.empty(0, dtype=torch.float32)
+        )
+        raw_morphology_index = (
+            morphology_index[:1].detach().cpu()
+            if morphology_index is not None
+            else torch.empty(0, dtype=torch.int64)
+        )
 
         artifacts = {
             "video_clean": video_clean[:1].detach().cpu().to(torch.float16),
@@ -831,6 +851,19 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             "tf_initial_noise": (
                 initial_tf_noise[:1].detach().cpu().to(torch.float16)
             ),
+            # Raw causal inputs establish paired-example identity. z_control is
+            # deliberately retained separately as a diagnostic because the
+            # action encoder is trained end-to-end and can legitimately map the
+            # same raw inputs differently in different checkpoints.
+            "raw_actions": raw_actions,
+            "raw_morphology_index": raw_morphology_index,
+            "raw_actions_present": torch.tensor(
+                [int(actions is not None)], dtype=torch.int64
+            ),
+            "raw_morphology_index_present": torch.tensor(
+                [int(morphology_index is not None)], dtype=torch.int64
+            ),
+            "z_control": z_control[:1].detach().cpu(),
             "ground_truth_future_uint8": (
                 (
                     ground_truth_pixels[:1, :, -future_pixel_frames:]
@@ -858,6 +891,18 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                         )
                     )
                 ],
+                dtype=torch.int64,
+            ),
+            "evaluation_disable_tf_clock": torch.tensor(
+                [int(evaluation_disable_tf_clock)],
+                dtype=torch.int64,
+            ),
+            "evaluation_tf_clock_enabled": torch.tensor(
+                [int(not evaluation_disable_tf_clock)],
+                dtype=torch.int64,
+            ),
+            "evaluation_all_video_schedule": torch.tensor(
+                [int(self.tf_schedule_mode != "tf_first_cascaded")],
                 dtype=torch.int64,
             ),
             "condition_mode_code": torch.tensor(
@@ -1020,6 +1065,9 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                         conditioning_tf=conditioning_tf,
                         tf_sigma=tf_batch_sigma,
                         condition_on_tf=use_tf_condition,
+                        condition_on_tf_clock=(
+                            not evaluation_disable_tf_clock
+                        ),
                     )
                     if not isinstance(prediction, DualWanOutput):
                         raise RuntimeError(

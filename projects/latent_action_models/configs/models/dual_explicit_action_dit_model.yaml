@@ -59,6 +59,10 @@ dual_diffusion:
   # only after TF reaches sigma=0 and freezes for the video phase. The default
   # false preserves historical all-call inference exactly.
   cascade_stage_faithful_inference: false
+  # Evaluation-only privileged-training diagnostic. This independently masks
+  # the TF sigma-clock residual during sampling; it never changes training.
+  # False preserves all existing sampler behavior.
+  evaluation_disable_tf_clock: false
   tf_loss_weight: 1.0
   clock_embedding_dim: 128
   capture_latent_trajectories: true

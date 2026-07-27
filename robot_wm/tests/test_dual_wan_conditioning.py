@@ -200,6 +200,7 @@ def test_video_uses_conditioning_tf_while_tf_head_uses_own_noisy_state():
         "raw_state_rms",
         "state_residual_rms",
         "clock_residual_rms",
+        "clock_injection_fraction",
         "combined_rms",
         "native_patch_embedding_rms",
         "state_to_native_ratio",
@@ -220,6 +221,7 @@ def test_video_uses_conditioning_tf_while_tf_head_uses_own_noisy_state():
         _rms(conditioning_tokens * 0.1),
     )
     assert torch.count_nonzero(telemetry["clock_residual_rms"]) == 0
+    assert telemetry["clock_injection_fraction"] == 1
     torch.testing.assert_close(
         telemetry["combined_rms"], _rms(output.tf_condition_tokens)
     )
@@ -308,4 +310,126 @@ def test_per_sample_condition_mask_rejects_ambiguous_values(
             conditioning_tf=torch.randn(2, 4, 2, 4, 4),
             tf_sigma=torch.tensor([0.3, 0.6]),
             condition_on_tf=condition_on_tf,
+        )
+
+
+def test_per_sample_clock_mask_is_independent_and_reported_after_masking():
+    torch.manual_seed(29)
+    model = _make_dual_model()
+    with torch.no_grad():
+        model.tf_clock_embedding.gate.fill_(0.4)
+    noisy_video = torch.randn(2, 16, 2, 4, 4)
+    reference = torch.randn_like(noisy_video)
+    noisy_tf = torch.randn(2, 4, 2, 4, 4)
+    tf_sigma = torch.tensor([0.3, 0.6])
+
+    output = model(
+        noisy_video,
+        torch.tensor([100.0, 200.0]),
+        torch.randn(2, 2, 3),
+        reference,
+        [torch.zeros(1, 4), torch.zeros(1, 4)],
+        noisy_tf=noisy_tf,
+        conditioning_tf=noisy_tf,
+        tf_sigma=tf_sigma,
+        condition_on_tf=False,
+        condition_on_tf_clock=torch.tensor([1, 0]),
+    )
+
+    expected_clock = (
+        model.tf_clock_embedding(tf_sigma)
+        .unsqueeze(1)
+        .expand_as(output.tf_condition_tokens)
+    )
+    torch.testing.assert_close(
+        output.tf_condition_tokens[0],
+        expected_clock[0],
+    )
+    torch.testing.assert_close(
+        output.tf_condition_tokens[1],
+        torch.zeros_like(output.tf_condition_tokens[1]),
+    )
+    telemetry = output.tf_condition_telemetry
+    torch.testing.assert_close(
+        telemetry["clock_residual_rms"],
+        _rms(output.tf_condition_tokens),
+    )
+    assert telemetry["clock_injection_fraction"] == 0.5
+    assert telemetry["state_residual_rms"] == 0
+
+
+def test_default_clock_mask_matches_explicit_enabled_mask():
+    torch.manual_seed(31)
+    model = _make_dual_model()
+    with torch.no_grad():
+        model.tf_clock_embedding.gate.fill_(0.4)
+    arguments = (
+        torch.randn(2, 16, 2, 4, 4),
+        torch.tensor([100.0, 200.0]),
+        torch.randn(2, 2, 3),
+        torch.randn(2, 16, 2, 4, 4),
+        [torch.zeros(1, 4), torch.zeros(1, 4)],
+    )
+    noisy_tf = torch.randn(2, 4, 2, 4, 4)
+    kwargs = {
+        "noisy_tf": noisy_tf,
+        "conditioning_tf": noisy_tf,
+        "tf_sigma": torch.tensor([0.3, 0.6]),
+        "condition_on_tf": False,
+    }
+
+    default_output = model(*arguments, **kwargs)
+    enabled_output = model(
+        *arguments,
+        **kwargs,
+        condition_on_tf_clock=True,
+    )
+
+    torch.testing.assert_close(
+        default_output.tf_condition_tokens,
+        enabled_output.tf_condition_tokens,
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        default_output.video_velocity,
+        enabled_output.video_velocity,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize(
+    "condition_on_tf_clock,exception,match",
+    [
+        (
+            torch.tensor([[True], [False]]),
+            ValueError,
+            r"shape \[batch\]",
+        ),
+        (
+            torch.tensor([1.0, 0.5]),
+            ValueError,
+            "exactly zero or one",
+        ),
+        (1, TypeError, "must be bool"),
+    ],
+)
+def test_clock_mask_rejects_ambiguous_values(
+    condition_on_tf_clock,
+    exception,
+    match,
+):
+    model = _make_dual_model()
+    with pytest.raises(exception, match=match):
+        model(
+            torch.randn(2, 16, 2, 4, 4),
+            torch.tensor([100.0, 200.0]),
+            torch.randn(2, 2, 3),
+            torch.randn(2, 16, 2, 4, 4),
+            [torch.zeros(1, 4), torch.zeros(1, 4)],
+            noisy_tf=torch.randn(2, 4, 2, 4, 4),
+            conditioning_tf=torch.randn(2, 4, 2, 4, 4),
+            tf_sigma=torch.tensor([0.3, 0.6]),
+            condition_on_tf_clock=condition_on_tf_clock,
         )
