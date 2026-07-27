@@ -1256,16 +1256,18 @@ def analyze(
 
         source_comparisons: dict[str, Any] = {}
         for left, right in (
+            ("autonomous", "off"),
             ("oracle_matched", "off"),
             ("oracle_matched", "oracle_shuffled"),
         ):
             if left not in declared_sources or right not in declared_sources:
                 continue
             comparison_name = f"{left}_minus_{right}"
+            oracle_leakage = left in ORACLE_SOURCES or right in ORACLE_SOURCES
             comparison: dict[str, Any] = {
                 "definition": f"{left} minus {right}",
-                "oracle_leakage": True,
-                "deployable_evidence": False,
+                "oracle_leakage": oracle_leakage,
+                "deployable_evidence": not oracle_leakage,
                 "paired_by": "identical arm, dataset/rank, and initial states",
                 "nfe": {},
                 "relative_nfe": {},
@@ -1458,6 +1460,108 @@ def analyze(
             continue
         matched_arm = modes["matched"]
         shuffled_arm = modes["shuffled"]
+        declared_source_sets = {
+            tuple(analyzed[arm][ordered_pairs[0]]["condition_sources"])
+            for arm in (matched_arm, shuffled_arm)
+        }
+        if len(declared_source_sets) != 1:
+            raise ArtifactValidationError(
+                f"same-scale arms at {scale} declare different condition sources"
+            )
+        declared_sources = next(iter(declared_source_sets))
+
+        def build_source_comparison(source: str) -> dict[str, Any]:
+            source_comparison: dict[str, Any] = {
+                "definition": (
+                    f"{matched_arm} minus {shuffled_arm}, sampled with "
+                    f"condition source {source}"
+                ),
+                "condition_source": source,
+                "oracle_leakage": source in ORACLE_SOURCES,
+                "paired_by": "identical dataset/rank and initial states",
+                "nfe": {},
+                "relative_nfe": {},
+            }
+            for nfe in NFE_STEPS:
+                nfe_key = str(nfe)
+                source_comparison["nfe"][nfe_key] = {}
+                source_comparison["relative_nfe"][nfe_key] = {}
+                for metric, favorable_when in METRIC_DIRECTIONS.items():
+                    matched_values = [
+                        analyzed[matched_arm][pair][
+                            "condition_source_metrics"
+                        ][source][nfe_key][metric]
+                        for pair in ordered_pairs
+                    ]
+                    shuffled_values = [
+                        analyzed[shuffled_arm][pair][
+                            "condition_source_metrics"
+                        ][source][nfe_key][metric]
+                        for pair in ordered_pairs
+                    ]
+                    deltas = [
+                        matched_value - shuffled_value
+                        for matched_value, shuffled_value in zip(
+                            matched_values, shuffled_values
+                        )
+                    ]
+                    summary = _summary(
+                        deltas,
+                        bootstrap_samples=bootstrap_samples,
+                        confidence=confidence,
+                        seed=bootstrap_seed,
+                        label=(
+                            f"same-scale-delta:{scale}:{source}:"
+                            f"{matched_arm}-minus-{shuffled_arm}:"
+                            f"nfe:{nfe}:metric:{metric}"
+                        ),
+                    )
+                    favorable_count = sum(
+                        delta < 0
+                        if favorable_when == "lower"
+                        else delta > 0
+                        for delta in deltas
+                    )
+                    summary.update(
+                        {
+                            "favorable_when": (
+                                "delta < 0"
+                                if favorable_when == "lower"
+                                else "delta > 0"
+                            ),
+                            "favorable_fraction": (
+                                favorable_count / len(deltas)
+                            ),
+                        }
+                    )
+                    source_comparison["nfe"][nfe_key][metric] = summary
+                    source_comparison["relative_nfe"][nfe_key][metric] = (
+                        _relative_effect_summary(
+                            matched_values,
+                            shuffled_values,
+                            favorable_when=favorable_when,
+                            bootstrap_samples=bootstrap_samples,
+                            confidence=confidence,
+                            seed=bootstrap_seed,
+                            label=(
+                                f"same-scale-relative:{scale}:{source}:"
+                                f"{matched_arm}-minus-{shuffled_arm}:"
+                                f"nfe:{nfe}:metric:{metric}"
+                            ),
+                        )
+                    )
+            return source_comparison
+
+        source_comparisons = {
+            source: build_source_comparison(source)
+            for source in ("autonomous", "off")
+            if source in declared_sources
+        }
+        if "autonomous" not in source_comparisons:
+            raise ArtifactValidationError(
+                f"same-scale arms at {scale} lack autonomous artifacts"
+            )
+        autonomous = source_comparisons["autonomous"]
         comparison: dict[str, Any] = {
             "definition": f"{matched_arm} minus {shuffled_arm}",
             "matched_arm": matched_arm,
@@ -1466,67 +1570,28 @@ def analyze(
             "condition_source": "autonomous",
             "oracle_leakage": False,
             "paired_by": "identical dataset/rank and initial states",
-            "nfe": {},
-            "relative_nfe": {},
+            # Retain these aliases for existing decision/report consumers.
+            "nfe": autonomous["nfe"],
+            "relative_nfe": autonomous["relative_nfe"],
+            "condition_source_comparisons": source_comparisons,
+            "autonomous_sampler_requirement": (
+                "the shuffled sampler must preserve each paired unit's local "
+                "TF corruption noise and derange only its denoised content"
+            ),
         }
-        for nfe in NFE_STEPS:
-            nfe_key = str(nfe)
-            comparison["nfe"][nfe_key] = {}
-            comparison["relative_nfe"][nfe_key] = {}
-            for metric, favorable_when in METRIC_DIRECTIONS.items():
-                matched_values = [
-                    analyzed[matched_arm][pair]["metrics"][nfe_key][metric]
-                    for pair in ordered_pairs
-                ]
-                shuffled_values = [
-                    analyzed[shuffled_arm][pair]["metrics"][nfe_key][metric]
-                    for pair in ordered_pairs
-                ]
-                deltas = [
-                    matched_value - shuffled_value
-                    for matched_value, shuffled_value in zip(
-                        matched_values, shuffled_values
-                    )
-                ]
-                summary = _summary(
-                    deltas,
-                    bootstrap_samples=bootstrap_samples,
-                    confidence=confidence,
-                    seed=bootstrap_seed,
-                    label=(
-                        f"same-scale-delta:{scale}:{matched_arm}-minus-"
-                        f"{shuffled_arm}:nfe:{nfe}:metric:{metric}"
+        if "off" in source_comparisons:
+            source_comparisons["off"].update(
+                {
+                    "training_alignment_diagnostic": True,
+                    "direct_inference_conditioning_evidence": False,
+                    "interpretation": (
+                        "Both trained models are sampled with TF injection "
+                        "disabled; a difference can reflect whether aligned "
+                        "TF exposure changed the learned video weights, but "
+                        "cannot establish an inference-time TF benefit."
                     ),
-                )
-                favorable_count = sum(
-                    delta < 0 if favorable_when == "lower" else delta > 0
-                    for delta in deltas
-                )
-                summary.update(
-                    {
-                        "favorable_when": (
-                            "delta < 0"
-                            if favorable_when == "lower"
-                            else "delta > 0"
-                        ),
-                        "favorable_fraction": favorable_count / len(deltas),
-                    }
-                )
-                comparison["nfe"][nfe_key][metric] = summary
-                comparison["relative_nfe"][nfe_key][metric] = (
-                    _relative_effect_summary(
-                        matched_values,
-                        shuffled_values,
-                        favorable_when=favorable_when,
-                        bootstrap_samples=bootstrap_samples,
-                        confidence=confidence,
-                        seed=bootstrap_seed,
-                        label=(
-                            f"same-scale-relative:{scale}:{matched_arm}-minus-"
-                            f"{shuffled_arm}:nfe:{nfe}:metric:{metric}"
-                        ),
-                    )
-                )
+                }
+            )
 
         oracle_comparison = within_arm_source_deltas.get(
             matched_arm, {}

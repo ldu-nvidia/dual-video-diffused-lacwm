@@ -302,12 +302,16 @@ def test_reports_oracle_leakage_source_metrics_and_within_arm_deltas(tmp_path):
     assert within_sources["sources"]["oracle_matched"]["oracle_leakage"]
     comparisons = payload["aggregate"]["within_arm_source_deltas"]["correct"]
     assert set(comparisons) == {
+        "autonomous_minus_off",
         "oracle_matched_minus_off",
         "oracle_matched_minus_oracle_shuffled",
     }
-    for comparison in comparisons.values():
-        assert comparison["oracle_leakage"]
-        assert not comparison["deployable_evidence"]
+    assert not comparisons["autonomous_minus_off"]["oracle_leakage"]
+    assert comparisons["autonomous_minus_off"]["deployable_evidence"]
+    for name, comparison in comparisons.items():
+        if name != "autonomous_minus_off":
+            assert comparison["oracle_leakage"]
+            assert not comparison["deployable_evidence"]
         delta = comparison["nfe"]["4"]
         assert delta["video_future_nmse"]["mean"] < 0
         assert delta["tf_future_nmse"]["mean"] < 0
@@ -350,6 +354,16 @@ def test_reports_direct_same_scale_relative_effects_and_promising_gate(tmp_path)
     assert comparison["definition"] == "matched_s003 minus shuffled_s003"
     assert not comparison["oracle_leakage"]
     assert comparison["nfe"]["4"]["video_future_nmse"]["mean"] < 0
+    source_comparisons = comparison["condition_source_comparisons"]
+    assert set(source_comparisons) == {"autonomous", "off"}
+    assert source_comparisons["autonomous"]["nfe"] == comparison["nfe"]
+    off_diagnostic = source_comparisons["off"]
+    assert off_diagnostic["training_alignment_diagnostic"]
+    assert not off_diagnostic["direct_inference_conditioning_evidence"]
+    assert off_diagnostic["condition_source"] == "off"
+    assert "local TF corruption noise" in comparison[
+        "autonomous_sampler_requirement"
+    ]
     temporal_relative = comparison["relative_nfe"]["4"][
         "decoded_temporal_difference_mse_unit_range"
     ]
