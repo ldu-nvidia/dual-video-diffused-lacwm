@@ -9,6 +9,8 @@ SBATCH_SCRIPT="$REPO_ROOT/tools/slurm/stage_faithful_eval.sbatch"
 
 LACWM_BASE="/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train"
 PYTHON_BIN="$LACWM_BASE/envs/lacwm-b200-py310/bin/python"
+PYTHON_LINK_TARGET="/lustre/fsw/portfolios/coreai/users/ldu/lacwm_train/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+PYTHON_REAL_BIN="$LACWM_BASE/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
 WAN_DIR_VALUE="$LACWM_BASE/wan_fun_1.3b_control"
 VIDEOX_HOME_VALUE="$LACWM_BASE/VideoX-Fun-1d6d9c3"
 DATA_ROOT="$LACWM_BASE/data/production_v1/fast_mixed_user_waived_v1"
@@ -88,8 +90,14 @@ for required_path in \
   [[ -f "$required_path" && ! -L "$required_path" ]] || \
     die "required regular file is missing or symlinked: $required_path"
 done
-[[ -f "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || \
-  die "pinned Python is not executable: $PYTHON_BIN"
+[[ -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || \
+  die "pinned virtual-environment Python symlink is unavailable: $PYTHON_BIN"
+[[ "$(readlink "$PYTHON_BIN")" == "$PYTHON_LINK_TARGET" ]] || \
+  die "pinned Python symlink target changed"
+[[ "$(readlink -f "$PYTHON_BIN")" == "$PYTHON_REAL_BIN" ]] || \
+  die "pinned Python canonical executable changed"
+[[ -f "$PYTHON_REAL_BIN" && ! -L "$PYTHON_REAL_BIN" && -x "$PYTHON_REAL_BIN" ]] || \
+  die "pinned canonical Python executable is unavailable"
 [[ -x "$SBATCH_SCRIPT" ]] || die "Slurm entrypoint is not executable"
 [[ -d "$WAN_DIR_VALUE" && ! -L "$WAN_DIR_VALUE" ]] || die "Wan assets are unavailable"
 [[ -d "$VIDEOX_HOME_VALUE/.git" ]] || die "VideoX-Fun checkout is unavailable"

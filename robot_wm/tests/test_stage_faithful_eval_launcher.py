@@ -200,6 +200,28 @@ class StageFaithfulEvalLauncherTest(unittest.TestCase):
             "e52232b49ffec39600aa22e2d708497f22a4ea57fc89f84bc289ae4b1e0a5c09",
         )
         self.assertEqual(
+            str(self.helper.PYTHON_LINK_TARGET),
+            (
+                "/lustre/fsw/portfolios/coreai/users/ldu/lacwm_train/python/"
+                "cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+            ),
+        )
+        self.assertEqual(
+            str(self.helper.PYTHON_REAL_BIN),
+            (
+                "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/"
+                "users/ldu/lacwm_train/python/"
+                "cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+            ),
+        )
+        for source in (
+            SUBMIT.read_text(encoding="utf-8"),
+            SLOT.read_text(encoding="utf-8"),
+        ):
+            self.assertIn('[[ -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]]', source)
+            self.assertIn('readlink -f "$PYTHON_BIN"', source)
+            self.assertIn('! -L "$PYTHON_REAL_BIN"', source)
+        self.assertEqual(
             set(self.helper.PARENT_FILES),
             {
                 "resolved_config",

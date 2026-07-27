@@ -42,6 +42,14 @@ LACWM_BASE = Path(
 )
 RUN_ROOT = LACWM_BASE / "runs/dual_video_diffusion/ztf_first_cascade_stage_eval"
 PYTHON_BIN = LACWM_BASE / "envs/lacwm-b200-py310/bin/python"
+PYTHON_LINK_TARGET = Path(
+    "/lustre/fsw/portfolios/coreai/users/ldu/lacwm_train/python/"
+    "cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+)
+PYTHON_REAL_BIN = (
+    LACWM_BASE
+    / "python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+)
 WAN_DIR = LACWM_BASE / "wan_fun_1.3b_control"
 VIDEOX_HOME = LACWM_BASE / "VideoX-Fun-1d6d9c3"
 DATA_ROOT = LACWM_BASE / "data/production_v1/fast_mixed_user_waived_v1"
@@ -451,6 +459,8 @@ def command_create_manifest(args: argparse.Namespace) -> int:
             "data": {"root": str(DATA_ROOT), "abc_manifest": data},
             "runtime": {
                 "python": str(PYTHON_BIN),
+                "python_symlink_target": str(PYTHON_LINK_TARGET),
+                "python_canonical_executable": str(PYTHON_REAL_BIN),
                 "wan_dir": str(WAN_DIR),
                 "videox_home": str(VIDEOX_HOME),
                 "nodes": 1,

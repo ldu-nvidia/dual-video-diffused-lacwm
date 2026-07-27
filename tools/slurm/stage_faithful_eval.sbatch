@@ -48,6 +48,8 @@ done
 
 LACWM_BASE="/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train"
 PYTHON_BIN="$LACWM_BASE/envs/lacwm-b200-py310/bin/python"
+PYTHON_LINK_TARGET="/lustre/fsw/portfolios/coreai/users/ldu/lacwm_train/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+PYTHON_REAL_BIN="$LACWM_BASE/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
 WAN_DIR_VALUE="$LACWM_BASE/wan_fun_1.3b_control"
 VIDEOX_HOME_VALUE="$LACWM_BASE/VideoX-Fun-1d6d9c3"
 DATA_ROOT="$LACWM_BASE/data/production_v1/fast_mixed_user_waived_v1"
@@ -97,12 +99,19 @@ fi
 [[ -d "$OUTPUT_ROOT" && ! -L "$OUTPUT_ROOT" ]] || \
   die "evaluation output root is unavailable or symlinked"
 for required_file in \
-  "$PYTHON_BIN" "$EVALUATOR" "$HELPER" "$ACTIVATE" "$VERIFY_RUNTIME" \
+  "$EVALUATOR" "$HELPER" "$ACTIVATE" "$VERIFY_RUNTIME" \
   "$MANIFEST" "$CHECKPOINT" "$ABC_MANIFEST"; do
   [[ -f "$required_file" && ! -L "$required_file" ]] || \
     die "required regular file is missing or symlinked: $required_file"
 done
-[[ -x "$PYTHON_BIN" ]] || die "pinned Python is not executable"
+[[ -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || \
+  die "pinned virtual-environment Python symlink is unavailable"
+[[ "$(readlink "$PYTHON_BIN")" == "$PYTHON_LINK_TARGET" ]] || \
+  die "pinned Python symlink target changed"
+[[ "$(readlink -f "$PYTHON_BIN")" == "$PYTHON_REAL_BIN" ]] || \
+  die "pinned Python canonical executable changed"
+[[ -f "$PYTHON_REAL_BIN" && ! -L "$PYTHON_REAL_BIN" && -x "$PYTHON_REAL_BIN" ]] || \
+  die "pinned canonical Python executable is unavailable"
 for forbidden in "$SNAPSHOT_SENTINEL" "$OUTPUT_ROOT/training_complete.json"; do
   [[ ! -e "$forbidden" && ! -L "$forbidden" ]] || \
     die "evaluation-only forbidden output already exists: $forbidden"
