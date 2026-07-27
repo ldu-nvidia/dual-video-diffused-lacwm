@@ -43,6 +43,8 @@ EVALUATION_CONDITION_SOURCES = (
     "off",
     "oracle_matched",
     "oracle_shuffled",
+    "autonomous_shuffled",
+    "autonomous_legacy",
 )
 EVALUATION_CONDITION_SOURCE_CODES = {
     source: index
@@ -112,6 +114,9 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 "cascade_condition_only_video_loss_examples",
                 False,
             )
+        )
+        self.cascade_stage_faithful_inference = bool(
+            config.get("cascade_stage_faithful_inference", False)
         )
         self.evaluation_nfe_steps = tuple(
             sorted(
@@ -204,6 +209,28 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             raise ValueError(
                 "cascade_condition_only_video_loss_examples requires "
                 "schedule_mode=tf_first_cascaded"
+            )
+        stage_diagnostic_sources = {
+            "autonomous_shuffled",
+            "autonomous_legacy",
+        }
+        if (
+            self.cascade_stage_faithful_inference
+            and self.tf_schedule_mode != "tf_first_cascaded"
+        ):
+            raise ValueError(
+                "cascade_stage_faithful_inference requires "
+                "schedule_mode=tf_first_cascaded"
+            )
+        if (
+            stage_diagnostic_sources.intersection(
+                self.evaluation_condition_sources
+            )
+            and not self.cascade_stage_faithful_inference
+        ):
+            raise ValueError(
+                "autonomous_shuffled/autonomous_legacy evaluation sources "
+                "require cascade_stage_faithful_inference=true"
             )
         if not self.validation_video_sigmas or any(
             not 0 <= sigma <= 1 for sigma in self.validation_video_sigmas
@@ -473,6 +500,34 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             tf_sigma_expanded=tf_sigma_expanded,
             history_frames=history_frames,
         )
+
+    def _sampling_condition_enabled(
+        self,
+        *,
+        condition_source: str,
+        step_index: int,
+        tf_only_steps: int,
+        requested: bool,
+    ) -> bool:
+        """Gate deployable TF content by strict-cascade inference phase.
+
+        Historical inference injected TF content on every model call. The
+        opt-in stage-faithful diagnostic keeps the TF-only generator independent
+        of that content path and enables it only after TF is frozen. The
+        ``autonomous_legacy`` source deliberately retains the historical
+        behavior in the same artifact and with the same NFE/noise budget.
+        """
+        if not requested:
+            return False
+        if (
+            not getattr(self, "cascade_stage_faithful_inference", False)
+            or self.tf_schedule_mode != "tf_first_cascaded"
+            or condition_source == "autonomous_legacy"
+        ):
+            return True
+        if condition_source in {"autonomous", "autonomous_shuffled"}:
+            return step_index >= tf_only_steps
+        return True
 
     def _record_sigma_metrics(
         self,
@@ -793,6 +848,18 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             "condition_only_video_loss_examples": torch.tensor(
                 [int(self.cascade_condition_only_video_loss_examples)]
             ),
+            "cascade_stage_faithful_inference": torch.tensor(
+                [
+                    int(
+                        getattr(
+                            self,
+                            "cascade_stage_faithful_inference",
+                            False,
+                        )
+                    )
+                ],
+                dtype=torch.int64,
+            ),
             "condition_mode_code": torch.tensor(
                 [TF_CONDITION_MODE_CODES[self.tf_condition_mode]]
             ),
@@ -847,6 +914,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 )
                 video_x0_trajectory = []
                 tf_x0_trajectory = []
+                frozen_video_conditioning_tf = None
 
                 for index, timestep in enumerate(model_timesteps):
                     video_sigma = schedule.video[index]
@@ -859,14 +927,62 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     tf_sigma_expanded = self._expand_sigma(
                         tf_batch_sigma, tf_state
                     )
-                    if condition_source == "autonomous":
-                        conditioning_tf = self._sampling_conditioning_tf(
-                            tf_state,
-                            initial_tf_noise,
-                            tf_sigma_expanded,
-                            history_frames,
+                    if condition_source in {
+                        "autonomous",
+                        "autonomous_shuffled",
+                        "autonomous_legacy",
+                    }:
+                        stage_faithful_source = (
+                            getattr(
+                                self,
+                                "cascade_stage_faithful_inference",
+                                False,
+                            )
+                            and self.tf_schedule_mode
+                            == "tf_first_cascaded"
+                            and condition_source
+                            in {"autonomous", "autonomous_shuffled"}
                         )
-                        use_tf_condition = self.condition_on_tf
+                        if stage_faithful_source and index < tf_only_steps:
+                            # This value is intentionally inert: the phase mask
+                            # below disables its TF-content residual, avoiding
+                            # both content feedback and an unnecessary
+                            # cross-rank collective while generating TF.
+                            conditioning_tf = tf_state
+                        elif condition_source == "autonomous_shuffled":
+                            if frozen_video_conditioning_tf is None:
+                                # At the strict phase boundary TF sigma is
+                                # exactly zero. Roll only generated future
+                                # content once; retain local observed history
+                                # and the source run's initial corruption.
+                                if bool(tf_sigma != 0) or bool(next_tf_sigma != 0):
+                                    raise RuntimeError(
+                                        "autonomous_shuffled requires frozen "
+                                        "TF (sigma=0) throughout video phase"
+                                    )
+                                frozen_video_conditioning_tf = (
+                                    make_sampling_conditioning_tf(
+                                        mode="shuffled",
+                                        tf_state=tf_state,
+                                        tf_noise=initial_tf_noise,
+                                        tf_sigma_expanded=tf_sigma_expanded,
+                                        history_frames=history_frames,
+                                    )
+                                )
+                            conditioning_tf = frozen_video_conditioning_tf
+                        else:
+                            conditioning_tf = self._sampling_conditioning_tf(
+                                tf_state,
+                                initial_tf_noise,
+                                tf_sigma_expanded,
+                                history_frames,
+                            )
+                        use_tf_condition = self._sampling_condition_enabled(
+                            condition_source=condition_source,
+                            step_index=index,
+                            tf_only_steps=tf_only_steps,
+                            requested=self.condition_on_tf,
+                        )
                     elif condition_source == "off":
                         conditioning_tf = tf_state
                         use_tf_condition = False

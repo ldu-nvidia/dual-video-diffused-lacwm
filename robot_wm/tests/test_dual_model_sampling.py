@@ -336,6 +336,258 @@ def test_strict_cascade_sampling_rejects_one_total_nfe(monkeypatch):
         model._sampling_schedule(1, device=torch.device("cpu"))
 
 
+@pytest.mark.parametrize(
+    ("condition_source", "expected"),
+    (
+        ("autonomous", (False, False, True, True)),
+        ("autonomous_shuffled", (False, False, True, True)),
+        ("autonomous_legacy", (True, True, True, True)),
+        ("off", (False, False, False, False)),
+    ),
+)
+def test_stage_faithful_injection_mask_is_phase_exact(
+    monkeypatch,
+    condition_source,
+    expected,
+):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.tf_schedule_mode = "tf_first_cascaded"
+    model.cascade_stage_faithful_inference = True
+
+    actual = tuple(
+        model._sampling_condition_enabled(
+            condition_source=condition_source,
+            step_index=index,
+            tf_only_steps=2,
+            requested=condition_source != "off",
+        )
+        for index in range(4)
+    )
+
+    assert actual == expected
+
+
+def test_disabled_stage_faithful_mode_preserves_all_call_injection(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.tf_schedule_mode = "tf_first_cascaded"
+    model.cascade_stage_faithful_inference = False
+
+    assert all(
+        model._sampling_condition_enabled(
+            condition_source="autonomous",
+            step_index=index,
+            tf_only_steps=2,
+            requested=True,
+        )
+        for index in range(4)
+    )
+
+
+def test_stage_faithful_cascade_shuffles_once_after_tf_freezes(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    batch_size = 2
+    video_clean = torch.zeros(batch_size, 16, 4, 1, 1)
+    tf_clean = torch.tensor(
+        [
+            [[[[10.0]], [[11.0]], [[12.0]], [[13.0]]]],
+            [[[[20.0]], [[21.0]], [[22.0]], [[23.0]]]],
+        ]
+    )
+
+    model.num_history_latent = 2
+    model.num_future_frames = 2
+    model.tf_condition_mode = "matched"
+    model.condition_on_tf = True
+    model.tf_schedule_mode = "tf_first_cascaded"
+    model.tf_lead_logit = 1.0
+    model.cascade_inference_tf_fraction = 0.5
+    model.cascade_stage_faithful_inference = True
+    model.evaluation_noise_seed = 123
+    model.evaluation_condition_sources = (
+        "autonomous",
+        "autonomous_shuffled",
+        "autonomous_legacy",
+    )
+    model.evaluation_nfe_steps = (4,)
+    model.viz_num_steps = 4
+    model.capture_latent_trajectories = True
+    model.cascade_condition_only_video_loss_examples = True
+    model._visualization_artifacts = None
+    model._encode_clip = lambda _rgb: video_clean
+    model._tf_clean = lambda _rgb, _shape: tf_clean
+    model._latent_actions = (
+        lambda _rgb, _actions, _morphology, _latent_frames, _history: (
+            None,
+            torch.zeros_like(video_clean),
+            None,
+        )
+    )
+    model._build_context = (
+        lambda _batch_size, _device, _dtype: torch.empty(0)
+    )
+    model._build_clip = (
+        lambda _batch_size, _device, _dtype: torch.empty(0)
+    )
+
+    class Tokenizer:
+        @staticmethod
+        def decode_temporal(latent, out_hw):
+            return torch.zeros(
+                latent.shape[0],
+                3,
+                latent.shape[2],
+                *out_hw,
+                device=latent.device,
+                dtype=latent.dtype,
+            )
+
+    class FrozenVideoScheduler(NativeScheduler):
+        @staticmethod
+        def step(_velocity, _timestep, state):
+            return types.SimpleNamespace(prev_sample=state)
+
+    model.rgb_tokenizer = Tokenizer()
+    model.sample_scheduler = FrozenVideoScheduler()
+    calls = []
+    shuffled_condition_calls = []
+    original_make_sampling_conditioning_tf = (
+        module.make_sampling_conditioning_tf
+    )
+
+    def track_sampling_conditioning_tf(**kwargs):
+        if kwargs["mode"] == "shuffled":
+            shuffled_condition_calls.append(kwargs["tf_state"].detach().clone())
+        return original_make_sampling_conditioning_tf(**kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "make_sampling_conditioning_tf",
+        track_sampling_conditioning_tf,
+    )
+
+    def forward_model(
+        video_state,
+        _timesteps,
+        _z_control,
+        _reference,
+        _context,
+        _clip_fea,
+        *,
+        noisy_tf,
+        conditioning_tf,
+        tf_sigma,
+        condition_on_tf,
+    ):
+        calls.append(
+            {
+                "video_state": video_state.detach().clone(),
+                "noisy_tf": noisy_tf.detach().clone(),
+                "conditioning_tf": conditioning_tf.detach().clone(),
+                "tf_sigma": tf_sigma.detach().clone(),
+                "condition_on_tf": condition_on_tf,
+            }
+        )
+        return module.DualWanOutput(
+            video_velocity=torch.zeros_like(video_state),
+            tf_velocity=torch.zeros_like(noisy_tf),
+        )
+
+    model.forward_model = forward_model
+    rgb = torch.zeros(batch_size, 3, 13, 2, 2)
+
+    model._sample_future(rgb)
+    artifacts = model.pop_visualization_artifacts()
+
+    assert len(calls) == 12
+    autonomous = calls[:4]
+    shuffled = calls[4:8]
+    legacy = calls[8:12]
+    assert [call["condition_on_tf"] for call in autonomous] == [
+        False,
+        False,
+        True,
+        True,
+    ]
+    assert [call["condition_on_tf"] for call in shuffled] == [
+        False,
+        False,
+        True,
+        True,
+    ]
+    assert [call["condition_on_tf"] for call in legacy] == [
+        True,
+        True,
+        True,
+        True,
+    ]
+    assert len(shuffled_condition_calls) == 1
+    # Strict endpoint: TF is exactly frozen before either video call.
+    for source_calls in (autonomous, shuffled, legacy):
+        torch.testing.assert_close(
+            torch.stack([call["tf_sigma"][0] for call in source_calls]),
+            torch.tensor([1.0, 0.5, 0.0, 0.0]),
+            rtol=0,
+            atol=0,
+        )
+    # Same source checkpoint, schedule, local initial corruption, and TF-stage
+    # inputs. Only the post-freeze future condition differs.
+    for index in range(2):
+        torch.testing.assert_close(
+            autonomous[index]["video_state"],
+            shuffled[index]["video_state"],
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            autonomous[index]["noisy_tf"],
+            shuffled[index]["noisy_tf"],
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            autonomous[index]["conditioning_tf"],
+            shuffled[index]["conditioning_tf"],
+            rtol=0,
+            atol=0,
+        )
+    local_frozen_tf = autonomous[2]["conditioning_tf"]
+    shuffled_frozen_tf = shuffled[2]["conditioning_tf"]
+    torch.testing.assert_close(
+        shuffled_frozen_tf[:, :, :2],
+        local_frozen_tf[:, :, :2],
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        shuffled_frozen_tf[:, :, 2:],
+        torch.roll(local_frozen_tf[:, :, 2:], shifts=-1, dims=0),
+        rtol=0,
+        atol=0,
+    )
+    # The shuffled content is constructed once and held fixed for video.
+    torch.testing.assert_close(
+        shuffled[2]["conditioning_tf"],
+        shuffled[3]["conditioning_tf"],
+        rtol=0,
+        atol=0,
+    )
+    assert artifacts["evaluation_condition_source_codes"].tolist() == [0, 4, 5]
+    assert artifacts["cascade_stage_faithful_inference"].tolist() == [1]
+    for source in ("autonomous_shuffled", "autonomous_legacy"):
+        assert f"video_final_{source}_nfe_4" in artifacts
+        assert f"tf_final_{source}_nfe_4" in artifacts
+        assert f"decoded_future_{source}_nfe_4" in artifacts
+    torch.testing.assert_close(
+        artifacts["tf_final_nfe_4"],
+        artifacts["tf_final_autonomous_shuffled_nfe_4"],
+        rtol=0,
+        atol=0,
+    )
+
+
 def test_strict_training_masks_content_out_of_tf_loss_examples(monkeypatch):
     module = _load_model_module(monkeypatch)
     model = object.__new__(module.DualExplicitActionDiTModel)

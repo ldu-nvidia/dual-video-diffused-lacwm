@@ -54,14 +54,20 @@ dual_diffusion:
   # This prevents the experimental condition from directly changing auxiliary
   # TF-denoiser training.
   cascade_condition_only_video_loss_examples: false
+  # Evaluation-only strict-cascade diagnostic. When true, autonomous sampling
+  # keeps TF-content injection off throughout the TF-only phase and turns it on
+  # only after TF reaches sigma=0 and freezes for the video phase. The default
+  # false preserves historical all-call inference exactly.
+  cascade_stage_faithful_inference: false
   tf_loss_weight: 1.0
   clock_embedding_dim: 128
   capture_latent_trajectories: true
   evaluation_nfe_steps: [8]
   evaluation_noise_seed: 20260726
-  # Oracle sources are leakage-only diagnostics and remain disabled by
-  # default. Causal-screen configs may enable them to test whether aligned TF
-  # content is usable independently of autonomous TF-denoiser quality.
+  # Oracle sources are leakage-only diagnostics and remain disabled by default.
+  # Under stage-faithful strict inference, ``autonomous_shuffled`` rolls only
+  # generated future TF content once at the phase boundary, while
+  # ``autonomous_legacy`` retains historical all-call injection.
   evaluation_condition_sources: [autonomous]
   validation_video_sigmas: [0.90, 0.75, 0.50, 0.25]
 forward_model:

@@ -36,7 +36,8 @@ ARTIFACT_NAME_RE = re.compile(r"^latent_trajectory_rank_([0-9]+)[.]safetensors$"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_TENSOR_RE = re.compile(
     r"^(video_final|tf_final|decoded_future)"
-    r"(?:_(off|oracle_matched|oracle_shuffled))?_nfe_([0-9]+)$"
+    r"(?:_(off|oracle_matched|oracle_shuffled|autonomous_shuffled|"
+    r"autonomous_legacy))?_nfe_([0-9]+)$"
 )
 METRIC_DIRECTIONS = {
     "video_future_nmse": "lower",
@@ -51,6 +52,8 @@ EVALUATION_CONDITION_SOURCE_NAMES = {
     1: "off",
     2: "oracle_matched",
     3: "oracle_shuffled",
+    4: "autonomous_shuffled",
+    5: "autonomous_legacy",
 }
 ORACLE_SOURCES = {"oracle_matched", "oracle_shuffled"}
 PROMISING_RELATIVE_IMPROVEMENT = 0.03
@@ -1256,6 +1259,8 @@ def analyze(
 
         source_comparisons: dict[str, Any] = {}
         for left, right in (
+            ("autonomous", "autonomous_shuffled"),
+            ("autonomous", "autonomous_legacy"),
             ("autonomous", "off"),
             ("oracle_matched", "off"),
             ("oracle_matched", "oracle_shuffled"),
@@ -1707,7 +1712,18 @@ def analyze(
         },
         "condition_source_definitions": {
             "autonomous": (
-                "deployable joint sampler using its independently denoised TF state"
+                "deployable sampler using independently denoised TF; under the "
+                "stage-faithful cascade its TF content is injected only after "
+                "the TF phase reaches sigma=0"
+            ),
+            "autonomous_shuffled": (
+                "same-checkpoint stage-faithful causal control: generate TF "
+                "with identical local initial corruption, then roll only its "
+                "future content globally once before the video phase"
+            ),
+            "autonomous_legacy": (
+                "same-checkpoint historical control with TF-content injection "
+                "enabled on both TF-only and video-phase calls"
             ),
             "off": "same trained model sampled with TF-to-video injection disabled",
             "oracle_matched": (

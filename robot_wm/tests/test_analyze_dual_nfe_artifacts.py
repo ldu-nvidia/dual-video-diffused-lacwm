@@ -96,6 +96,8 @@ def _tensors(
     }
     source_gains = {
         "autonomous": arm_gain,
+        "autonomous_shuffled": 0.9 * arm_gain,
+        "autonomous_legacy": 1.1 * arm_gain,
         "off": 1.5,
         "oracle_matched": 0.2,
         "oracle_shuffled": 0.2 if oracle_equal else 0.8,
@@ -325,6 +327,39 @@ def test_reports_oracle_leakage_source_metrics_and_within_arm_deltas(tmp_path):
     ]
     assert set(per_unit_sources) == set(ALL_CONDITION_SOURCES)
     assert per_unit_sources["oracle_shuffled"]["oracle_leakage"]
+
+
+def test_reports_stage_faithful_same_checkpoint_source_deltas(tmp_path):
+    sources = (
+        "autonomous",
+        "autonomous_shuffled",
+        "autonomous_legacy",
+        "off",
+    )
+    arms = _matched_arms(tmp_path, condition_sources=sources)
+    output_dir = tmp_path / "analysis"
+    output_dir.mkdir()
+
+    payload = analyze(
+        arms,
+        baseline="zero",
+        output=output_dir / "result.json",
+        bootstrap_samples=100,
+        bootstrap_seed=123,
+    )
+
+    comparisons = payload["aggregate"]["within_arm_source_deltas"]["correct"]
+    assert "autonomous_minus_autonomous_shuffled" in comparisons
+    assert "autonomous_minus_autonomous_legacy" in comparisons
+    for name in (
+        "autonomous_minus_autonomous_shuffled",
+        "autonomous_minus_autonomous_legacy",
+    ):
+        assert not comparisons[name]["oracle_leakage"]
+        assert comparisons[name]["deployable_evidence"]
+    assert not payload["aggregate"]["within_arm_condition_sources"]["correct"][
+        "sources"
+    ]["autonomous_shuffled"]["oracle_leakage"]
 
 
 def test_reports_direct_same_scale_relative_effects_and_promising_gate(tmp_path):
