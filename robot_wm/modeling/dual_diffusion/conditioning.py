@@ -90,15 +90,35 @@ def make_sampling_conditioning_tf(
     *,
     mode: TFConditionMode,
     tf_state: Tensor,
+    tf_noise: Tensor,
+    tf_sigma_expanded: Tensor,
     history_frames: int,
 ) -> Tensor:
-    """Choose the autonomous TF state visible to the video sampler."""
+    """Choose the autonomous TF state visible to the video sampler.
+
+    The shuffled control retains the local sample's initial corruption noise.
+    Only the current noise-subtracted residual is deranged across the effective
+    batch.  For an ideal flow state this residual is ``(1 - sigma) * x0_hat``;
+    avoiding division by ``1 - sigma`` keeps the construction well-defined at
+    the pure-noise endpoint and makes matched/shuffled exactly identical there.
+    """
     if mode not in TF_CONDITION_MODES:
         raise ValueError(f"unsupported TF condition mode: {mode!r}")
     _validate_history(tf_state, history_frames)
+    if (
+        tf_noise.shape != tf_state.shape
+        or tf_sigma_expanded.ndim != tf_state.ndim
+        or tf_sigma_expanded.shape[0] != tf_state.shape[0]
+    ):
+        raise ValueError("TF state/noise/sigma tensors are not aligned")
     if mode != "shuffled":
         return tf_state
-    conditioning = roll_across_global_batch(tf_state).clone()
+
+    local_noise_component = tf_sigma_expanded * tf_noise
+    clean_residual = tf_state - local_noise_component
+    conditioning = (
+        roll_across_global_batch(clean_residual) + local_noise_component
+    ).clone()
     conditioning[:, :, :history_frames] = tf_state[
         :, :, :history_frames
     ]

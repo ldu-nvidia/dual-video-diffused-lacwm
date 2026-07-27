@@ -69,21 +69,60 @@ def test_matched_and_off_return_the_exact_own_state():
         assert returned is state
 
 
-def test_shuffled_sampling_changes_only_future_source():
-    state = torch.stack(
+def test_shuffled_sampling_preserves_local_noise_and_rolls_only_residual():
+    clean = torch.stack(
         [
-            torch.zeros(1, 4, 1, 1),
-            torch.ones(1, 4, 1, 1),
+            torch.tensor([[[[0.0]], [[0.0]], [[4.0]], [[6.0]]]]),
+            torch.tensor([[[[1.0]], [[1.0]], [[8.0]], [[10.0]]]]),
         ]
     )
+    noise = torch.stack(
+        [
+            torch.tensor([[[[20.0]], [[20.0]], [[2.0]], [[3.0]]]]),
+            torch.tensor([[[[30.0]], [[30.0]], [[5.0]], [[7.0]]]]),
+        ]
+    )
+    sigma = torch.full((2, 1, 1, 1, 1), 0.25)
+    state = (1.0 - sigma) * clean + sigma * noise
+    state[:, :, :2] = clean[:, :, :2]
     condition = make_sampling_conditioning_tf(
-        mode="shuffled", tf_state=state, history_frames=2
+        mode="shuffled",
+        tf_state=state,
+        tf_noise=noise,
+        tf_sigma_expanded=sigma,
+        history_frames=2,
     )
 
     torch.testing.assert_close(condition[:, :, :2], state[:, :, :2])
+    expected = (1.0 - sigma) * torch.roll(clean, -1, 0) + sigma * noise
     torch.testing.assert_close(
-        condition[:, :, 2:], torch.roll(state, -1, 0)[:, :, 2:]
+        condition[:, :, 2:], expected[:, :, 2:]
     )
+
+
+def test_shuffled_sampling_is_exactly_matched_at_pure_noise():
+    noise = torch.randn(2, 3, 4, 2, 2)
+    clean_history = torch.randn(2, 3, 2, 2, 2)
+    state = noise.clone()
+    state[:, :, :2] = clean_history
+
+    matched = make_sampling_conditioning_tf(
+        mode="matched",
+        tf_state=state,
+        tf_noise=noise,
+        tf_sigma_expanded=torch.ones(2, 1, 1, 1, 1),
+        history_frames=2,
+    )
+    shuffled = make_sampling_conditioning_tf(
+        mode="shuffled",
+        tf_state=state,
+        tf_noise=noise,
+        tf_sigma_expanded=torch.ones(2, 1, 1, 1, 1),
+        history_frames=2,
+    )
+
+    assert matched is state
+    torch.testing.assert_close(shuffled, matched, rtol=0, atol=0)
 
 
 def test_oracle_conditioning_respects_noise_and_clean_endpoints():

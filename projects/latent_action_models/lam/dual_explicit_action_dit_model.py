@@ -267,11 +267,15 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
     def _sampling_conditioning_tf(
         self,
         tf_state: torch.Tensor,
+        tf_noise: torch.Tensor,
+        tf_sigma_expanded: torch.Tensor,
         history_frames: int,
     ) -> torch.Tensor:
         return make_sampling_conditioning_tf(
             mode=self.tf_condition_mode,
             tf_state=tf_state,
+            tf_noise=tf_noise,
+            tf_sigma_expanded=tf_sigma_expanded,
             history_frames=history_frames,
         )
 
@@ -448,10 +452,10 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         """Run independent joint samplers at each requested NFE.
 
         Every NFE starts from the same deterministic video/TF noise.  A
-        one-step result is therefore a deliberate negative control: its sole
-        Wan call sees the future TF state at ``sigma=1`` (pure noise).  The
-        first possible causal benefit from an autonomously denoised TF state is
-        on the second Wan call.
+        one-step result is therefore a deliberate paired negative control: its
+        sole Wan call sees the same local future TF noise at ``sigma=1`` for
+        matched and shuffled conditioning.  The first possible causal benefit
+        from an autonomously denoised TF state is on the second Wan call.
         """
         video_clean = self._encode_clip(rgb).to(rgb.dtype)
         batch_size, _, latent_frames, _, _ = video_clean.shape
@@ -591,9 +595,15 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     tf_batch_sigma = tf_sigma.expand(batch_size).to(
                         dtype=rgb.dtype
                     )
+                    tf_sigma_expanded = self._expand_sigma(
+                        tf_batch_sigma, tf_state
+                    )
                     if condition_source == "autonomous":
                         conditioning_tf = self._sampling_conditioning_tf(
-                            tf_state, history_frames
+                            tf_state,
+                            initial_tf_noise,
+                            tf_sigma_expanded,
+                            history_frames,
                         )
                         use_tf_condition = self.condition_on_tf
                     elif condition_source == "off":
@@ -609,9 +619,6 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                             raise RuntimeError(
                                 "oracle shuffled source was not prepared"
                             )
-                        tf_sigma_expanded = self._expand_sigma(
-                            tf_batch_sigma, tf_clean
-                        )
                         conditioning_tf = make_oracle_conditioning_tf(
                             tf_clean=tf_clean,
                             tf_noise=initial_tf_noise,
