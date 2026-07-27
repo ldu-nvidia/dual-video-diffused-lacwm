@@ -16,6 +16,9 @@ time_frequency_transform:
   window_size: 4
   pad_multiple: 16
   pad_value: -1.0
+  # Explicit research ablation coordinate. ``raw_rfft`` is the historical
+  # implementation; alternatives retain the identical tensor shape.
+  representation: raw_rfft
   # Per-sample normalization would make the observed history scale depend on
   # hidden future frames. Use causal raw coefficients for this pilot; fixed
   # train-split whitening statistics are a later representation ablation.
