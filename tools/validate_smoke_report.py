@@ -127,6 +127,11 @@ def validate(
     }
     if variant in DUAL_VARIANTS:
         required_groups |= DUAL_GRADIENT_GROUPS
+        # After decoupling the TF-head representation from the video residual,
+        # the no-ZTF arm deliberately leaves the video-only state gate unused.
+        # Its projection/norm must still receive TF-head gradients.
+        if not DUAL_CONDITION_ON_TF[variant]:
+            required_groups.discard("forward_model.tf_token_adapter.gate")
     else:
         required_groups |= (
             {"action_encoder"}

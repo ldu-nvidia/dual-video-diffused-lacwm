@@ -536,8 +536,10 @@ def run_validation(
     optimizer = torch.optim.AdamW((parameter for _, parameter in trainable), lr=1e-4, betas=(0.9, 0.95))
 
     # Four steps are required for the dual graph: step 0 opens the zero TF
-    # velocity head, later steps open the state/clock gates and their upstream
-    # projections. The legacy arms also retain four-morphology coverage.
+    # velocity head and later steps reach the ungated TF projection through
+    # that head. The video-only state gate receives signal only in the
+    # conditioned arm by design. The legacy arms also retain four-morphology
+    # coverage.
     steps = max(requested_steps, len(available_samples), 4)
     records = []
     decoder_morphologies_seen: set[int] = set()
@@ -642,10 +644,11 @@ def run_validation(
             "forward_model.tf_velocity_head.norm",
             "forward_model.tf_clock_embedding.gate",
             "forward_model.tf_clock_embedding.net",
-            "forward_model.tf_token_adapter.gate",
             "forward_model.tf_token_adapter.projection",
             "forward_model.tf_token_adapter.norm",
         ]
+        if DUAL_CONDITION_ON_TF[variant]:
+            delayed_groups.append("forward_model.tf_token_adapter.gate")
     missing_signal = [group for group in delayed_groups if not group_ever_nonzero.get(group, False)]
     if missing_signal:
         raise RuntimeError(f"no gradient reached trainable conditioning groups: {missing_signal}")

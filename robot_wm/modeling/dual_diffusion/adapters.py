@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import log, prod
+from math import atanh, isfinite, log, prod
 from typing import Tuple
 
 import torch
@@ -22,12 +22,16 @@ class ZeroInitTFTokenAdapter(nn.Module):
         tf_channels: int,
         hidden_size: int = 1536,
         patch_size: Tuple[int, int, int] = (1, 2, 2),
+        gate_init: float = 0.0,
+        gate_trainable: bool = True,
     ) -> None:
         super().__init__()
         if tf_channels < 1 or hidden_size < 1:
             raise ValueError("tf_channels and hidden_size must be positive")
         if len(patch_size) != 3 or any(p < 1 for p in patch_size):
             raise ValueError("patch_size must contain three positive values")
+        if not isfinite(gate_init) or not -1.0 < gate_init < 1.0:
+            raise ValueError("gate_init must be finite and strictly between -1 and 1")
         self.tf_channels = tf_channels
         self.hidden_size = hidden_size
         self.patch_size = patch_size
@@ -38,9 +42,18 @@ class ZeroInitTFTokenAdapter(nn.Module):
             stride=patch_size,
         )
         self.norm = nn.LayerNorm(hidden_size)
-        self.gate = nn.Parameter(torch.zeros(()))
+        # Keep the parameter name and scalar shape checkpoint-compatible with
+        # the original zero-gated adapter.  ``gate_init`` is the effective
+        # residual multiplier, so invert tanh before storing the raw parameter.
+        self.gate = nn.Parameter(
+            torch.tensor(atanh(gate_init), dtype=torch.float32),
+            requires_grad=gate_trainable,
+        )
 
-    def forward(self, time_frequency: Tensor) -> tuple[Tensor, tuple[int, int, int]]:
+    def project_tokens(
+        self, time_frequency: Tensor
+    ) -> tuple[Tensor, tuple[int, int, int]]:
+        """Return normalized TF tokens before applying the residual gate."""
         if time_frequency.ndim != 5:
             raise ValueError("TF state must have shape [B,C,F,H,W]")
         if time_frequency.shape[1] != self.tf_channels:
@@ -50,7 +63,22 @@ class ZeroInitTFTokenAdapter(nn.Module):
         projected = self.projection(time_frequency)
         grid = tuple(projected.shape[2:])
         tokens = projected.flatten(2).transpose(1, 2)
-        return torch.tanh(self.gate) * self.norm(tokens), grid
+        return self.norm(tokens), grid
+
+    def residual_tokens(self, tokens: Tensor) -> Tensor:
+        """Apply the checkpoint-compatible scalar gate to projected tokens."""
+        if tokens.ndim != 3 or tokens.shape[-1] != self.hidden_size:
+            raise ValueError("tokens must have shape [B,N,hidden_size]")
+        gate = self.effective_gate().to(device=tokens.device, dtype=tokens.dtype)
+        return gate * tokens
+
+    def effective_gate(self) -> Tensor:
+        """Return the bounded residual multiplier used by the adapter."""
+        return torch.tanh(self.gate)
+
+    def forward(self, time_frequency: Tensor) -> tuple[Tensor, tuple[int, int, int]]:
+        tokens, grid = self.project_tokens(time_frequency)
+        return self.residual_tokens(tokens), grid
 
 
 class TFVelocityHead(nn.Module):
@@ -126,6 +154,10 @@ class TFSigmaTokenEmbedding(nn.Module):
         )
         self.gate = nn.Parameter(torch.zeros(()))
 
+    def effective_gate(self) -> Tensor:
+        """Return the bounded residual multiplier used by the clock embedding."""
+        return torch.tanh(self.gate)
+
     def forward(self, sigma: Tensor) -> Tensor:
         if sigma.ndim > 1:
             sigma = sigma.reshape(sigma.shape[0], -1)
@@ -137,4 +169,4 @@ class TFSigmaTokenEmbedding(nn.Module):
         angles = sigma.float().unsqueeze(-1) * self.frequencies.unsqueeze(0)
         embedding = torch.cat([torch.cos(angles), torch.sin(angles)], dim=-1)
         tokens = self.net(embedding).to(dtype=sigma.dtype)
-        return torch.tanh(self.gate) * tokens
+        return self.effective_gate().to(dtype=tokens.dtype) * tokens

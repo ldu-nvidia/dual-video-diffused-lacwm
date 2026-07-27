@@ -7,6 +7,6 @@ name: abc100-with-ztf-condition
 model:
   dual_diffusion:
     condition_on_tf: true
+    condition_mode: matched
 wandb:
   tags: [abc, dual-video-diffusion, ztf-ablation, with-ztf-condition, seed-1234]
-

@@ -23,12 +23,28 @@ time_frequency_transform:
 dual_diffusion:
   enabled: true
   condition_on_tf: false
+  # ``condition_mode`` is the causal experimental intervention. ``off`` keeps
+  # the video trunk blind to TF, ``matched`` injects this sample's current TF
+  # state, and ``shuffled`` injects another sample's hidden-future TF while
+  # retaining the correct observed history and local corruption noise.
+  condition_mode: off
   tf_channels: 12
+  # Effective post-LayerNorm scale (the adapter stores atanh(scale) so the
+  # configured value is directly interpretable). The production-safe default
+  # remains an exact zero residual with a trainable gate.
+  state_gate_init: 0.0
+  state_gate_trainable: true
   schedule_mode: tf_leads
   tf_lead_logit: 1.0
   tf_loss_weight: 1.0
   clock_embedding_dim: 128
   capture_latent_trajectories: true
+  evaluation_nfe_steps: [8]
+  evaluation_noise_seed: 20260726
+  # Oracle sources are leakage-only diagnostics and remain disabled by
+  # default. Causal-screen configs may enable them to test whether aligned TF
+  # content is usable independently of autonomous TF-denoiser quality.
+  evaluation_condition_sources: [autonomous]
   validation_video_sigmas: [0.90, 0.75, 0.50, 0.25]
 forward_model:
   latent_action_dim: ${..latent_action_dim}

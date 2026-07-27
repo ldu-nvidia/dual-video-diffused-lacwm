@@ -161,6 +161,83 @@ class ValidateSmokeReportTest(unittest.TestCase):
                     warmstart_sha256=sha256,
                 )
 
+    def test_accepts_no_ztf_with_intentionally_unused_video_only_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = self._payload(root)
+            payload["variant"] = "dual-no-ztf"
+            payload["paths"]["warmstart_model"] = str(root / "snapshot.pt")
+            payload["validation"]["steps"] = [
+                {"loss": 1.0, "morphology_index": 9}
+                for _ in range(4)
+            ]
+            common_dual_groups = {
+                "action_encoder",
+                "forward_model.tf_velocity_head",
+                "forward_model.tf_velocity_head.linear",
+                "forward_model.tf_velocity_head.norm",
+                "forward_model.tf_clock_embedding",
+                "forward_model.tf_clock_embedding.gate",
+                "forward_model.tf_clock_embedding.net",
+                "forward_model.tf_token_adapter",
+                "forward_model.tf_token_adapter.projection",
+                "forward_model.tf_token_adapter.norm",
+            }
+            all_groups = {
+                "lora_",
+                "forward_model.action_to_control",
+                "action_pool",
+                "morphology_tokens",
+                *common_dual_groups,
+            }
+            payload["validation"]["groups_ever_nonzero"] = {
+                **{group: True for group in all_groups},
+                "forward_model.tf_token_adapter.gate": False,
+            }
+            payload["validation"]["matched_trainable_tensors"] = {
+                **{group: 1 for group in all_groups},
+                "forward_model.tf_token_adapter.gate": 1,
+            }
+            payload["validation"]["condition_on_tf"] = False
+            payload["validation"]["sigma_convention"] = (
+                "sigma=1 is noise; sigma=0 is clean data"
+            )
+            payload["validation"]["dual_zero_init"] = {
+                "tf_state_gate_abs_max": 0.0,
+                "tf_clock_gate_abs_max": 0.0,
+                "tf_head_weight_abs_max": 0.0,
+                "tf_head_bias_abs_max": 0.0,
+            }
+            payload["validation"]["dual_video_noop"] = {
+                "exact_video_velocity_equal": True,
+                "max_abs_difference": 0.0,
+                "production_baseline_exact_equal": True,
+                "production_baseline_max_abs_difference": 0.0,
+            }
+            sha256 = "b" * 64
+            payload["validation"]["warmstart"] = {
+                "path": str(root / "snapshot.pt"),
+                "sha256": sha256,
+                "model_only": True,
+                "unexpected_keys": [],
+                "file_identity": {"size_bytes": 123},
+            }
+            report = root / "report.json"
+            report.write_text(json.dumps(payload))
+
+            validated = validate(
+                report,
+                variant="dual-no-ztf",
+                git_commit="abc123",
+                wan_dir=str(root / "wan"),
+                videox_home=str(root / "videox"),
+                data_root=str(root / "data"),
+                warmstart_model=str(root / "snapshot.pt"),
+                warmstart_sha256=sha256,
+            )
+
+            self.assertFalse(validated["validation"]["condition_on_tf"])
+
 
 if __name__ == "__main__":
     unittest.main()

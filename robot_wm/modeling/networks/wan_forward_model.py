@@ -38,6 +38,7 @@ class DualWanOutput:
     video_velocity: torch.Tensor
     tf_velocity: torch.Tensor
     tf_condition_tokens: torch.Tensor
+    tf_condition_telemetry: Mapping[str, torch.Tensor]
 
 
 class ActionToControl(nn.Module):
@@ -135,6 +136,10 @@ class WanForwardModel(nn.Module):
                 tf_channels=tf_channels,
                 hidden_size=hidden_size,
                 patch_size=patch_size,
+                gate_init=float(dual_config.get("state_gate_init", 0.0)),
+                gate_trainable=bool(
+                    dual_config.get("state_gate_trainable", True)
+                ),
             )
             self.tf_clock_embedding = TFSigmaTokenEmbedding(
                 hidden_size=hidden_size,
@@ -158,6 +163,7 @@ class WanForwardModel(nn.Module):
         context,                      # list of [L, text_dim]
         clip_fea: torch.Tensor = None,
         noisy_tf: torch.Tensor = None,
+        conditioning_tf: torch.Tensor = None,
         tf_sigma: torch.Tensor = None,
         condition_on_tf: bool | None = None,
     ) -> torch.Tensor | DualWanOutput:
@@ -166,7 +172,11 @@ class WanForwardModel(nn.Module):
         y = torch.cat([control, ref_latents], dim=1)  # [N, 32, Fp, h, w]
         seq_len = int(math.ceil(h * w / (self.patch_size[1] * self.patch_size[2])) * fp)
         if not self.dual_diffusion_enabled:
-            if noisy_tf is not None or tf_sigma is not None:
+            if (
+                noisy_tf is not None
+                or conditioning_tf is not None
+                or tf_sigma is not None
+            ):
                 raise RuntimeError("TF inputs require dual_diffusion.enabled=true")
             out = self.transformer(
                 x=noisy_latents,
@@ -185,11 +195,32 @@ class WanForwardModel(nn.Module):
                 "TF state must share the video batch and latent grid; "
                 f"got video={tuple(noisy_latents.shape)}, TF={tuple(noisy_tf.shape)}"
             )
-        state_tokens, grid = self.tf_token_adapter(noisy_tf)
-        if state_tokens.shape[1] != seq_len:
+        noisy_state_tokens, grid = self.tf_token_adapter.project_tokens(noisy_tf)
+        if noisy_state_tokens.shape[1] != seq_len:
             raise RuntimeError(
-                f"TF token count {state_tokens.shape[1]} does not match Wan {seq_len}"
+                f"TF token count {noisy_state_tokens.shape[1]} does not match Wan {seq_len}"
             )
+        if conditioning_tf is None or conditioning_tf is noisy_tf:
+            condition_state_tokens = noisy_state_tokens
+        else:
+            if (
+                conditioning_tf.shape[0] != n
+                or conditioning_tf.shape[1] != noisy_tf.shape[1]
+                or conditioning_tf.shape[2:] != (fp, h, w)
+            ):
+                raise ValueError(
+                    "conditioning TF state must share the noisy TF shape; "
+                    f"got noisy TF={tuple(noisy_tf.shape)}, "
+                    f"conditioning TF={tuple(conditioning_tf.shape)}"
+                )
+            condition_state_tokens, condition_grid = (
+                self.tf_token_adapter.project_tokens(conditioning_tf)
+            )
+            if condition_grid != grid:
+                raise RuntimeError(
+                    "conditioning TF token grid does not match noisy TF token grid: "
+                    f"{condition_grid} != {grid}"
+                )
         # The clock MLP deliberately evaluates from an FP32 sigma, but its
         # residual must enter Wan in the same compute dtype as the patch/state
         # tokens.  Leaving an exactly-zero clock residual in FP32 under AMP
@@ -197,25 +228,39 @@ class WanForwardModel(nn.Module):
         # path is neither functionally nor memory-identical to pretrained Wan.
         clock_tokens = (
             self.tf_clock_embedding(tf_sigma)
-            .to(dtype=state_tokens.dtype)
+            .to(dtype=condition_state_tokens.dtype)
             .unsqueeze(1)
             .expand(-1, seq_len, -1)
         )
         use_tf = self.condition_on_tf if condition_on_tf is None else bool(condition_on_tf)
-        injected_tokens = clock_tokens + state_tokens * float(use_tf)
+        state_residual = self.tf_token_adapter.residual_tokens(
+            condition_state_tokens
+        ) * float(use_tf)
+        injected_tokens = clock_tokens + state_residual
         features = injected_tokens.transpose(1, 2).reshape(
             n, injected_tokens.shape[-1], *grid
         )
         y_camera = [features[index : index + 1] for index in range(n)]
 
         captured_tokens = []
+        native_patch_embeddings = []
 
         def capture_shared_tokens(_module, inputs):
             if not inputs or not isinstance(inputs[0], torch.Tensor):
                 raise RuntimeError("Wan head hook did not receive shared tokens")
             captured_tokens.append(inputs[0])
 
-        handle = self.transformer.head.register_forward_pre_hook(capture_shared_tokens)
+        def capture_native_patch_embedding(_module, _inputs, output):
+            if not isinstance(output, torch.Tensor):
+                raise RuntimeError("Wan patch embedding hook did not receive a tensor")
+            native_patch_embeddings.append(output)
+
+        head_handle = self.transformer.head.register_forward_pre_hook(
+            capture_shared_tokens
+        )
+        patch_handle = self.transformer.patch_embedding.register_forward_hook(
+            capture_native_patch_embedding
+        )
         try:
             out = self.transformer(
                 x=noisy_latents,
@@ -227,23 +272,53 @@ class WanForwardModel(nn.Module):
                 clip_fea=clip_fea,
             )
         finally:
-            handle.remove()
+            head_handle.remove()
+            patch_handle.remove()
         if len(captured_tokens) != 1:
             raise RuntimeError(
                 f"expected one Wan shared-token capture, got {len(captured_tokens)}"
             )
+        if not native_patch_embeddings:
+            raise RuntimeError("Wan patch-embedding hook did not capture any tokens")
         shared_tokens = captured_tokens[0]
-        if shared_tokens.shape != state_tokens.shape:
+        if shared_tokens.shape != noisy_state_tokens.shape:
             raise RuntimeError(
                 "Wan shared-token shape does not match TF token grid: "
-                f"{tuple(shared_tokens.shape)} != {tuple(state_tokens.shape)}"
+                f"{tuple(shared_tokens.shape)} != {tuple(noisy_state_tokens.shape)}"
             )
         # Both ablation arms give the TF head its own noisy state.  The causal
         # difference is only whether that state entered the shared video trunk.
-        tf_velocity = self.tf_velocity_head(shared_tokens + state_tokens, grid)
+        tf_velocity = self.tf_velocity_head(
+            shared_tokens + noisy_state_tokens, grid
+        )
         video_velocity = out[0] if isinstance(out, (list, tuple)) else out
+
+        def rms(value):
+            return value.detach().float().square().mean().sqrt()
+
+        native_squared_sum = torch.stack(
+            [
+                value.detach().float().square().sum()
+                for value in native_patch_embeddings
+            ]
+        ).sum()
+        native_count = sum(value.numel() for value in native_patch_embeddings)
+        native_patch_rms = (native_squared_sum / native_count).sqrt()
+        combined_rms = rms(injected_tokens)
+        telemetry = {
+            "raw_state_rms": rms(condition_state_tokens),
+            "state_residual_rms": rms(state_residual),
+            "clock_residual_rms": rms(clock_tokens),
+            "combined_rms": combined_rms,
+            "native_patch_embedding_rms": native_patch_rms,
+            "state_to_native_ratio": rms(state_residual)
+            / native_patch_rms.clamp_min(torch.finfo(torch.float32).tiny),
+            "combined_to_native_ratio": combined_rms
+            / native_patch_rms.clamp_min(torch.finfo(torch.float32).tiny),
+        }
         return DualWanOutput(
             video_velocity=video_velocity,
             tf_velocity=tf_velocity,
             tf_condition_tokens=injected_tokens,
+            tf_condition_telemetry=telemetry,
         )
