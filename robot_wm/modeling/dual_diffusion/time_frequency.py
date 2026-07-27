@@ -22,7 +22,7 @@ from torch import Tensor, nn
 
 
 class PerViewCausalRFFT(nn.Module):
-    """Complete local RFFT aligned with Wan's causal temporal bins.
+    """Complete local causal representation aligned with Wan temporal bins.
 
     For the production 13-frame contract and ``window_size=4``, frame 0 forms
     the causal anchor bin and frames 1--4, 5--8, and 9--12 form the remaining
@@ -30,7 +30,10 @@ class PerViewCausalRFFT(nn.Module):
     coefficient contract.  A real length-4 signal is packed without redundant
     imaginary DC/Nyquist terms as ``[X0.real, X1.real, X1.imag, X2.real]``.
     Consequently, the transform is complete and has exactly
-    ``input_channels * window_size`` output channels.
+    ``input_channels * window_size`` output channels. ``representation`` keeps
+    the historical packing (``raw_rfft``), adds Parseval weights to make the
+    real packing orthonormal (``parseval_rfft``), or retains the same causal
+    windows directly (``time_packed``) as a frequency-specific control.
     """
 
     def __init__(
@@ -42,6 +45,9 @@ class PerViewCausalRFFT(nn.Module):
         pad_multiple: int | None = 16,
         pad_value: float = -1.0,
         normalization: Literal["none", "sample_rms"] = "none",
+        representation: Literal[
+            "raw_rfft", "parseval_rfft", "time_packed"
+        ] = "raw_rfft",
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
@@ -57,12 +63,19 @@ class PerViewCausalRFFT(nn.Module):
             raise ValueError("pad_multiple must be positive or None")
         if normalization not in {"none", "sample_rms"}:
             raise ValueError(f"unsupported normalization: {normalization}")
+        if representation not in {
+            "raw_rfft",
+            "parseval_rfft",
+            "time_packed",
+        }:
+            raise ValueError(f"unsupported representation: {representation}")
         self.num_views = num_views
         self.output_size = output_size
         self.window_size = window_size
         self.pad_multiple = pad_multiple
         self.pad_value = pad_value
         self.normalization = normalization
+        self.representation = representation
         self.eps = eps
 
     def output_channels(self, input_channels: int) -> int:
@@ -139,6 +152,46 @@ class PerViewCausalRFFT(nn.Module):
             raise RuntimeError("internal RFFT unpacking contract is inconsistent")
         return torch.stack(coefficients, dim=-1)
 
+    def _parseval_scales(self, reference: Tensor) -> Tensor:
+        """Return real-RFFT packing weights in exact packed-channel order."""
+        scales = [1.0]
+        for frequency in range(1, self.window_size // 2 + 1):
+            is_nyquist = (
+                self.window_size % 2 == 0
+                and frequency == self.window_size // 2
+            )
+            scales.append(1.0 if is_nyquist else 2.0**0.5)
+            if not is_nyquist:
+                scales.append(2.0**0.5)
+        if len(scales) != self.window_size:
+            raise RuntimeError("internal Parseval scaling contract is inconsistent")
+        return reference.new_tensor(scales).reshape(
+            *((1,) * 4), self.window_size, 1, 1
+        )
+
+    def _represent_windows(self, windows: Tensor) -> Tensor:
+        """Map causal windows to [B,V,Fp,C,N,H,Wv] without mixing views."""
+        if self.representation == "time_packed":
+            return windows.permute(0, 1, 2, 4, 3, 5, 6)
+        spectrum = torch.fft.rfft(
+            windows, dim=3, norm="ortho"
+        ).movedim(3, -1)
+        packed = self._pack(spectrum)
+        if self.representation == "parseval_rfft":
+            packed = packed * self._parseval_scales(packed)
+        return packed
+
+    def _invert_windows(self, packed: Tensor) -> Tensor:
+        """Invert [B,V,Fp,C,N,H,Wv] to causal time-domain windows."""
+        if self.representation == "time_packed":
+            return packed
+        if self.representation == "parseval_rfft":
+            packed = packed / self._parseval_scales(packed)
+        spectrum = self._unpack(packed).movedim(-1, 4)
+        return torch.fft.irfft(
+            spectrum, n=self.window_size, dim=4, norm="ortho"
+        )
+
     def forward(self, video: Tensor) -> Tensor:
         if video.ndim != 5:
             raise ValueError(
@@ -167,8 +220,7 @@ class PerViewCausalRFFT(nn.Module):
         )
         windows = torch.cat([anchor.unsqueeze(2), tail], dim=2)
         compute = windows.to(dtype=self._compute_dtype(windows))
-        spectrum = torch.fft.rfft(compute, dim=3, norm="ortho").movedim(3, -1)
-        packed = self._pack(spectrum)
+        packed = self._represent_windows(compute)
         coefficients = packed.permute(0, 1, 3, 4, 2, 5, 6).reshape(
             b,
             self.num_views,
@@ -222,10 +274,7 @@ class PerViewCausalRFFT(nn.Module):
             height,
             view_width,
         ).to(dtype=self._compute_dtype(views))
-        spectrum = self._unpack(packed).movedim(-1, 4)
-        windows = torch.fft.irfft(
-            spectrum, n=self.window_size, dim=4, norm="ortho"
-        )  # [B,V,Fp,C,N,H,Wv]
+        windows = self._invert_windows(packed)  # [B,V,Fp,C,N,H,Wv]
         anchor = windows[:, :, 0, :, :1].permute(0, 1, 3, 2, 4, 5)
         tail = windows[:, :, 1:].permute(0, 1, 2, 4, 3, 5, 6).reshape(
             b,

@@ -7,7 +7,7 @@ time_frequency:
   source: rgb_pre_temporal_vae
   split_views_before_transform: true
   num_views: 3
-  representation: causal_rfft
+  representation: raw_rfft
   preserve_coefficients: real_imaginary
   window_size: 4
   pad_multiple: 16

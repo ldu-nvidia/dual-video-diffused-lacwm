@@ -22,6 +22,90 @@ def test_causal_rfft_shape_and_exact_round_trip():
     torch.testing.assert_close(reconstructed, video, rtol=1e-10, atol=1e-10)
 
 
+@pytest.mark.parametrize(
+    "representation",
+    ["raw_rfft", "parseval_rfft", "time_packed"],
+)
+def test_causal_representation_ablation_has_exact_round_trip(representation):
+    video = torch.randn(2, 13, 3, 6, 12, dtype=torch.float64)
+    transform = PerViewCausalRFFT(
+        num_views=3,
+        output_size=(6, 12),
+        window_size=4,
+        pad_multiple=None,
+        representation=representation,
+    )
+
+    state = transform(video)
+
+    assert state.shape == (2, 12, 4, 6, 12)
+    torch.testing.assert_close(
+        transform.inverse(state), video, rtol=1e-10, atol=1e-10
+    )
+
+
+def test_default_representation_is_historical_raw_rfft():
+    video = torch.randn(2, 13, 3, 6, 12, dtype=torch.float64)
+    kwargs = {
+        "num_views": 3,
+        "output_size": (6, 12),
+        "window_size": 4,
+        "pad_multiple": None,
+    }
+
+    default = PerViewCausalRFFT(**kwargs)(video)
+    explicit = PerViewCausalRFFT(
+        **kwargs, representation="raw_rfft"
+    )(video)
+
+    assert torch.equal(default, explicit)
+
+
+def test_parseval_rfft_preserves_causal_window_energy():
+    video = torch.randn(2, 13, 3, 6, 12, dtype=torch.float64)
+    kwargs = {
+        "num_views": 3,
+        "output_size": (6, 12),
+        "window_size": 4,
+        "pad_multiple": None,
+    }
+    time_packed = PerViewCausalRFFT(
+        **kwargs, representation="time_packed"
+    )(video)
+    parseval = PerViewCausalRFFT(
+        **kwargs, representation="parseval_rfft"
+    )(video)
+
+    torch.testing.assert_close(
+        parseval.square().sum(),
+        time_packed.square().sum(),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_time_packed_channel_order_is_within_window_time():
+    tail_window = torch.tensor([1.0, 2.0, 4.0, 8.0])
+    video = torch.cat(
+        [torch.tensor([0.5]), tail_window, tail_window, tail_window]
+    ).reshape(1, 13, 1, 1, 1)
+    transform = PerViewCausalRFFT(
+        num_views=1,
+        output_size=(1, 1),
+        window_size=4,
+        pad_multiple=None,
+        representation="time_packed",
+    )
+
+    state = transform(video)
+
+    torch.testing.assert_close(state[0, :, 1, 0, 0], tail_window)
+    torch.testing.assert_close(
+        state[0, :, 0, 0, 0],
+        torch.full((4,), 0.5),
+    )
+
+
 def test_causal_rfft_preserves_phase_as_real_imaginary_components():
     n = torch.arange(4, dtype=torch.float64)
     base = torch.cos(2 * math.pi * n / 4)
@@ -46,9 +130,20 @@ def test_transforms_never_mix_width_stacked_views():
     video = torch.zeros(1, 13, 1, 4, 12)
     video[..., :4] = torch.randn(1, 13, 1, 4, 4)
 
-    rfft = PerViewCausalRFFT(
-        num_views=3, output_size=(4, 12), window_size=4, pad_multiple=None
-    )
+    rffts = [
+        PerViewCausalRFFT(
+            num_views=3,
+            output_size=(4, 12),
+            window_size=4,
+            pad_multiple=None,
+            representation=representation,
+        )
+        for representation in (
+            "raw_rfft",
+            "parseval_rfft",
+            "time_packed",
+        )
+    ]
     stft = PerViewTemporalSTFT(
         num_views=3,
         output_size=(4, 12),
@@ -58,7 +153,8 @@ def test_transforms_never_mix_width_stacked_views():
         pad_multiple=None,
     )
 
-    for coefficients in (rfft(video), stft(video)):
+    for transform in (*rffts, stft):
+        coefficients = transform(video)
         assert coefficients[..., :4].abs().sum() > 0
         assert torch.count_nonzero(coefficients[..., 4:]) == 0
 
