@@ -21,6 +21,8 @@ ABC_MANIFEST="$DATA_ROOT/abc_pp/manifest.txt"
 ABC_MANIFEST_SHA256="e52232b49ffec39600aa22e2d708497f22a4ea57fc89f84bc289ae4b1e0a5c09"
 WANDB_ENTITY_VALUE="zijiandu"
 WANDB_PROJECT_VALUE="dual-video-diffusion-private"
+SLURM_ACCOUNT="coreai_chef_posttrain"
+SLURM_QOS="normal"
 
 EXPECTED_COMMIT=""
 ALLOWED_ACTIVE_JOB_IDS=()
@@ -36,7 +38,8 @@ usage() {
 Usage: tools/slurm/submit_stage_faithful_eval.sh [options]
 
 Preview or submit one evaluation-only, non-array, non-requeueable Slurm job.
-The job uses one node, eight B200s, 64 CPUs, 600G, batch, and 00:30:00.
+The job uses one node, eight B200s, 64 CPUs, 600G, batch, account
+coreai_chef_posttrain, QOS normal, and 00:30:00.
 
 Options:
   --expected-commit SHA    Require this exact clean 40-character Git commit
@@ -144,6 +147,8 @@ SBATCH_ARGS=(
   --mem=600G
   --time=00:30:00
   --partition=batch
+  --account="$SLURM_ACCOUNT"
+  --qos="$SLURM_QOS"
   --no-requeue
   --open-mode=append
   --export=ALL
@@ -167,6 +172,7 @@ echo "Git commit: $EXPECTED_COMMIT (clean; based on 5880d047)"
 echo "Checkpoint: $CHECKPOINT ($CHECKPOINT_SHA256; $CHECKPOINT_BYTES bytes)"
 echo "Output: $OUTPUT_ROOT (fresh)"
 echo "Resources: non-array, 1 node, 8 B200, 64 CPUs, 600G, 00:30:00, no-requeue"
+echo "Slurm allocation: partition=batch, account=$SLURM_ACCOUNT, QOS=$SLURM_QOS"
 echo "Evaluation: iter=199 after skip=4, NFE=[2,4,8], 8 rank artifacts"
 echo "Sources: autonomous, autonomous_shuffled, autonomous_legacy, off"
 echo "W&B: $WANDB_ENTITY_VALUE/$WANDB_PROJECT_VALUE (PRIVATE), group=null, resume=never"

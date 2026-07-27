@@ -57,6 +57,8 @@ class StageFaithfulEvalLauncherTest(unittest.TestCase):
             "--mem=600G",
             "--time=00:30:00",
             "--partition=batch",
+            "--account=\"$SLURM_ACCOUNT\"",
+            "--qos=\"$SLURM_QOS\"",
             "--no-requeue",
         ):
             self.assertIn(fragment, submit)
@@ -64,7 +66,13 @@ class StageFaithfulEvalLauncherTest(unittest.TestCase):
         self.assertIn("#SBATCH --nodes=1", slot)
         self.assertIn("#SBATCH --gpus-per-node=8", slot)
         self.assertIn("#SBATCH --time=00:30:00", slot)
+        self.assertIn("#SBATCH --account=coreai_chef_posttrain", slot)
+        self.assertIn("#SBATCH --qos=normal", slot)
         self.assertIn('[[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]', slot)
+        self.assertEqual(
+            self.helper.EXPECTED_SLURM_ACCOUNT, "coreai_chef_posttrain"
+        )
+        self.assertEqual(self.helper.EXPECTED_SLURM_QOS, "normal")
 
     def test_active_jobs_are_exact_fail_closed_and_checked_twice(self):
         empty = self.helper._active_job_contract([], [])

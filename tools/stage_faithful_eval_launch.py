@@ -25,6 +25,8 @@ CORE_COMMIT = "5880d047347ee572fcbdd6b38df98e87bb40e335"
 CONFIG_SELECTOR = "ravenhuang/wan-dit/dual_abc_with_ztf_condition.yaml"
 EXPECTED_ENTITY = "zijiandu"
 EXPECTED_PROJECT = "dual-video-diffusion-private"
+EXPECTED_SLURM_ACCOUNT = "coreai_chef_posttrain"
+EXPECTED_SLURM_QOS = "normal"
 REQUESTED_VIEWER_EMAIL = "ldu@nvidia.edu"
 WORLD_SIZE = 8
 ARTIFACT_ITERATION = 199
@@ -503,6 +505,8 @@ def command_create_manifest(args: argparse.Namespace) -> int:
                 "memory": "600G",
                 "time_limit": "00:30:00",
                 "partition": "batch",
+                "account": EXPECTED_SLURM_ACCOUNT,
+                "qos": EXPECTED_SLURM_QOS,
                 "requeue": False,
                 "active_job_coexistence": _active_job_contract(
                     args.allow_active_job_id, args.observed_active_job

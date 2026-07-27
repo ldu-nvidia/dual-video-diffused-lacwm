@@ -7,6 +7,8 @@
 #SBATCH --mem=600G
 #SBATCH --time=00:30:00
 #SBATCH --partition=batch
+#SBATCH --account=coreai_chef_posttrain
+#SBATCH --qos=normal
 #SBATCH --open-mode=append
 #SBATCH --no-requeue
 
@@ -57,6 +59,8 @@ CHECKPOINT_SHA256="5e96584ac70af54463ddebde1d2581c982c0be1aabbac1335b26722a1c031
 CHECKPOINT_BYTES="4249340573"
 WANDB_ENTITY_VALUE="zijiandu"
 WANDB_PROJECT_VALUE="dual-video-diffusion-private"
+SLURM_ACCOUNT="coreai_chef_posttrain"
+SLURM_QOS="normal"
 
 PROJECT_ROOT="$REPO_ROOT/projects/latent_action_models"
 EVALUATOR="$PROJECT_ROOT/evaluate_stage_faithful.py"
@@ -78,6 +82,10 @@ if command -v scontrol >/dev/null 2>&1; then
   JOB_RECORD="$(scontrol show job "$SLURM_JOB_ID" -o)"
   [[ "$JOB_RECORD" == *"Requeue=0"* ]] || die "Slurm job is unexpectedly requeueable"
   [[ "$JOB_RECORD" != *"ArrayTaskId="* ]] || die "Slurm job is unexpectedly an array"
+  [[ "$JOB_RECORD" == *"Account=$SLURM_ACCOUNT "* ]] || \
+    die "Slurm job has an unexpected account"
+  [[ "$JOB_RECORD" == *"QOS=$SLURM_QOS "* ]] || \
+    die "Slurm job has an unexpected QOS"
 fi
 
 [[ "$REPO_ROOT" == /* && "$RUN_ROOT" == /* && "$OUTPUT_ROOT" == /* ]] || \
@@ -218,6 +226,7 @@ printf '\n'
 echo "Evaluation ID: $EVAL_ID"
 echo "Checkpoint: $CHECKPOINT ($CHECKPOINT_SHA256)"
 echo "World size: 8 B200 ranks; non-array; no requeue"
+echo "Slurm allocation: account=$SLURM_ACCOUNT, QOS=$SLURM_QOS"
 echo "Evaluation: NFE=[2,4,8], sources=[autonomous,autonomous_shuffled,autonomous_legacy,off]"
 echo "Clock: sigma=1 noise, sigma=0 clean"
 echo "W&B: $WANDB_ENTITY_VALUE/$WANDB_PROJECT_VALUE (PRIVATE), id=$EVAL_ID, group=null, resume=never"
