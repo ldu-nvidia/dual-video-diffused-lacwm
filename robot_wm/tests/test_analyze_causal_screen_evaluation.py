@@ -588,6 +588,58 @@ class CompletedEvaluationAnalysisTest(unittest.TestCase):
     def fixture(self, temporary):
         return CompletedEvaluationFixture(Path(temporary), self.wrapper)
 
+    def test_snapshot_load_contract_accepts_effective_gate_roundoff(self):
+        expected = {
+            "snapshot_schema_version": 3,
+            "next_iteration": self.wrapper.evaluator.COMPLETED_UPDATES,
+            "effective_state_gate": 0.1,
+            "strict_key_shape_dtype_match": True,
+        }
+        actual = {
+            **expected,
+            "effective_state_gate": 0.09999999403953552,
+        }
+        self.assertTrue(
+            self.wrapper._snapshot_load_contract_matches(actual, expected)
+        )
+
+    def test_snapshot_load_contract_rejects_gate_outside_tolerance(self):
+        expected = {
+            "snapshot_schema_version": 3,
+            "next_iteration": self.wrapper.evaluator.COMPLETED_UPDATES,
+            "effective_state_gate": 0.1,
+            "strict_key_shape_dtype_match": True,
+        }
+        actual = {
+            **expected,
+            "effective_state_gate": (
+                0.1
+                + self.wrapper.evaluator.EFFECTIVE_STATE_GATE_ABS_TOL
+                + 1e-9
+            ),
+        }
+        self.assertFalse(
+            self.wrapper._snapshot_load_contract_matches(actual, expected)
+        )
+
+    def test_snapshot_load_contract_keeps_other_fields_exact(self):
+        expected = {
+            "snapshot_schema_version": 3,
+            "next_iteration": self.wrapper.evaluator.COMPLETED_UPDATES,
+            "effective_state_gate": 0.1,
+            "strict_key_shape_dtype_match": True,
+        }
+        actual = {
+            **expected,
+            "effective_state_gate": 0.09999999403953552,
+            "next_iteration": (
+                float(self.wrapper.evaluator.COMPLETED_UPDATES) + 1e-9
+            ),
+        }
+        self.assertFalse(
+            self.wrapper._snapshot_load_contract_matches(actual, expected)
+        )
+
     def test_complete_inventory_delegates_only_manifest_roots(self):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = self.fixture(temporary)

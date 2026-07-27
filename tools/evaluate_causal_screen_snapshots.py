@@ -42,6 +42,7 @@ SCHEMA_VERSION = 2
 WORLD_SIZE = 8
 COMPLETED_UPDATES = 200
 EVALUATION_ITERATION = 199
+EFFECTIVE_STATE_GATE_ABS_TOL = 1e-6
 SIGMA_CONVENTION = "1=noise,0=clean"
 BASE_EVALUATION_NOISE_SEED = 20_260_726
 NFE_STEPS = (1, 2, 4, 8)
@@ -1914,7 +1915,7 @@ def _instantiate_and_load_model(
         effective_gate,
         float(arm["state_gate_init"]),
         rel_tol=0.0,
-        abs_tol=1e-6,
+        abs_tol=EFFECTIVE_STATE_GATE_ABS_TOL,
     ):
         raise EvaluationContractError(
             f"{arm['name']} effective gate {effective_gate} differs from "

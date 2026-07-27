@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -56,6 +57,40 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         _fail(f"{label} must be a mapping")
     return value
+
+
+def _snapshot_load_contract_matches(
+    snapshot: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    """Match the load contract, tolerating only serialized gate roundoff."""
+    for key, wanted in expected.items():
+        actual = snapshot.get(key)
+        if key != "effective_state_gate":
+            if actual != wanted:
+                return False
+            continue
+        if (
+            isinstance(actual, bool)
+            or isinstance(wanted, bool)
+            or not isinstance(actual, (int, float))
+            or not isinstance(wanted, (int, float))
+        ):
+            return False
+        actual_float = float(actual)
+        wanted_float = float(wanted)
+        if (
+            not math.isfinite(actual_float)
+            or not math.isfinite(wanted_float)
+            or not math.isclose(
+                actual_float,
+                wanted_float,
+                rel_tol=0.0,
+                abs_tol=evaluator.EFFECTIVE_STATE_GATE_ABS_TOL,
+            )
+        ):
+            return False
+    return True
 
 
 def _full_sha256(value: Any, label: str) -> str:
@@ -662,9 +697,9 @@ def _validate_output_sidecar(
         "runtime_condition_sources": list(evaluator.CONDITION_SOURCES),
         "runtime_override_is_parameter_free": True,
     }
-    if any(
-        snapshot.get(key) != value
-        for key, value in expected_snapshot_load.items()
+    if not _snapshot_load_contract_matches(
+        snapshot,
+        expected_snapshot_load,
     ):
         _fail(f"{arm_name} snapshot-load contract differs")
     source_contract = _mapping(
