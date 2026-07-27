@@ -19,7 +19,7 @@ WANDB_ENTITY_VALUE="zijiandu"
 WANDB_PROJECT_VALUE="dual-video-diffusion-private"
 
 PARTITION="batch"
-TIME_LIMIT="06:00:00"
+TIME_LIMIT="04:00:00"
 CPUS="160"
 MEMORY="1000G"
 ACCOUNT=""
@@ -62,7 +62,7 @@ Options:
                            Passing exact-commit real-data dual-with-ztf report
   --max-concurrent-arms N  Array concurrency in [1,5] (default: 4)
   --partition NAME         Slurm partition (default: batch)
-  --time HH:MM:SS          Per-arm limit (default: 06:00:00)
+  --time HH:MM:SS          Per-arm limit (default: 04:00:00; batch QoS maximum)
   --cpus N                 CPUs per arm (default: 160)
   --mem VALUE              Memory per arm (default: 1000G)
   --account NAME           Optional Slurm account

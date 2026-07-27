@@ -27,7 +27,8 @@ dual_diffusion:
   # the video trunk blind to TF, ``matched`` injects this sample's current TF
   # state, and ``shuffled`` injects another sample's hidden-future TF while
   # retaining the correct observed history and local corruption noise.
-  condition_mode: off
+  # Quote ``off`` because YAML 1.1 otherwise resolves it to Boolean false.
+  condition_mode: "off"
   tf_channels: 12
   # Effective post-LayerNorm scale (the adapter stores atanh(scale) so the
   # configured value is directly interpretable). The production-safe default

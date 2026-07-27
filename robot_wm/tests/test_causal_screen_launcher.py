@@ -31,6 +31,49 @@ class CausalScreenLauncherTest(unittest.TestCase):
     def setUpClass(cls):
         cls.helper = load_helper()
 
+    def test_condition_modes_remain_strings_when_yaml_is_loaded(self):
+        import yaml
+
+        config_root = (
+            REPO_ROOT
+            / "projects"
+            / "latent_action_models"
+            / "configs"
+        )
+        paths = {
+            config_root / "models" / "dual_explicit_action_dit_model.yaml": (
+                ("dual_diffusion", "condition_mode"),
+                "off",
+            ),
+            config_root
+            / "experiments_0908"
+            / "ravenhuang"
+            / "wan-dit"
+            / "dual_abc_no_ztf_condition.yaml": (
+                ("model", "dual_diffusion", "condition_mode"),
+                "off",
+            ),
+            config_root
+            / "experiments_0908"
+            / "ravenhuang"
+            / "wan-dit"
+            / "dual_abc_with_ztf_condition.yaml": (
+                ("model", "dual_diffusion", "condition_mode"),
+                "matched",
+            ),
+        }
+        for path, (keys, expected) in paths.items():
+            payload = yaml.safe_load(path.read_text())
+            actual = payload
+            for key in keys:
+                actual = actual[key]
+            self.assertIsInstance(actual, str, path)
+            self.assertEqual(actual, expected, path)
+
+    def test_slurm_default_fits_batch_qos_limit(self):
+        self.assertIn('TIME_LIMIT="04:00:00"', SUBMIT.read_text())
+        self.assertIn("#SBATCH --time=04:00:00", SLOT.read_text())
+
     def test_array_contract_has_exact_five_controlled_arms(self):
         observed = [
             (
