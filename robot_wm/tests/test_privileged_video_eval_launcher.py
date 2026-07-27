@@ -203,7 +203,7 @@ class PrivilegedVideoEvalLauncherTest(unittest.TestCase):
                 "trainer.config.transition_handoff_path=null",
                 "trainer.config.load_path=null",
                 "trainer.config.exclude_keys=[]",
-                "trainer.config.share_spatial_attention=false",
+                "+trainer.config.share_spatial_attention=false",
                 (
                     "trainer.config.saving.save_path="
                     f"{output}/_never_write_snapshot.pt"
@@ -279,6 +279,50 @@ class PrivilegedVideoEvalLauncherTest(unittest.TestCase):
             slot,
         )
         self.assertNotIn("HYDRA_OVERRIDES[@]} -eq 49", slot)
+
+    def test_exact_hydra_vectors_compose_against_real_training_config(self):
+        from hydra import compose, initialize_config_dir
+
+        project_root = REPO_ROOT / "projects" / "latent_action_models"
+        sys.path.insert(0, str(project_root))
+        try:
+            import custom_resolvers  # noqa: F401
+        finally:
+            sys.path.pop(0)
+
+        config_dir = project_root / "configs"
+        commit = "a" * 40
+        with initialize_config_dir(
+            version_base=None,
+            config_dir=str(config_dir.resolve()),
+        ):
+            for arm in self.helper.ARMS:
+                label = arm["label"]
+                eval_id = self.helper.expected_eval_id(commit, label)
+                output = Path("/approved/privileged-video") / eval_id
+                cfg = compose(
+                    config_name="train",
+                    overrides=self.helper.expected_hydra_overrides(
+                        label,
+                        eval_id,
+                        output,
+                    ),
+                )
+                self.assertFalse(
+                    cfg.trainer.config.share_spatial_attention
+                )
+                self.assertFalse(cfg.model.dual_diffusion.condition_on_tf)
+                self.assertEqual(
+                    cfg.model.dual_diffusion.condition_mode,
+                    "off",
+                )
+                self.assertTrue(
+                    cfg.model.dual_diffusion.evaluation_disable_tf_clock
+                )
+                self.assertEqual(
+                    cfg.privileged_video_evaluation.parent_arm,
+                    arm["parent_arm"],
+                )
 
     def test_slot_invokes_zero_update_evaluator_only(self):
         source = SLOT.read_text(encoding="utf-8")

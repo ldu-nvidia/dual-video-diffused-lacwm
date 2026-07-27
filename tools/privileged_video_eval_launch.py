@@ -201,7 +201,7 @@ def expected_hydra_overrides(
         "trainer.config.gradient_accumulation_steps=1",
         "trainer.config.load_path=null",
         "trainer.config.exclude_keys=[]",
-        "trainer.config.share_spatial_attention=false",
+        "+trainer.config.share_spatial_attention=false",
         "trainer.config.logging.log_every=5",
         "trainer.config.saving.save_every=50",
         f"trainer.config.saving.save_path={out}/_never_write_snapshot.pt",
