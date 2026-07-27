@@ -82,7 +82,7 @@ class ArtifactRecord:
         return self.dataset, self.global_rank
 
 
-def _required_tensor_keys() -> set[str]:
+def _required_tensor_keys(nfe_steps: Sequence[int] = NFE_STEPS) -> set[str]:
     keys = {
         "video_clean",
         "tf_clean",
@@ -98,7 +98,7 @@ def _required_tensor_keys() -> set[str]:
         "condition_on_tf",
         "condition_mode_code",
     }
-    for nfe in NFE_STEPS:
+    for nfe in nfe_steps:
         keys.update(
             {
                 f"video_final_nfe_{nfe}",
@@ -119,21 +119,25 @@ def _source_infix(source: str) -> str:
     return f"_{source}"
 
 
-def _source_tensor_keys(source: str) -> set[str]:
+def _source_tensor_keys(
+    source: str, nfe_steps: Sequence[int] = NFE_STEPS
+) -> set[str]:
     infix = _source_infix(source)
     return {
         f"{prefix}{infix}_nfe_{nfe}"
-        for nfe in NFE_STEPS
+        for nfe in nfe_steps
         for prefix in ("video_final", "tf_final", "decoded_future")
     }
 
 
 def _validate_source_tensor_inventory(
-    tensor_keys: set[str], declared_sources: Sequence[str]
+    tensor_keys: set[str],
+    declared_sources: Sequence[str],
+    nfe_steps: Sequence[int] = NFE_STEPS,
 ) -> None:
     expected = set()
     for source in declared_sources:
-        expected.update(_source_tensor_keys(source))
+        expected.update(_source_tensor_keys(source, nfe_steps))
 
     actual = set()
     source_prefixes = ("video_final", "tf_final", "decoded_future")
@@ -151,7 +155,7 @@ def _validate_source_tensor_inventory(
             raise ArtifactValidationError(
                 f"tensor {key!r} belongs to undeclared source {source!r}"
             )
-        if nfe not in NFE_STEPS:
+        if nfe not in nfe_steps:
             raise ArtifactValidationError(
                 f"tensor {key!r} uses undeclared NFE={nfe}"
             )
@@ -279,7 +283,12 @@ def _manifest_tensor_schema(
     return schema
 
 
-def _validate_artifact(arm: str, root: Path, raw_path: Path) -> ArtifactRecord:
+def _validate_artifact(
+    arm: str,
+    root: Path,
+    raw_path: Path,
+    nfe_steps: Sequence[int] = NFE_STEPS,
+) -> ArtifactRecord:
     _ensure_no_symlink_components(raw_path, root)
     path = _canonical_regular_file(raw_path, f"{arm} safetensors artifact")
     match = ARTIFACT_NAME_RE.fullmatch(path.name)
@@ -325,7 +334,7 @@ def _validate_artifact(arm: str, root: Path, raw_path: Path) -> ArtifactRecord:
         raise ArtifactValidationError(f"safetensors SHA-256 mismatch: {path}")
 
     manifest_schema = _manifest_tensor_schema(payload, sidecar)
-    missing = sorted(_required_tensor_keys() - set(manifest_schema))
+    missing = sorted(_required_tensor_keys(nfe_steps) - set(manifest_schema))
     if missing:
         raise ArtifactValidationError(
             f"artifact is missing required tensor keys {missing}: {path}"
@@ -380,14 +389,16 @@ def _validate_artifact(arm: str, root: Path, raw_path: Path) -> ArtifactRecord:
     )
 
 
-def _discover_arm(arm: str, root: Path) -> dict[tuple[str, int], ArtifactRecord]:
+def _discover_arm(
+    arm: str, root: Path, nfe_steps: Sequence[int] = NFE_STEPS
+) -> dict[tuple[str, int], ArtifactRecord]:
     raw_paths = sorted(root.rglob("latent_trajectory_rank_*.safetensors"))
     if not raw_paths:
         raise ArtifactValidationError(f"arm {arm!r} contains no rank artifacts: {root}")
 
     records: dict[tuple[str, int], ArtifactRecord] = {}
     for raw_path in raw_paths:
-        record = _validate_artifact(arm, root, raw_path)
+        record = _validate_artifact(arm, root, raw_path, nfe_steps)
         if record.pair_key in records:
             raise ArtifactValidationError(
                 f"arm {arm!r} has duplicate dataset/rank pair {record.pair_key}; "
@@ -481,6 +492,7 @@ def _decoded_metrics(
 
 def _analyze_record(
     record: ArtifactRecord,
+    nfe_steps: Sequence[int] = NFE_STEPS,
 ) -> tuple[
     dict[str, dict[str, dict[str, float]]],
     dict[str, Any],
@@ -570,9 +582,9 @@ def _analyze_record(
                     "evaluation_nfe_steps must be a one-dimensional integer tensor"
                 )
             evaluation_nfe_steps = tuple(int(value) for value in nfe_tensor.tolist())
-            if evaluation_nfe_steps != NFE_STEPS:
+            if evaluation_nfe_steps != tuple(nfe_steps):
                 raise ArtifactValidationError(
-                    f"evaluation_nfe_steps must be {NFE_STEPS}, "
+                    f"evaluation_nfe_steps must be {tuple(nfe_steps)}, "
                     f"got {evaluation_nfe_steps}"
                 )
             if (
@@ -611,7 +623,7 @@ def _analyze_record(
                     "oracle_sources_are_leakage must be the integer scalar 1"
                 )
             _validate_source_tensor_inventory(
-                set(record.tensor_schema), declared_sources
+                set(record.tensor_schema), declared_sources, nfe_steps
             )
             if (
                 condition_tensor.numel() != 1
@@ -652,7 +664,7 @@ def _analyze_record(
             for source in declared_sources:
                 source_metrics[source] = {}
                 infix = _source_infix(source)
-                for nfe in NFE_STEPS:
+                for nfe in nfe_steps:
                     video_key = f"video_final{infix}_nfe_{nfe}"
                     tf_key = f"tf_final{infix}_nfe_{nfe}"
                     decoded_key = f"decoded_future{infix}_nfe_{nfe}"
@@ -1113,20 +1125,34 @@ def analyze(
     *,
     baseline: str,
     output: str | Path,
+    expected_nfe_steps: Sequence[int] = NFE_STEPS,
     bootstrap_samples: int = 10_000,
     bootstrap_seed: int = 20_260_726,
     confidence: float = 0.95,
 ) -> dict[str, Any]:
     """Validate, compare, and exclusively write one analysis JSON document."""
 
-    if len(arms) < 2:
-        raise ArtifactValidationError("at least two arms are required")
+    if not arms:
+        raise ArtifactValidationError("at least one arm is required")
     if baseline not in arms:
         raise ArtifactValidationError(f"baseline arm {baseline!r} was not supplied")
     if bootstrap_samples < 100:
         raise ArtifactValidationError("bootstrap_samples must be at least 100")
     if not 0.5 < confidence < 1.0:
         raise ArtifactValidationError("confidence must lie strictly between 0.5 and 1")
+    nfe_steps = tuple(expected_nfe_steps)
+    if (
+        not nfe_steps
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in nfe_steps
+        )
+        or tuple(sorted(set(nfe_steps))) != nfe_steps
+    ):
+        raise ArtifactValidationError(
+            "expected_nfe_steps must be unique positive integers in "
+            "strictly increasing order"
+        )
 
     canonical_roots: dict[str, Path] = {}
     for name, raw_root in arms.items():
@@ -1138,7 +1164,7 @@ def analyze(
     output_path = _prepare_output_path(output, list(canonical_roots.values()))
 
     inventories = {
-        name: _discover_arm(name, root)
+        name: _discover_arm(name, root, nfe_steps)
         for name, root in sorted(canonical_roots.items())
     }
     baseline_pairs = set(inventories[baseline])
@@ -1169,7 +1195,7 @@ def analyze(
                 identity,
                 intervention,
                 condition_sources,
-            ) = _analyze_record(record)
+            ) = _analyze_record(record, nfe_steps)
             analyzed[arm][pair_key] = {
                 # Retain the original autonomous field for cross-arm analysis
                 # and existing consumers.
@@ -1232,7 +1258,7 @@ def analyze(
                 "oracle_leakage": source in ORACLE_SOURCES,
                 "nfe": {},
             }
-            for nfe in NFE_STEPS:
+            for nfe in nfe_steps:
                 nfe_key = str(nfe)
                 source_aggregates[source]["nfe"][nfe_key] = {}
                 for metric in METRIC_DIRECTIONS:
@@ -1277,7 +1303,7 @@ def analyze(
                 "nfe": {},
                 "relative_nfe": {},
             }
-            for nfe in NFE_STEPS:
+            for nfe in nfe_steps:
                 nfe_key = str(nfe)
                 comparison["nfe"][nfe_key] = {}
                 comparison["relative_nfe"][nfe_key] = {}
@@ -1350,7 +1376,7 @@ def analyze(
     arm_aggregates: dict[str, Any] = {}
     for arm in sorted(inventories):
         arm_aggregates[arm] = {}
-        for nfe in NFE_STEPS:
+        for nfe in nfe_steps:
             nfe_key = str(nfe)
             arm_aggregates[arm][nfe_key] = {}
             for metric in METRIC_DIRECTIONS:
@@ -1377,7 +1403,7 @@ def analyze(
             "nfe": {},
             "relative_nfe": {},
         }
-        for nfe in NFE_STEPS:
+        for nfe in nfe_steps:
             nfe_key = str(nfe)
             comparison["nfe"][nfe_key] = {}
             comparison["relative_nfe"][nfe_key] = {}
@@ -1487,7 +1513,7 @@ def analyze(
                 "nfe": {},
                 "relative_nfe": {},
             }
-            for nfe in NFE_STEPS:
+            for nfe in nfe_steps:
                 nfe_key = str(nfe)
                 source_comparison["nfe"][nfe_key] = {}
                 source_comparison["relative_nfe"][nfe_key] = {}
@@ -1699,7 +1725,7 @@ def analyze(
         "kind": "dual_video_diffusion_matched_nfe_analysis",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "sigma_convention": SIGMA_CONVENTION,
-        "nfe_steps": list(NFE_STEPS),
+        "nfe_steps": list(nfe_steps),
         "baseline_arm": baseline,
         "oracle_diagnostics": {
             "oracle_sources_are_leakage": True,
@@ -1832,6 +1858,17 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="fresh .json path outside every arm root; parent must already exist",
     )
+    parser.add_argument(
+        "--nfe-steps",
+        type=int,
+        nargs="+",
+        default=list(NFE_STEPS),
+        metavar="N",
+        help=(
+            "exact increasing NFE vector embedded in every artifact "
+            f"(default: {' '.join(str(value) for value in NFE_STEPS)})"
+        ),
+    )
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--bootstrap-seed", type=int, default=20_260_726)
     parser.add_argument("--confidence", type=float, default=0.95)
@@ -1849,6 +1886,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         arms,
         baseline=args.baseline,
         output=args.output,
+        expected_nfe_steps=args.nfe_steps,
         bootstrap_samples=args.bootstrap_samples,
         bootstrap_seed=args.bootstrap_seed,
         confidence=args.confidence,

@@ -12,6 +12,7 @@ from tools.analyze_dual_nfe_artifacts import (
     NFE_STEPS,
     SIGMA_CONVENTION,
     analyze,
+    main,
 )
 
 SOURCE_CODES = {
@@ -39,6 +40,7 @@ def _tensors(
     oracle_leakage_flag: int = 1,
     condition_mode_code: int | None = None,
     oracle_equal: bool = False,
+    nfe_steps: tuple[int, ...] = NFE_STEPS,
 ):
     video_clean = (
         torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
@@ -85,7 +87,7 @@ def _tensors(
             [condition_mode_code], dtype=torch.int64
         ),
         "evaluation_noise_seed": torch.tensor([evaluation_seed], dtype=torch.int64),
-        "evaluation_nfe_steps": torch.tensor(NFE_STEPS, dtype=torch.int64),
+        "evaluation_nfe_steps": torch.tensor(nfe_steps, dtype=torch.int64),
         "evaluation_condition_source_codes": torch.tensor(
             [SOURCE_CODES[source] for source in condition_sources],
             dtype=torch.int64,
@@ -104,7 +106,7 @@ def _tensors(
     }
     for source in condition_sources:
         infix = "" if source == "autonomous" else f"_{source}"
-        for nfe in NFE_STEPS:
+        for nfe in nfe_steps:
             source_gain = source_gains[source]
             latent_error = source_gain * (0.40 / nfe + 0.01 * rank)
             pixel_error = max(1, round(source_gain * (12 / nfe + rank)))
@@ -134,6 +136,7 @@ def _write_artifact(
     oracle_leakage_flag: int = 1,
     condition_mode_code: int | None = None,
     oracle_equal: bool = False,
+    nfe_steps: tuple[int, ...] = NFE_STEPS,
     truncate_video_nfe_4: bool = False,
     drop_key: str | None = None,
 ) -> Path:
@@ -150,6 +153,7 @@ def _write_artifact(
         oracle_leakage_flag=oracle_leakage_flag,
         condition_mode_code=condition_mode_code,
         oracle_equal=oracle_equal,
+        nfe_steps=nfe_steps,
     )
     if truncate_video_nfe_4:
         tensors["video_final_nfe_4"] = tensors["video_final_nfe_4"][:, :, :-1]
@@ -688,3 +692,55 @@ def test_rejects_tampered_sidecar_and_output_inside_arm(tmp_path):
             output=clean_arms["zero"] / "result.json",
             bootstrap_samples=100,
         )
+
+
+def test_cli_accepts_exact_strict_cascade_nfe_vector(tmp_path):
+    nfe_steps = (2, 4, 8)
+    condition_sources = (
+        "autonomous",
+        "autonomous_shuffled",
+        "autonomous_legacy",
+        "off",
+    )
+    arm = tmp_path / "runs" / "matched" / "visualization" / "iter_99"
+    for rank in range(2):
+        _write_artifact(
+            arm,
+            rank=rank,
+            arm_gain=0.5,
+            condition_sources=condition_sources,
+            condition_mode_code=1,
+            nfe_steps=nfe_steps,
+        )
+
+    output_dir = tmp_path / "analysis"
+    output_dir.mkdir()
+    output = output_dir / "strict-cascade.json"
+    assert (
+        main(
+            [
+                "--arm",
+                f"matched={arm}",
+                "--baseline",
+                "matched",
+                "--output",
+                str(output),
+                "--nfe-steps",
+                "2",
+                "4",
+                "8",
+                "--bootstrap-samples",
+                "100",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["nfe_steps"] == [2, 4, 8]
+    assert set(
+        payload["aggregate"]["within_arm_source_deltas"]["matched"]
+    ) == {
+        "autonomous_minus_autonomous_shuffled",
+        "autonomous_minus_autonomous_legacy",
+        "autonomous_minus_off",
+    }
