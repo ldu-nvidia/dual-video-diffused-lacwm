@@ -10,6 +10,60 @@ three required endpoints on one B200.
 This protocol does not alter the active v3 contract or reinterpret its existing
 test evidence as held out.
 
+## Reproducible Slurm orchestration
+
+The complete cluster workflow is encoded in
+`tools/slurm/submit_vjepa2_frontier_workflow.sh`. Its checked-in defaults bind
+the v3 study, update-1000 array job `481132`, immutable cache build, LACWM
+Python, V-JEPA extractor Python, official source/checkpoint, and train-only
+PCA. Keep the active training checkout at `9cf8e69` while the original jobs
+run. Fetching the evaluator commit and creating a detached evaluator worktree
+does not change that checkout:
+
+```bash
+BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
+TRAIN_REPO=$BASE/src/vjepa2-latent-forcing/dual-video-diffused-lacwm
+git -C "$TRAIN_REPO" fetch github research/vjepa2-latent-forcing-study
+EVALUATOR_COMMIT="$(git -C "$TRAIN_REPO" rev-parse github/research/vjepa2-latent-forcing-study)"
+EVALUATOR_REPO=$BASE/src/vjepa2-frontier-evaluator-${EVALUATOR_COMMIT:0:12}
+git -C "$TRAIN_REPO" worktree add --detach "$EVALUATOR_REPO" "$EVALUATOR_COMMIT"
+
+"$EVALUATOR_REPO/tools/slurm/submit_vjepa2_frontier_workflow.sh"
+
+# After reviewing the read-only preflight:
+"$EVALUATOR_REPO/tools/slurm/submit_vjepa2_frontier_workflow.sh" \
+  --evaluator-commit "$EVALUATOR_COMMIT" \
+  --execute
+```
+
+The initial submission queues one-B200 lockbox extraction/registration and an
+update-1000 artifact gate behind the final training array, followed by separate
+eight-B200 VPM/J1 validation jobs. The selection job independently reproduces
+the raw-row selection. It does not submit or even create pending lockbox-scoring
+jobs when
+`confirmatory_eligible=false`. An eligible selection dynamically creates the
+remaining `afterok` chain: a two-task VPM/J1 lockbox array, confirmation,
+one-B200 timing, and finalization.
+
+At execution, the launcher queries Slurm accounting for the recorded u1000
+array using formatted array-task IDs. It expands Slurm's compressed active
+rows and requires the exact task set `481132_0` through `481132_4`, once each.
+While any task is pending/running, cache and artifact-gate jobs use
+`afterok:481132`. Only when every one of those five allocations reports
+`COMPLETED/0:0` does the launcher omit that controller dependency—which may be
+stale after `MinJobAge`—and immediately run the same full final-artifact gate.
+Failed, missing, duplicate, extra, or ambiguous accounting aborts submission.
+The unrelated original paired job `481133` may finish independently against
+the untouched training checkout.
+
+Every scientific output is fresh-only. The launcher refuses any pre-existing
+frontier output tree, freezes one clean evaluator commit that is an
+inference-tree-identical descendant of the training commit, and verifies that
+the official V-JEPA source checkout has not changed. It also requires that the
+evaluator worktree be distinct from the untouched, clean training checkout
+recorded in the study. The timing entrypoint creates the fresh
+`frontier_latency` parent before invoking its exclusive writer.
+
 ## Evidence sequence
 
 1. Construct a fresh 128-clip lockbox from the pinned source episode
