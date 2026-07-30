@@ -35,6 +35,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import benchmark_vjepa2_inference as single  # noqa: E402
+from tools import vjepa2_paired_recovery as recovery  # noqa: E402
 
 
 SCHEMA_VERSION = 1
@@ -104,6 +105,19 @@ def _canonical_file(value: str | Path, label: str) -> Path:
         raise PairedLatencyError(str(exc)) from exc
 
 
+def _promote_scientific_paths(repo: Path, project_root: Path) -> None:
+    """Put scientific packages ahead of the recovery controller checkout."""
+
+    paths = (str(repo), str(project_root))
+    for path in paths:
+        while path in sys.path:
+            sys.path.remove(path)
+    # The project supplies ``lam`` and the repository supplies ``robot_wm``.
+    # Inserting in this order leaves project_root first and repo second.
+    for path in paths:
+        sys.path.insert(0, path)
+
+
 def _read_json(path: Path, label: str) -> dict[str, Any]:
     try:
         return single._read_json(path, label)
@@ -124,6 +138,78 @@ def _record(path: Path, *, identity: str | None = None) -> dict[str, Any]:
     if identity is not None:
         result["identity_sha256"] = identity
     return result
+
+
+def _instantiated_class_origin(
+    instance: Any,
+    *,
+    package: str,
+    root: Path,
+    label: str,
+) -> dict[str, str]:
+    """Bind an instantiated scientific class to its loaded source module."""
+
+    cls = type(instance)
+    module_name = str(cls.__module__)
+    if module_name != package and not module_name.startswith(f"{package}."):
+        raise PairedLatencyError(
+            f"{label} class does not come from the {package} package"
+        )
+    module = sys.modules.get(module_name)
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, str):
+        raise PairedLatencyError(f"{label} class module lacks a source file")
+    origin = Path(module_file).resolve(strict=True)
+    if not origin.is_relative_to(root):
+        raise PairedLatencyError(
+            f"{label} class module escaped the scientific repository"
+        )
+    return {
+        "qualified_name": f"{module_name}.{cls.__qualname__}",
+        "module": module_name,
+        "file": str(origin),
+    }
+
+
+def _loaded_scientific_module_origins(
+    *,
+    repo: Path,
+    project_root: Path,
+) -> dict[str, Any]:
+    """Reject and record every loaded robot_wm/lam module with a file."""
+
+    origins: dict[str, str] = {}
+    for module_name, module in sorted(sys.modules.items()):
+        if module_name == "robot_wm" or module_name.startswith("robot_wm."):
+            expected_root = repo
+        elif module_name == "lam" or module_name.startswith("lam."):
+            expected_root = project_root
+        else:
+            continue
+        module_file = getattr(module, "__file__", None)
+        if module_file is None:
+            continue
+        if not isinstance(module_file, str):
+            raise PairedLatencyError(
+                f"loaded {module_name} module has an invalid source path"
+            )
+        origin = Path(module_file).resolve(strict=True)
+        if not origin.is_relative_to(expected_root):
+            raise PairedLatencyError(
+                "loaded robot_wm/lam modules escaped the scientific repository: "
+                f"{module_name} -> {origin}"
+            )
+        origins[module_name] = str(origin)
+    if "robot_wm" not in origins or "lam" not in origins:
+        raise PairedLatencyError(
+            "loaded scientific package provenance is incomplete"
+        )
+    canonical = single._canonical_json(origins)
+    return {
+        "count": len(origins),
+        "origins": origins,
+        "origins_sha256": hashlib.sha256(canonical).hexdigest(),
+    }
 
 
 def _file_record_matches(
@@ -225,6 +311,7 @@ def _validate_submission(
     path: Path,
     study: Mapping[str, Any],
     slurm_job_id: str,
+    bind_current_job: bool = True,
 ) -> dict[str, Any]:
     payload = _read_json(path, "Slurm submission record")
     paired = payload.get("paired_latency_job")
@@ -244,7 +331,12 @@ def _validate_submission(
         or paired.get("gpus") != 1
         or paired.get("same_allocation_pairing") is not True
         or paired.get("runs_final_analyzer_after_benchmark") is not True
-        or recorded_job_id != slurm_job_id
+        or recorded_job_id
+        != (
+            slurm_job_id
+            if bind_current_job
+            else recovery.FAILED_JOB_ID
+        )
     ):
         raise PairedLatencyError(
             "submission record does not bind this paired-latency allocation"
@@ -351,7 +443,9 @@ def _load_model_and_sample(
     *,
     provenance: Mapping[str, Any],
     device: Any,
-) -> tuple[Any, Any]:
+    repo: Path,
+    project_root: Path,
+) -> tuple[Any, Any, dict[str, dict[str, str]]]:
     import torch
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
@@ -381,6 +475,12 @@ def _load_model_and_sample(
             f"{provenance['code']} viz dataset is not the pinned test cache"
         )
     dataset = instantiate(config.viz_dataset)
+    dataset_origin = _instantiated_class_origin(
+        dataset,
+        package="robot_wm",
+        root=repo,
+        label=f"{provenance['code']} dataset",
+    )
     if len(dataset) != 128:
         raise PairedLatencyError(
             f"{provenance['code']} fixed-test dataset length is not 128"
@@ -389,6 +489,12 @@ def _load_model_and_sample(
     del dataset
 
     model = instantiate(config.model)
+    model_origin = _instantiated_class_origin(
+        model,
+        package="lam",
+        root=project_root,
+        label=f"{provenance['code']} model",
+    )
     snapshot = torch.load(
         provenance["snapshot_path"],
         map_location="cpu",
@@ -421,7 +527,10 @@ def _load_model_and_sample(
     model.evaluation_nfe_steps = (provenance["nfe"],)
     model.viz_num_steps = provenance["nfe"]
     model.capture_latent_trajectories = False
-    return model, sample
+    return model, sample, {
+        "dataset": dataset_origin,
+        "model": model_origin,
+    }
 
 
 def _host_sample(sample: Mapping[str, Any], *, arm: str) -> dict[str, Any]:
@@ -464,6 +573,19 @@ def _sample_identity(sample: Mapping[str, Any], history_frames: int) -> dict[str
 def command_benchmark(args: argparse.Namespace) -> int:
     import torch
 
+    recovery_values = (
+        args.recovery_protocol,
+        args.recovery_submission_record,
+        args.recovery_runtime_record,
+        args.controller_commit,
+    )
+    recovery_mode = all(value is not None for value in recovery_values)
+    if any(value is not None for value in recovery_values) and not recovery_mode:
+        raise PairedLatencyError(
+            "recovery protocol, submission, runtime, and controller commit "
+            "are all required"
+        )
+
     repo = _canonical_directory(args.repo_root, "repository root")
     try:
         single._assert_clean_commit(repo, args.expected_commit)
@@ -472,9 +594,57 @@ def command_benchmark(args: argparse.Namespace) -> int:
     project_root = repo / "projects" / "latent_action_models"
     if not project_root.is_dir():
         raise PairedLatencyError("latent-action project root is missing")
-    for root in (str(repo), str(project_root)):
-        if root not in sys.path:
-            sys.path.insert(0, root)
+    _promote_scientific_paths(repo, project_root)
+    controller_repo: Path | None = None
+    scientific_import_origins: dict[str, Any] | None = None
+    if recovery_mode:
+        controller_repo = _canonical_directory(
+            REPO_ROOT, "recovery controller repository"
+        )
+        if controller_repo == repo:
+            raise PairedLatencyError(
+                "recovery controller and scientific repositories must differ"
+            )
+        try:
+            single._assert_clean_commit(
+                controller_repo, args.controller_commit
+            )
+        except single.BenchmarkError as exc:
+            raise PairedLatencyError(str(exc)) from exc
+        import importlib.util
+
+        robot_spec = importlib.util.find_spec("robot_wm")
+        lam_spec = importlib.util.find_spec("lam")
+        if (
+            robot_spec is None
+            or robot_spec.origin is None
+            or not Path(robot_spec.origin).resolve().is_relative_to(repo)
+            or lam_spec is None
+            or lam_spec.origin is None
+            or not Path(lam_spec.origin).resolve().is_relative_to(project_root)
+        ):
+            raise PairedLatencyError(
+                "robot_wm/lam do not resolve from the scientific repository"
+            )
+        import lam
+        import robot_wm
+
+        robot_origin = Path(robot_wm.__file__).resolve()
+        lam_origin = Path(lam.__file__).resolve()
+        if (
+            not robot_origin.is_relative_to(repo)
+            or not lam_origin.is_relative_to(project_root)
+        ):
+            raise PairedLatencyError(
+                "loaded robot_wm/lam modules escaped the scientific repository"
+            )
+        scientific_import_origins = {
+            "bootstrap": {
+                "robot_wm": str(robot_origin),
+                "lam": str(lam_origin),
+            },
+            "instantiated_classes": {},
+        }
 
     study_root = _canonical_directory(args.study_root, "study root")
     study_path = _canonical_file(
@@ -501,7 +671,44 @@ def command_benchmark(args: argparse.Namespace) -> int:
         path=submission_path,
         study=study,
         slurm_job_id=args.slurm_job_id,
+        bind_current_job=not recovery_mode,
     )
+    recovery_protocol_path: Path | None = None
+    recovery_protocol: Mapping[str, Any] | None = None
+    recovery_submission_path: Path | None = None
+    recovery_submission: Mapping[str, Any] | None = None
+    recovery_runtime_path: Path | None = None
+    recovery_runtime: Mapping[str, Any] | None = None
+    if recovery_mode:
+        try:
+            (
+                recovery_submission_path,
+                recovery_submission,
+                recovery_protocol_path,
+                recovery_protocol,
+            ) = recovery.validate_submission(
+                args.recovery_submission_record,
+                protocol_path=args.recovery_protocol,
+                slurm_job_id=args.slurm_job_id,
+                output=args.output,
+                controller_repo_root=controller_repo,
+                controller_commit=args.controller_commit,
+                scientific_repo_root=repo,
+                scientific_commit=args.expected_commit,
+            )
+        except recovery.RecoveryError as exc:
+            raise PairedLatencyError(str(exc)) from exc
+        try:
+            recovery_runtime_path, recovery_runtime = (
+                recovery.validate_runtime_evidence(
+                    args.recovery_runtime_record,
+                    protocol_path=args.recovery_protocol,
+                    submission_path=args.recovery_submission_record,
+                    slurm_job_id=args.slurm_job_id,
+                )
+            )
+        except recovery.RecoveryError as exc:
+            raise PairedLatencyError(str(exc)) from exc
     test_cache = _validate_test_cache(study)
 
     device = torch.device(args.device)
@@ -523,6 +730,18 @@ def command_benchmark(args: argparse.Namespace) -> int:
         or not slurm_node
         or not cuda_visible_devices
         or torch.cuda.device_count() != 1
+        or (
+            recovery_mode
+            and (
+                recovery_runtime is None
+                or recovery_runtime.get("slurm_environment", {}).get("node")
+                != slurm_node
+                or recovery_runtime.get("slurm_environment", {}).get(
+                    "cuda_visible_devices"
+                )
+                != cuda_visible_devices
+            )
+        )
     ):
         raise PairedLatencyError(
             "paired latency requires one recorded Slurm node and one visible GPU"
@@ -539,14 +758,29 @@ def command_benchmark(args: argparse.Namespace) -> int:
 
     models: dict[str, Any] = {}
     host_samples: dict[str, Any] = {}
+    instantiated_classes: dict[str, Any] = {}
     for arm in ("VPM", "J1"):
-        model, sample = _load_model_and_sample(
+        model, sample, class_origins = _load_model_and_sample(
             provenance=provenance[arm],
             device=device,
+            repo=repo,
+            project_root=project_root,
         )
         models[arm] = model
         host_samples[arm] = _host_sample(sample, arm=arm)
+        instantiated_classes[arm] = class_origins
         del sample
+    if recovery_mode:
+        assert scientific_import_origins is not None
+        scientific_import_origins["instantiated_classes"] = (
+            instantiated_classes
+        )
+        scientific_import_origins["before_timing"] = (
+            _loaded_scientific_module_origins(
+                repo=repo,
+                project_root=project_root,
+            )
+        )
     history_frames = int(models["J1"].num_history_frames)
     future_frames = int(models["J1"].num_future_frames)
     if (
@@ -762,6 +996,33 @@ def command_benchmark(args: argparse.Namespace) -> int:
     ]
     if any(not math.isfinite(value) for value in differences + relative):
         raise PairedLatencyError("paired timing effect contains non-finite values")
+    runtime_assets_after_timing: dict[str, Any] | None = None
+    if recovery_mode:
+        assert (
+            scientific_import_origins is not None
+            and recovery_protocol is not None
+            and recovery_runtime is not None
+        )
+        scientific_import_origins["after_timing"] = (
+            _loaded_scientific_module_origins(
+                repo=repo,
+                project_root=project_root,
+            )
+        )
+        try:
+            runtime_assets_after_timing = recovery.validate_runtime_assets(
+                recovery_protocol["runtime"]["wan_dir"],
+                recovery_protocol["runtime"]["videox_home"],
+            )
+        except recovery.RecoveryError as exc:
+            raise PairedLatencyError(str(exc)) from exc
+        if (
+            runtime_assets_after_timing
+            != recovery_runtime["runtime_assets_before_model_loading"]
+        ):
+            raise PairedLatencyError(
+                "VideoX/Wan runtime assets changed during paired timing"
+            )
     order_strata: dict[str, Any] = {}
     for first_arm in ("J1", "VPM"):
         indexes = [
@@ -816,94 +1077,146 @@ def command_benchmark(args: argparse.Namespace) -> int:
     rounds_sha256 = hashlib.sha256(
         single._canonical_json(rounds)
     ).hexdigest()
-    payload = single._identity_payload(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "kind": "vjepa2_controlled_study_paired_latency",
-            "created_at_utc": single._now(),
-            "comparison": PAIR_LABEL,
-            "git_commit": args.expected_commit,
-            "study": _record(
-                study_path, identity=study["identity_sha256"]
+    unsigned_payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "vjepa2_controlled_study_paired_latency",
+        "created_at_utc": single._now(),
+        "comparison": PAIR_LABEL,
+        "git_commit": args.expected_commit,
+        "study": _record(
+            study_path, identity=study["identity_sha256"]
+        ),
+        "submission": _record(
+            submission_path, identity=submission["identity_sha256"]
+        ),
+        "slurm": {
+            "job_id": slurm_job_id,
+            "same_allocation": True,
+            "same_node": slurm_node,
+            "cuda_visible_devices": cuda_visible_devices,
+        },
+        "device": {
+            "name": properties.name,
+            "index": torch.cuda.current_device(),
+            "total_memory_bytes": properties.total_memory,
+            "torch_version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+            "peak_allocated_bytes_with_both_models_resident": peak_memory,
+        },
+        "protocol": {
+            "batch_size": BATCH_SIZE,
+            "sample_index": SAMPLE_INDEX,
+            "warmup_pairs": WARMUP_PAIRS,
+            "timed_pairs": TIMED_PAIRS,
+            "counterbalance": (
+                "even pair J1-first; odd pair VPM-first"
+            ),
+            "J1_first_pairs": TIMED_PAIRS // 2,
+            "VPM_first_pairs": TIMED_PAIRS // 2,
+            "same_process": True,
+            "same_B200": True,
+            "both_models_resident": True,
+            "identical_immutable_batch_inputs": True,
+            "entrypoint": (
+                "DualExplicitActionDiTModel.sample_future_deployable"
+            ),
+            "collect_artifacts_timed": False,
+            "trajectory_capture_timed": False,
+            "forward_hooks_active_during_timing": False,
+            "future_ground_truth_rgb_available_to_sampler": False,
+            "clean_auxiliary_target_available_to_sampler": False,
+            "online_teacher_calls": 0,
+            "cuda_synchronize_before_and_after_each_arm": True,
+            "timing_scope": (
+                "history preparation inside model + Wan calls + VAE decode"
+            ),
+            "sigma_convention": "sigma=1 noise, sigma=0 clean",
+        },
+        "immutable_input": {
+            **identities["J1"],
+            "test_cache": test_cache,
+        },
+        "arms": arm_payloads,
+        "paired": {
+            "favorable_direction": "positive means J1@4 is faster",
+            "favorable_difference_ms": differences,
+            "relative_improvement": relative,
+            "mean_favorable_difference_ms": (
+                sum(differences) / len(differences)
+            ),
+            "mean_relative_improvement": (
+                sum(relative) / len(relative)
+            ),
+            "order_strata": order_strata,
+            "rounds_sha256": rounds_sha256,
+            "rounds": rounds,
+        },
+    }
+    if recovery_mode:
+        assert (
+            controller_repo is not None
+            and recovery_protocol_path is not None
+            and recovery_protocol is not None
+            and recovery_submission_path is not None
+            and recovery_submission is not None
+            and recovery_runtime_path is not None
+            and recovery_runtime is not None
+            and scientific_import_origins is not None
+            and runtime_assets_after_timing is not None
+        )
+        unsigned_payload["recovery"] = {
+            "mode": "external_validator_only_recovery",
+            "original_failed_job_id": recovery.FAILED_JOB_ID,
+            "original_failure_started_timing": False,
+            "legacy_study_tree_mutated": False,
+            "controller": {
+                "root": str(controller_repo),
+                "commit": args.controller_commit,
+            },
+            "scientific_import_origins": dict(
+                scientific_import_origins
+            ),
+            "runtime_assets_after_timing": dict(
+                runtime_assets_after_timing
+            ),
+            "protocol": _record(
+                recovery_protocol_path,
+                identity=recovery_protocol["identity_sha256"],
             ),
             "submission": _record(
-                submission_path, identity=submission["identity_sha256"]
+                recovery_submission_path,
+                identity=recovery_submission["identity_sha256"],
             ),
-            "slurm": {
-                "job_id": slurm_job_id,
-                "same_allocation": True,
-                "same_node": slurm_node,
-                "cuda_visible_devices": cuda_visible_devices,
-            },
-            "device": {
-                "name": properties.name,
-                "index": torch.cuda.current_device(),
-                "total_memory_bytes": properties.total_memory,
-                "torch_version": torch.__version__,
-                "cuda_version": torch.version.cuda,
-                "peak_allocated_bytes_with_both_models_resident": peak_memory,
-            },
-            "protocol": {
-                "batch_size": BATCH_SIZE,
-                "sample_index": SAMPLE_INDEX,
-                "warmup_pairs": WARMUP_PAIRS,
-                "timed_pairs": TIMED_PAIRS,
-                "counterbalance": (
-                    "even pair J1-first; odd pair VPM-first"
-                ),
-                "J1_first_pairs": TIMED_PAIRS // 2,
-                "VPM_first_pairs": TIMED_PAIRS // 2,
-                "same_process": True,
-                "same_B200": True,
-                "both_models_resident": True,
-                "identical_immutable_batch_inputs": True,
-                "entrypoint": (
-                    "DualExplicitActionDiTModel.sample_future_deployable"
-                ),
-                "collect_artifacts_timed": False,
-                "trajectory_capture_timed": False,
-                "forward_hooks_active_during_timing": False,
-                "future_ground_truth_rgb_available_to_sampler": False,
-                "clean_auxiliary_target_available_to_sampler": False,
-                "online_teacher_calls": 0,
-                "cuda_synchronize_before_and_after_each_arm": True,
-                "timing_scope": (
-                    "history preparation inside model + Wan calls + VAE decode"
-                ),
-                "sigma_convention": "sigma=1 noise, sigma=0 clean",
-            },
-            "immutable_input": {
-                **identities["J1"],
-                "test_cache": test_cache,
-            },
-            "arms": arm_payloads,
-            "paired": {
-                "favorable_direction": "positive means J1@4 is faster",
-                "favorable_difference_ms": differences,
-                "relative_improvement": relative,
-                "mean_favorable_difference_ms": (
-                    sum(differences) / len(differences)
-                ),
-                "mean_relative_improvement": (
-                    sum(relative) / len(relative)
-                ),
-                "order_strata": order_strata,
-                "rounds_sha256": rounds_sha256,
-                "rounds": rounds,
-            },
+            "runtime": _record(
+                recovery_runtime_path,
+                identity=recovery_runtime["identity_sha256"],
+            ),
         }
-    )
+    payload = single._identity_payload(unsigned_payload)
     output = Path(args.output).expanduser()
-    expected_parent = study_root / "paired_latency"
-    expected_parent = _canonical_directory(
-        expected_parent, "paired latency output directory"
-    )
+    if recovery_mode:
+        assert recovery_protocol is not None
+        expected_output = Path(recovery_protocol["paths"]["paired_latency"])
+        expected_parent = _canonical_directory(
+            expected_output.parent,
+            "paired recovery output directory",
+        )
+        if expected_output.is_relative_to(study_root):
+            raise PairedLatencyError(
+                "paired recovery output must be outside the immutable study"
+            )
+    else:
+        expected_parent = _canonical_directory(
+            study_root / "paired_latency",
+            "paired latency output directory",
+        )
+        expected_output = expected_parent / OUTPUT_BASENAME
     if (
         output.parent.resolve(strict=True) != expected_parent
-        or output.name != OUTPUT_BASENAME
+        or output != expected_output
     ):
         raise PairedLatencyError(
-            f"output must be {expected_parent / OUTPUT_BASENAME}"
+            f"output must be {expected_output}"
         )
     try:
         single._exclusive_json(output, payload)
@@ -935,6 +1248,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slurm-job-id", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--recovery-protocol")
+    parser.add_argument("--recovery-submission-record")
+    parser.add_argument("--recovery-runtime-record")
+    parser.add_argument("--controller-commit")
     return parser
 
 

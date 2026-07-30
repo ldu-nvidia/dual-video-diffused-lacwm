@@ -36,6 +36,7 @@ import math
 import os
 import re
 import stat
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,6 +46,13 @@ from typing import Any
 import numpy as np
 import torch
 from safetensors import safe_open
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools import vjepa2_paired_recovery as paired_recovery  # noqa: E402
 
 
 SCHEMA_VERSION = 1
@@ -2947,6 +2955,149 @@ def _validated_paired_latency_vector(
     }
 
 
+def _validate_scientific_import_origins(
+    value: Any,
+    *,
+    scientific_root: Path,
+) -> dict[str, Any]:
+    """Validate complete model/dataset import provenance from the benchmark."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "bootstrap",
+        "instantiated_classes",
+        "before_timing",
+        "after_timing",
+    }:
+        raise StudyValidationError(
+            "paired recovery scientific import provenance differs"
+        )
+    project_root = scientific_root / "projects" / "latent_action_models"
+    bootstrap = value["bootstrap"]
+    if not isinstance(bootstrap, dict) or set(bootstrap) != {
+        "robot_wm",
+        "lam",
+    }:
+        raise StudyValidationError(
+            "paired recovery bootstrap import provenance differs"
+        )
+    roots = {"robot_wm": scientific_root, "lam": project_root}
+    for package, root in roots.items():
+        path = Path(str(bootstrap[package])).resolve(strict=True)
+        if not path.is_relative_to(root):
+            raise StudyValidationError(
+                f"paired recovery {package} bootstrap escaped scientific code"
+            )
+
+    normalized_sections: dict[str, dict[str, Any]] = {}
+    for phase in ("before_timing", "after_timing"):
+        section = value[phase]
+        if not isinstance(section, dict) or set(section) != {
+            "count",
+            "origins",
+            "origins_sha256",
+        }:
+            raise StudyValidationError(
+                f"paired recovery {phase} module provenance differs"
+            )
+        origins = section["origins"]
+        if (
+            not isinstance(origins, dict)
+            or isinstance(section["count"], bool)
+            or section["count"] != len(origins)
+            or not origins
+            or hashlib.sha256(_canonical_json_bytes(origins)).hexdigest()
+            != section["origins_sha256"]
+            or origins.get("robot_wm") != bootstrap["robot_wm"]
+            or origins.get("lam") != bootstrap["lam"]
+        ):
+            raise StudyValidationError(
+                f"paired recovery {phase} module map/hash differs"
+            )
+        for module_name, raw_path in origins.items():
+            if not isinstance(module_name, str) or not isinstance(
+                raw_path, str
+            ):
+                raise StudyValidationError(
+                    f"paired recovery {phase} module record is invalid"
+                )
+            if module_name == "robot_wm" or module_name.startswith(
+                "robot_wm."
+            ):
+                root = scientific_root
+            elif module_name == "lam" or module_name.startswith("lam."):
+                root = project_root
+            else:
+                raise StudyValidationError(
+                    f"paired recovery {phase} contains an unrelated module"
+                )
+            if not Path(raw_path).resolve(strict=True).is_relative_to(root):
+                raise StudyValidationError(
+                    f"paired recovery {module_name} escaped scientific code"
+                )
+        normalized_sections[phase] = dict(section)
+    before = normalized_sections["before_timing"]["origins"]
+    after = normalized_sections["after_timing"]["origins"]
+    if any(after.get(name) != path for name, path in before.items()):
+        raise StudyValidationError(
+            "paired recovery scientific modules changed during timing"
+        )
+
+    classes = value["instantiated_classes"]
+    if not isinstance(classes, dict) or set(classes) != {"J1", "VPM"}:
+        raise StudyValidationError(
+            "paired recovery instantiated-class provenance differs"
+        )
+    for arm, records in classes.items():
+        if not isinstance(records, dict) or set(records) != {
+            "dataset",
+            "model",
+        }:
+            raise StudyValidationError(
+                f"paired recovery {arm} class provenance differs"
+            )
+        for kind, package, root in (
+            ("dataset", "robot_wm", scientific_root),
+            ("model", "lam", project_root),
+        ):
+            record = records[kind]
+            if not isinstance(record, dict) or set(record) != {
+                "qualified_name",
+                "module",
+                "file",
+            }:
+                raise StudyValidationError(
+                    f"paired recovery {arm} {kind} origin differs"
+                )
+            module_name = record["module"]
+            if (
+                not isinstance(module_name, str)
+                or (
+                    module_name != package
+                    and not module_name.startswith(f"{package}.")
+                )
+                or not isinstance(record["qualified_name"], str)
+                or not record["qualified_name"].startswith(
+                    f"{module_name}."
+                )
+                or not isinstance(record["file"], str)
+                or not Path(record["file"])
+                .resolve(strict=True)
+                .is_relative_to(root)
+                or before.get(module_name) != record["file"]
+            ):
+                raise StudyValidationError(
+                    f"paired recovery {arm} {kind} escaped scientific code"
+                )
+    return {
+        "bootstrap": dict(bootstrap),
+        "instantiated_classes": {
+            arm: {kind: dict(record) for kind, record in records.items()}
+            for arm, records in classes.items()
+        },
+        **normalized_sections,
+    }
+
+
 def _load_paired_latency(
     *,
     study: Mapping[str, Any],
@@ -2956,12 +3107,34 @@ def _load_paired_latency(
     bootstrap_samples: int,
     confidence: float,
     bootstrap_seed: int,
+    paired_latency_path: str | Path | None = None,
+    paired_recovery_submission_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    path = _regular_file(
-        study_root / "paired_latency" / PAIRED_LATENCY_BASENAME,
-        "paired latency evidence",
+    recovery_mode = (
+        paired_latency_path is not None
+        or paired_recovery_submission_path is not None
     )
-    _assert_inside(path, study_root, "paired latency evidence")
+    if (paired_latency_path is None) != (
+        paired_recovery_submission_path is None
+    ):
+        raise StudyValidationError(
+            "paired latency and recovery submission overrides are both required"
+        )
+    if recovery_mode:
+        path = _regular_file(
+            Path(str(paired_latency_path)),
+            "paired recovery latency evidence",
+        )
+        if path == study_root or path.is_relative_to(study_root):
+            raise StudyValidationError(
+                "paired recovery evidence must be outside the study root"
+            )
+    else:
+        path = _regular_file(
+            study_root / "paired_latency" / PAIRED_LATENCY_BASENAME,
+            "paired latency evidence",
+        )
+        _assert_inside(path, study_root, "paired latency evidence")
     payload = _read_json(path, "paired latency evidence")
     expected_commit = study.get("inputs", {}).get("repository", {}).get(
         "git_commit"
@@ -3028,6 +3201,155 @@ def _load_paired_latency(
             "paired latency submission job contract differs"
         )
     slurm = payload.get("slurm")
+    recovery_context: dict[str, Any] | None = None
+    expected_slurm_job_id = paired_job.get("job_id")
+    if recovery_mode:
+        recovery_block = payload.get("recovery")
+        if not isinstance(recovery_block, dict):
+            raise StudyValidationError(
+                "paired recovery provenance is missing"
+            )
+        protocol_record = recovery_block.get("protocol")
+        recovery_submission_record = recovery_block.get("submission")
+        recovery_runtime_record = recovery_block.get("runtime")
+        if (
+            recovery_block.get("mode")
+            != "external_validator_only_recovery"
+            or recovery_block.get("original_failed_job_id")
+            != paired_recovery.FAILED_JOB_ID
+            or recovery_block.get("original_failure_started_timing")
+            is not False
+            or recovery_block.get("legacy_study_tree_mutated") is not False
+            or not isinstance(protocol_record, dict)
+            or not isinstance(recovery_submission_record, dict)
+            or not isinstance(recovery_runtime_record, dict)
+        ):
+            raise StudyValidationError(
+                "paired recovery mode/provenance differs"
+            )
+        protocol_path = _regular_file(
+            Path(str(protocol_record.get("path", ""))),
+            "paired recovery protocol",
+        )
+        recovery_submission_path = _regular_file(
+            Path(str(paired_recovery_submission_path)),
+            "paired recovery submission",
+        )
+        try:
+            (
+                checked_submission_path,
+                recovery_submission,
+                checked_protocol_path,
+                recovery_protocol,
+            ) = paired_recovery.validate_submission(
+                recovery_submission_path,
+                protocol_path=protocol_path,
+                slurm_job_id=str(
+                    payload.get("slurm", {}).get("job_id", "")
+                ),
+                output=path,
+            )
+        except paired_recovery.RecoveryError as exc:
+            raise StudyValidationError(str(exc)) from exc
+        _validate_paired_file_record(
+            protocol_record,
+            path=checked_protocol_path,
+            label="recovery protocol",
+            identity_sha256=str(
+                recovery_protocol.get("identity_sha256", "")
+            ),
+        )
+        _validate_paired_file_record(
+            recovery_submission_record,
+            path=checked_submission_path,
+            label="recovery submission",
+            identity_sha256=str(
+                recovery_submission.get("identity_sha256", "")
+            ),
+        )
+        runtime_path = _regular_file(
+            Path(str(recovery_runtime_record.get("path", ""))),
+            "paired recovery runtime evidence",
+        )
+        try:
+            checked_runtime_path, recovery_runtime = (
+                paired_recovery.validate_runtime_evidence(
+                    runtime_path,
+                    protocol_path=checked_protocol_path,
+                    submission_path=checked_submission_path,
+                    slurm_job_id=str(
+                        payload.get("slurm", {}).get("job_id", "")
+                    ),
+                )
+            )
+        except paired_recovery.RecoveryError as exc:
+            raise StudyValidationError(str(exc)) from exc
+        _validate_paired_file_record(
+            recovery_runtime_record,
+            path=checked_runtime_path,
+            label="recovery runtime",
+            identity_sha256=str(
+                recovery_runtime.get("identity_sha256", "")
+            ),
+        )
+        controller = recovery_block.get("controller")
+        expected_controller = recovery_protocol.get("controller", {})
+        import_origins = recovery_block.get("scientific_import_origins")
+        scientific_root = Path(
+            str(recovery_protocol["scientific_repository"]["root"])
+        )
+        if (
+            not isinstance(controller, dict)
+            or controller
+            != {
+                "root": expected_controller.get("root"),
+                "commit": expected_controller.get("commit"),
+            }
+        ):
+            raise StudyValidationError(
+                "paired recovery controller provenance differs"
+            )
+        validated_import_origins = _validate_scientific_import_origins(
+            import_origins,
+            scientific_root=scientific_root,
+        )
+        runtime_assets_after = recovery_block.get(
+            "runtime_assets_after_timing"
+        )
+        if (
+            runtime_assets_after
+            != recovery_runtime.get(
+                "runtime_assets_before_model_loading"
+            )
+            or runtime_assets_after
+            != recovery_protocol.get("runtime", {}).get("assets")
+        ):
+            raise StudyValidationError(
+                "paired recovery runtime assets changed during timing"
+            )
+        expected_slurm_job_id = recovery_submission["job"]["job_id"]
+        recovery_context = {
+            "mode": recovery_block["mode"],
+            "original_failed_job_id": paired_recovery.FAILED_JOB_ID,
+            "original_submission_job_id": paired_job["job_id"],
+            "recovery_job_id": expected_slurm_job_id,
+            "protocol": dict(protocol_record),
+            "submission": dict(recovery_submission_record),
+            "runtime": dict(recovery_runtime_record),
+            "controller": dict(controller),
+            "scientific_import_origins": validated_import_origins,
+            "runtime_assets_after_timing": dict(
+                runtime_assets_after
+            ),
+            "scientific_repository": dict(
+                recovery_protocol["scientific_repository"]
+            ),
+            "legacy_study_tree_mutated": False,
+        }
+    elif payload.get("recovery") is not None:
+        raise StudyValidationError(
+            "legacy paired evidence unexpectedly declares recovery"
+        )
     if (
         not isinstance(slurm, dict)
         or slurm.get("same_allocation") is not True
@@ -3039,7 +3361,12 @@ def _load_paired_latency(
             slurm.get("job_id"), "paired evidence Slurm job ID"
         )
         != _normalized_slurm_job_id(
-            paired_job.get("job_id"), "paired submission Slurm job ID"
+            expected_slurm_job_id,
+            (
+                "paired recovery Slurm job ID"
+                if recovery_mode
+                else "paired submission Slurm job ID"
+            ),
         )
     ):
         raise StudyValidationError(
@@ -3461,7 +3788,7 @@ def _load_paired_latency(
         seed=bootstrap_seed,
         label="paired-latency:J1-nfe4-vs-VPM-nfe8",
     )
-    return {
+    result = {
         "path": str(path),
         "sha256": _hash_file(path),
         "identity_sha256": payload["identity_sha256"],
@@ -3471,7 +3798,8 @@ def _load_paired_latency(
         "same_node": slurm["same_node"],
         "same_B200": True,
         "same_process": True,
-        "submission_job_id": paired_job["job_id"],
+        "submission_job_id": expected_slurm_job_id,
+        "original_submission_job_id": paired_job["job_id"],
         "protocol": dict(protocol),
         "immutable_input_identity": {
             field: immutable[field] for field in sample_identity_fields
@@ -3480,6 +3808,9 @@ def _load_paired_latency(
         "order_strata": expected_strata,
         "counterbalanced_paired_effect": effect,
     }
+    if recovery_context is not None:
+        result["recovery"] = recovery_context
+    return result
 
 
 def _normalized_auc(
@@ -3588,6 +3919,8 @@ def _build_analysis(
     bootstrap_samples: int,
     confidence: float,
     bootstrap_seed: int,
+    paired_latency_path: str | Path | None = None,
+    paired_recovery_submission_path: str | Path | None = None,
 ) -> dict[str, Any]:
     study, arm_roots, stages = _manifest_and_stage_inventory(study_root)
     analyzed, quality_inventory, units = _load_quality_evidence(
@@ -3866,6 +4199,8 @@ def _build_analysis(
         bootstrap_samples=bootstrap_samples,
         confidence=confidence,
         bootstrap_seed=bootstrap_seed,
+        paired_latency_path=paired_latency_path,
+        paired_recovery_submission_path=paired_recovery_submission_path,
     )
     latency["paired_final_claim"] = paired_latency
     training_vpm = final_training_comparisons["VPM"]
@@ -4561,6 +4896,8 @@ def analyze(
     bootstrap_samples: int = 10_000,
     bootstrap_seed: int = 20_260_729,
     confidence: float = 0.95,
+    paired_latency: str | Path | None = None,
+    paired_recovery_submission: str | Path | None = None,
 ) -> dict[str, Any]:
     """Validate all evidence and exclusively create JSON and Markdown outputs."""
 
@@ -4568,6 +4905,37 @@ def analyze(
         raise StudyValidationError("bootstrap_samples must be at least 100")
     if not 0.5 < confidence < 1.0:
         raise StudyValidationError("confidence must be strictly between 0.5 and 1")
+    if (paired_latency is None) != (paired_recovery_submission is None):
+        raise StudyValidationError(
+            "paired latency and recovery submission overrides are both required"
+        )
+    if paired_recovery_submission is not None:
+        recovery_receipt_path = _regular_file(
+            Path(paired_recovery_submission),
+            "paired recovery submission",
+        )
+        recovery_receipt = _read_json(
+            recovery_receipt_path,
+            "paired recovery submission",
+        )
+        recovery_outputs = recovery_receipt.get("outputs")
+        requested_json = Path(output_json).expanduser()
+        requested_markdown = (
+            Path(output_markdown).expanduser()
+            if output_markdown is not None
+            else requested_json.with_suffix(".md")
+        )
+        if (
+            not paired_recovery.identity_valid(recovery_receipt)
+            or not isinstance(recovery_outputs, dict)
+            or requested_json
+            != Path(str(recovery_outputs.get("analysis_json", "")))
+            or requested_markdown
+            != Path(str(recovery_outputs.get("analysis_markdown", "")))
+        ):
+            raise StudyValidationError(
+                "analysis outputs differ from the paired recovery receipt"
+            )
     root = _canonical_directory(study_root, "study root")
     json_path, markdown_path = _output_paths(
         output_json, output_markdown, root
@@ -4577,6 +4945,8 @@ def analyze(
         bootstrap_samples=bootstrap_samples,
         confidence=confidence,
         bootstrap_seed=bootstrap_seed,
+        paired_latency_path=paired_latency,
+        paired_recovery_submission_path=paired_recovery_submission,
     )
     json_bytes = (
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
@@ -4606,6 +4976,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--bootstrap-seed", type=int, default=20_260_729)
     parser.add_argument("--confidence", type=float, default=0.95)
+    parser.add_argument(
+        "--paired-latency",
+        help=(
+            "external recovered paired evidence; requires "
+            "--paired-recovery-submission"
+        ),
+    )
+    parser.add_argument(
+        "--paired-recovery-submission",
+        help=(
+            "identity-bound external recovery receipt; requires "
+            "--paired-latency"
+        ),
+    )
     return parser
 
 
@@ -4619,6 +5003,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             bootstrap_samples=args.bootstrap_samples,
             bootstrap_seed=args.bootstrap_seed,
             confidence=args.confidence,
+            paired_latency=args.paired_latency,
+            paired_recovery_submission=args.paired_recovery_submission,
         )
     except StudyValidationError as exc:
         print(f"ERROR: {exc}", file=os.sys.stderr)

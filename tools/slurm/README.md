@@ -154,3 +154,16 @@ snapshot before manually resubmitting the same fixed topology with `--resume`.
 For an estimated five compute days, a 24-hour limit generally means five to six
 allocations plus queue delays. Prefer the longest limit that still receives
 reasonable backfill priority on the target cluster.
+
+## V-JEPA paired-latency recovery
+
+`submit_vjepa2_paired_latency_recovery.sh` is the incident-specific, fail-closed
+recovery for validator-only failure `481133`. It preserves the immutable v3
+study and writes every new receipt, log, timing artifact, and analysis file
+under a fresh external `_paired_recoveries` root. The job is submitted held;
+the launcher records its exact ID and tokenized `sbatch` command before
+release, and the allocation validates its own accounting before timing.
+
+Run without `--execute` for the read-only preflight. See
+[`docs/experiments/VJEPA2_PAIRED_LATENCY_RECOVERY.md`](../../docs/experiments/VJEPA2_PAIRED_LATENCY_RECOVERY.md)
+for the pinned contract and launch command.

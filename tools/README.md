@@ -201,3 +201,10 @@ The submitter is a dry run unless `--execute` is supplied. See
 [`tools/slurm/README.md`](slurm/README.md) for the full command and cluster storage
 requirements. Checkpoints and the `_slurm` control directory must be visible at the
 same absolute path from every eligible node; do not place them in node-local scratch.
+
+The exact external recovery for V-JEPA paired timing job `481133` is documented
+in
+[`docs/experiments/VJEPA2_PAIRED_LATENCY_RECOVERY.md`](../docs/experiments/VJEPA2_PAIRED_LATENCY_RECOVERY.md).
+It keeps the v3 study read-only, validates both the failed and replacement
+Slurm SubmitLines, and binds the recovered analyzer to receipt-selected output
+paths.
