@@ -39,10 +39,9 @@ TEST_CACHE_METADATA="${VJEPA_TEST_CACHE_METADATA:-}"
 WANDB_ENTITY_VALUE="zijiandu"
 WANDB_PROJECT_VALUE="dual-video-diffusion-private"
 PARTITION="batch"
-TIME_LIMIT="12:00:00"
+TIME_LIMIT="04:00:00"
 CPUS="160"
 MEMORY="1000G"
-PAIRED_TIME_LIMIT="12:00:00"
 PAIRED_CPUS="32"
 PAIRED_MEMORY="256G"
 ACCOUNT=""
@@ -112,7 +111,8 @@ Other options:
   --allow-active-job-id ID      Allow one pre-existing numeric Slurm job ID;
                                 repeat for each read-only unrelated job
   --partition NAME              Default: batch
-  --time HH:MM:SS               Default: 12:00:00; max: 24:00:00
+  --time HH:MM:SS               Stage and paired-job limit; default: 04:00:00;
+                                max accepted by launcher: 24:00:00
   --cpus N                      Default: 160
   --mem VALUE                   Default: 1000G
   --account NAME                Optional Slurm account
@@ -469,7 +469,9 @@ PAIRED_SBATCH=(
   --gpus-per-node=1
   --cpus-per-task="$PAIRED_CPUS"
   --mem="$PAIRED_MEMORY"
-  --time="$PAIRED_TIME_LIMIT"
+  # Keep the final benchmark within the same partition/QOS wall-time contract
+  # that the caller already validated for every training stage.
+  --time="$TIME_LIMIT"
   --partition="$PARTITION"
   --dependency="afterok:$PREVIOUS_JOB_ID"
   --no-requeue

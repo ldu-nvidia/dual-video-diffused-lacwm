@@ -132,6 +132,12 @@ class VJEPA2StudyHarnessTest(unittest.TestCase):
         self.assertIn("--paired-latency-job-id", source)
         self.assertIn('"$PAIRED_SBATCH_SCRIPT"', source)
 
+    def test_submit_uses_selected_wall_time_for_stages_and_paired_job(self):
+        source = SUBMIT.read_text(encoding="utf-8")
+        self.assertIn('TIME_LIMIT="04:00:00"', source)
+        self.assertNotIn("PAIRED_TIME_LIMIT", source)
+        self.assertEqual(source.count('--time="$TIME_LIMIT"'), 2)
+
     def test_paired_job_runs_benchmark_then_final_analyzer(self):
         source = PAIRED_SBATCH.read_text(encoding="utf-8")
         self.assertIn("#SBATCH --gpus-per-node=1", source)
