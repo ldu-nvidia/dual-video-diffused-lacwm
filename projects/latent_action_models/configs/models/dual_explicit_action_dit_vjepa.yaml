@@ -18,6 +18,16 @@ dual_diffusion:
   schedule_mode: aligned
   tf_lead_logit: 0.0
   tf_loss_weight: 1.0
+  # Strict Latent-Forcing-style cascade defaults. They are inert unless
+  # schedule_mode=tf_first_cascaded.
+  cascade_tf_loss_probability: 0.4
+  # The released recipe samples DINO clean-time with mean -1.2. In LACWM's
+  # opposite sigma convention this is auxiliary-noise logit mean +1.2.
+  cascade_logit_mean: 1.2
+  cascade_logit_std: 1.0
+  cascade_tf_condition_max_sigma: 0.25
+  cascade_validation_tf_sigma: 0.125
+  cascade_inference_tf_fraction: 0.5
   video_only_control: false
   parameter_matched_control: false
   state_gate_init: 0.0

@@ -90,6 +90,27 @@ def test_timing_gate_fails_if_one_order_stratum_reverses():
     assert gate["checks"]["both_execution_order_strata_favorable"] is False
 
 
+def test_timing_gate_rejects_marginal_p95_reduction():
+    effect = {
+        "bootstrap_ci": {"low": 0.01, "high": 0.10},
+        "order_strata": {
+            "J1_first": {"mean_favorable_difference_ms": 1.0},
+            "VPM_first": {"mean_favorable_difference_ms": 1.0},
+        },
+    }
+    gate = benchmark.timing_gate(
+        effect,
+        left_p95=81.0,
+        reference_p95=100.0,
+    )
+
+    assert gate["passed"] is False
+    assert (
+        gate["checks"]["p95_relative_reduction_at_least_20_percent"]
+        is False
+    )
+
+
 def test_benchmark_command_rejects_underpowered_confirmatory_protocol():
     args = SimpleNamespace(
         warmup_rounds=6,

@@ -217,10 +217,26 @@ class DualClockSampler(nn.Module):
         device: torch.device | str,
         dtype: torch.dtype = torch.float32,
         generator: torch.Generator | None = None,
+        native_video_sigma: Tensor | None = None,
     ) -> DualClockBatch:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
-        video = self._sample_base(batch_size, device, generator)
+        if native_video_sigma is None:
+            video = self._sample_base(batch_size, device, generator)
+        else:
+            if (
+                native_video_sigma.ndim != 1
+                or native_video_sigma.shape[0] != batch_size
+                or not native_video_sigma.is_floating_point()
+            ):
+                raise ValueError(
+                    "native_video_sigma must be floating point with shape [B]"
+                )
+            video = native_video_sigma.to(device=device, dtype=torch.float32)
+            if not bool(torch.isfinite(video).all()) or bool(
+                ((video < 0) | (video > 1)).any()
+            ):
+                raise ValueError("native_video_sigma must lie in [0,1]")
         ones = torch.ones(batch_size, device=device, dtype=torch.float32)
 
         if self.mode == "aligned":
@@ -280,10 +296,9 @@ def make_paired_sigma_schedule(
         video = 1.0 - progress
         time_frequency = 1.0 - progress.pow(tf_lead_power)
     elif mode == "tf_first_cascaded":
-        if num_steps < 2:
-            raise ValueError("cascaded scheduling requires at least two steps")
-        tf_steps = min(num_steps - 1, max(1, round(num_steps * tf_fraction)))
-        video_steps = num_steps - tf_steps
+        tf_steps, video_steps = cascaded_step_counts(
+            num_steps, tf_fraction=tf_fraction
+        )
         time_frequency = torch.cat(
             [
                 torch.linspace(1, 0, tf_steps + 1, device=device, dtype=dtype),
@@ -298,6 +313,76 @@ def make_paired_sigma_schedule(
         )
     else:
         raise ValueError(f"unsupported inference schedule mode: {mode}")
+    return PairedSigmaSchedule(video=video, time_frequency=time_frequency)
+
+
+def cascaded_step_counts(
+    num_steps: int,
+    *,
+    tf_fraction: float = 0.5,
+) -> tuple[int, int]:
+    """Split total model evaluations into nonempty auxiliary/video phases."""
+    if num_steps < 2:
+        raise ValueError("cascaded scheduling requires at least two steps")
+    if not 0 < tf_fraction < 1:
+        raise ValueError("tf_fraction must lie strictly between 0 and 1")
+    tf_steps = min(num_steps - 1, max(1, round(num_steps * tf_fraction)))
+    return tf_steps, num_steps - tf_steps
+
+
+def pair_native_cascaded_sigma_schedule(
+    native_video_sigmas: Tensor,
+    *,
+    total_steps: int,
+    tf_fraction: float = 0.5,
+) -> PairedSigmaSchedule:
+    """Prepend an auxiliary-only phase to a native Wan sigma schedule."""
+    tf_steps, video_steps = cascaded_step_counts(
+        total_steps, tf_fraction=tf_fraction
+    )
+    if (
+        native_video_sigmas.ndim != 1
+        or native_video_sigmas.numel() != video_steps + 1
+    ):
+        raise ValueError(
+            "native_video_sigmas must contain video_steps+1 scalar nodes"
+        )
+    if not native_video_sigmas.is_floating_point():
+        raise TypeError("native_video_sigmas must be floating point")
+    if torch.any(torch.diff(native_video_sigmas) > 0):
+        raise ValueError(
+            "native video sigma schedule must be monotonically non-increasing"
+        )
+    if native_video_sigmas[0] != 1 or native_video_sigmas[-1] != 0:
+        raise ValueError(
+            "native video sigma schedule must have exact noise/data endpoints"
+        )
+    video = torch.cat(
+        [
+            torch.ones(
+                tf_steps,
+                device=native_video_sigmas.device,
+                dtype=native_video_sigmas.dtype,
+            ),
+            native_video_sigmas,
+        ]
+    )
+    time_frequency = torch.cat(
+        [
+            torch.linspace(
+                1,
+                0,
+                tf_steps + 1,
+                device=native_video_sigmas.device,
+                dtype=native_video_sigmas.dtype,
+            ),
+            torch.zeros(
+                video_steps,
+                device=native_video_sigmas.device,
+                dtype=native_video_sigmas.dtype,
+            ),
+        ]
+    )
     return PairedSigmaSchedule(video=video, time_frequency=time_frequency)
 
 

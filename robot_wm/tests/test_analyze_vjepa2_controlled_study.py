@@ -160,6 +160,11 @@ def test_scientific_quality_grid_is_128_clip_protocol():
     assert ("oracle_matched", 8) not in analysis._quality_grid(800)
 
 
+def test_phase_boundary_hash_gate_excludes_degenerate_nfe_one():
+    source = inspect.getsource(analysis._load_quality_evidence)
+    assert 'if arm == "J1" and nfe >= 2:' in source
+
+
 def test_oracle_gap_closure_uses_paired_clip_bootstrap():
     result = analysis._paired_gap_closure(
         off=[1.0] * 128,

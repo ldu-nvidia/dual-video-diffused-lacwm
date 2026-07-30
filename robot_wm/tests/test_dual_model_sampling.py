@@ -258,6 +258,162 @@ def test_cached_target_noise_is_stateless_and_rng_independent(monkeypatch):
     assert not torch.equal(first[0], first[1])
 
 
+def test_cascade_clock_sampling_is_stateless_and_branch_masked(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.training = True
+    model.tf_schedule_mode = "tf_first_cascaded"
+    model._cascade_clock_sampler = module.DualClockSampler(
+        mode="tf_first_cascaded_noised",
+        tf_loss_probability=0.5,
+        tf_condition_max_sigma=0.25,
+    )
+    model.noise_scheduler = types.SimpleNamespace(
+        timesteps=torch.tensor([999, 700, 300, 0])
+    )
+    model._sample_timesteps = lambda batch, device: torch.tensor(
+        [700, 300], device=device
+    )
+    model._get_sigmas = (
+        lambda timesteps, n_dim, dtype, device: torch.tensor(
+            [[0.7], [0.3]], device=device, dtype=dtype
+        )
+    )
+    sample_ids = torch.tensor([17, 29])
+
+    torch.manual_seed(20260730)
+    before = torch.random.get_rng_state()
+    first = model._paired_training_clocks(
+        2,
+        torch.device("cpu"),
+        torch.float32,
+        sample_ids=sample_ids,
+    )
+    after = torch.random.get_rng_state()
+    second = model._paired_training_clocks(
+        2,
+        torch.device("cpu"),
+        torch.float32,
+        sample_ids=sample_ids,
+    )
+
+    assert torch.equal(before, after)
+    assert torch.equal(after, torch.random.get_rng_state())
+    for left, right in zip(first, second):
+        torch.testing.assert_close(left, right, rtol=0, atol=0)
+    (
+        model_timesteps,
+        video_sigma,
+        tf_sigma,
+        video_weight,
+        tf_weight,
+        noise_timesteps,
+    ) = first
+    torch.testing.assert_close(
+        video_weight + tf_weight,
+        torch.ones_like(video_weight),
+    )
+    assert torch.all(video_sigma[tf_weight.bool()] == 1)
+    assert torch.all(tf_sigma[video_weight.bool()] <= 0.25)
+    torch.testing.assert_close(
+        noise_timesteps,
+        torch.tensor([700, 300]),
+        rtol=0,
+        atol=0,
+    )
+    if bool(tf_weight.any()):
+        assert torch.all(
+            model_timesteps[tf_weight.bool()]
+            == model.noise_scheduler.timesteps[0]
+        )
+        assert torch.any(
+            noise_timesteps[tf_weight.bool()]
+            != model_timesteps[tf_weight.bool()]
+        )
+
+
+def test_strict_cascade_uses_total_wan_calls_and_native_video_nodes(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.tf_schedule_mode = "tf_first_cascaded"
+    model.cascade_inference_tf_fraction = 0.5
+
+    class Scheduler:
+        def set_timesteps(self, num_steps, device):
+            assert num_steps == 3
+            self.timesteps = torch.tensor(
+                [900.0, 450.0, 0.0], device=device
+            )
+            self.sigmas = torch.tensor(
+                [1.0, 0.65, 0.20, 0.0], device=device
+            )
+
+    model.sample_scheduler = Scheduler()
+    schedule, model_timesteps, tf_only_steps = model._sampling_schedule(
+        6,
+        device=torch.device("cpu"),
+    )
+
+    assert tf_only_steps == 3
+    assert model_timesteps.numel() == 6
+    torch.testing.assert_close(
+        schedule.video[3:],
+        torch.tensor([1.0, 0.65, 0.20, 0.0]),
+    )
+    assert torch.all(schedule.video[:3] == 1)
+    assert torch.all(schedule.time_frequency[3:] == 0)
+
+
+def test_cascade_controls_intervene_only_after_auxiliary_generation(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.tf_schedule_mode = "tf_first_cascaded"
+
+    for source in ("off", "autonomous_shuffled"):
+        assert (
+            model._sampling_condition_source_for_step(
+                source,
+                step_index=0,
+                tf_only_steps=2,
+            )
+            == "autonomous"
+        )
+        assert (
+            model._sampling_condition_source_for_step(
+                source,
+                step_index=1,
+                tf_only_steps=2,
+            )
+            == "autonomous"
+        )
+        assert (
+            model._sampling_condition_source_for_step(
+                source,
+                step_index=2,
+                tf_only_steps=2,
+            )
+            == source
+        )
+
+    assert (
+        model._sampling_condition_source_for_step(
+            "oracle_matched",
+            step_index=0,
+            tf_only_steps=2,
+        )
+        == "oracle_matched"
+    )
+    model.tf_schedule_mode = "aligned"
+    assert (
+        model._sampling_condition_source_for_step(
+            "off",
+            step_index=0,
+            tf_only_steps=0,
+        )
+        == "off"
+    )
+
+
 def test_evaluation_noise_is_keyed_by_clip_not_batch_order(monkeypatch):
     module = _load_model_module(monkeypatch)
     ids = torch.tensor([17, 29])

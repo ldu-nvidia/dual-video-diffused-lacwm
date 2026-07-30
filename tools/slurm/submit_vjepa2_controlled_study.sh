@@ -65,17 +65,19 @@ Validate or submit the immutable five-arm V-JEPA 2.1 controlled study:
 
   0 V0   original ExplicitActionDiTModel
   1 VPM  parameter-matched dual wrapper, video objective only
-  2 A1   V-JEPA auxiliary objective, no video-trunk fusion
+  2 A1   faithful V-JEPA-first cascade, no video-trunk fusion
   3 J0   joint diffusion, aligned clocks
-  4 J1   joint diffusion, V-JEPA clock leads by logit 1
+  4 J1   faithful V-JEPA-first cascade with video-trunk fusion
 
 Primary completed-update milestones are exactly
 [1,50,100,200,400,800,1000]. A 600-update allocation-only stage ensures no
 Slurm allocation performs more than 200 new updates. The eight stage arrays
 form an afterok chain; a failed arm stops all later stages. A final dependent
-one-B200 job performs the counterbalanced paired J1@NFE4 versus VPM@NFE8
-latency comparison. Inference NFE is [1,2,4,6,8,12,20]. V-JEPA teacher calls
-during training/inference are zero.
+one-B200 job performs the historical counterbalanced J1@NFE4 versus VPM@NFE8
+latency diagnostic; a fresh frontier is still required for any acceleration
+claim. Inference NFE is [1,2,4,6,8,12,20]. NFE=1 is an explicitly degenerate
+joint negative control because a strict two-phase cascade requires at least
+two Wan calls. V-JEPA teacher calls during training/inference are zero.
 
 Required path/provenance options can instead be supplied through the matching
 environment variables shown in parentheses:

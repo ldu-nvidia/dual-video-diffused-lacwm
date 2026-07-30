@@ -1687,11 +1687,16 @@ def _timing_gate_from_effect(
     left_p95: float,
     reference_p95: float,
 ) -> dict[str, Any]:
+    p95_relative_reduction = (
+        reference_p95 - left_p95
+    ) / reference_p95
     checks = {
         "paired_speedup_ci_low_strictly_positive": (
             float(effect["bootstrap_ci"]["low"]) > 0.0
         ),
-        "left_p95_lower_than_reference_p95": left_p95 < reference_p95,
+        "p95_relative_reduction_at_least_20_percent": (
+            p95_relative_reduction >= 0.20
+        ),
         "both_execution_order_strata_favorable": (
             len(effect["order_strata"]) == 2
             and all(
@@ -1703,9 +1708,10 @@ def _timing_gate_from_effect(
     return {
         "passed": all(checks.values()),
         "checks": checks,
+        "p95_relative_reduction": p95_relative_reduction,
         "rule": (
             "paired stratified-bootstrap relative speedup CI-low > 0; "
-            "J1 p95 lower; both pairwise order strata favorable"
+            "J1 p95 at least 20% lower; both pairwise order strata favorable"
         ),
     }
 

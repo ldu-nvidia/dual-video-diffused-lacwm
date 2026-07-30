@@ -153,6 +153,10 @@ IFS='|' read -r \
   ARM_CODE ARM_NAME SELECTOR_KIND DUAL_ENABLED CONDITION_MODE \
   CONDITION_ON_STATE CONDITION_ON_CLOCK SCHEDULE_MODE AUXILIARY_LEAD_LOGIT \
   AUXILIARY_LOSS_WEIGHT PARAMETER_MATCHED_CONTROL \
+  STATE_GATE_INIT CLOCK_GATE_INIT CASCADE_TF_LOSS_PROBABILITY \
+  CASCADE_LOGIT_MEAN CASCADE_LOGIT_STD \
+  CASCADE_TF_CONDITION_MAX_SIGMA CASCADE_VALIDATION_TF_SIGMA \
+  CASCADE_INFERENCE_TF_FRACTION \
   < <(
     "$PYTHON_BIN" "$HELPER" arm-contract \
       --array-task-id "$SLURM_ARRAY_TASK_ID" \
@@ -342,10 +346,16 @@ if [[ "$DUAL_ENABLED" == "true" ]]; then
     "model.dual_diffusion.schedule_mode=$SCHEDULE_MODE"
     "model.dual_diffusion.tf_lead_logit=$AUXILIARY_LEAD_LOGIT"
     "model.dual_diffusion.tf_loss_weight=$AUXILIARY_LOSS_WEIGHT"
-    "model.dual_diffusion.state_gate_init=0.0"
+    "model.dual_diffusion.state_gate_init=$STATE_GATE_INIT"
     "model.dual_diffusion.state_gate_trainable=true"
-    "model.dual_diffusion.clock_gate_init=0.0"
+    "model.dual_diffusion.clock_gate_init=$CLOCK_GATE_INIT"
     "model.dual_diffusion.clock_gate_trainable=true"
+    "model.dual_diffusion.cascade_tf_loss_probability=$CASCADE_TF_LOSS_PROBABILITY"
+    "model.dual_diffusion.cascade_logit_mean=$CASCADE_LOGIT_MEAN"
+    "model.dual_diffusion.cascade_logit_std=$CASCADE_LOGIT_STD"
+    "model.dual_diffusion.cascade_tf_condition_max_sigma=$CASCADE_TF_CONDITION_MAX_SIGMA"
+    "model.dual_diffusion.cascade_validation_tf_sigma=$CASCADE_VALIDATION_TF_SIGMA"
+    "model.dual_diffusion.cascade_inference_tf_fraction=$CASCADE_INFERENCE_TF_FRACTION"
     "model.dual_diffusion.head_condition_on_tf_clock=true"
     "model.dual_diffusion.video_only_control=false"
     "model.dual_diffusion.parameter_matched_control=$PARAMETER_MATCHED_CONTROL"

@@ -10,12 +10,13 @@ contract.  It defines a new five-arm experiment:
     Parameter-matched dual wrapper with zero auxiliary-loss weight and no
     auxiliary state/clock entering the video trunk.
 ``A1``
-    V-JEPA auxiliary denoising loss only; the auxiliary head receives its own
-    noisy state and raw clock, but neither enters the video trunk.
+    Faithful V-JEPA-first cascaded/noised objective without video-trunk fusion.
 ``J0``
     Joint denoising with aligned video/auxiliary clocks.
 ``J1``
-    Joint denoising with V-JEPA leading by one logit unit.
+    Faithful V-JEPA-first cascaded/noised training and inference. The legacy
+    code is retained so existing analysis tooling can compare the new primary
+    arm with the same parameter-matched baseline.
 
 The V-JEPA teacher is an *offline target extractor only*.  Training and
 autonomous inference consume cached, PCA-whitened targets or generated
@@ -194,11 +195,19 @@ ARMS: tuple[dict[str, Any], ...] = (
         "condition_mode": "off",
         "condition_on_auxiliary_state": False,
         "condition_on_auxiliary_clock": False,
-        "schedule_mode": "aligned",
+        "schedule_mode": "tf_first_cascaded",
         "auxiliary_lead_logit": 0.0,
-        "auxiliary_loss_weight": 1.0,
+        "auxiliary_loss_weight": 0.333,
+        "cascade_tf_loss_probability": 0.4,
+        "cascade_logit_mean": 1.2,
+        "cascade_logit_std": 1.0,
+        "cascade_tf_condition_max_sigma": 0.25,
+        "cascade_validation_tf_sigma": 0.125,
+        "cascade_inference_tf_fraction": 0.5,
         "parameter_matched_control": False,
-        "research_role": "auxiliary-denoising regularizer without fusion",
+        "research_role": (
+            "Latent-Forcing schedule/objective control without video fusion"
+        ),
     },
     {
         "code": "J0",
@@ -222,11 +231,24 @@ ARMS: tuple[dict[str, Any], ...] = (
         "condition_mode": "matched",
         "condition_on_auxiliary_state": True,
         "condition_on_auxiliary_clock": True,
-        "schedule_mode": "tf_leads",
-        "auxiliary_lead_logit": 1.0,
-        "auxiliary_loss_weight": 1.0,
+        "schedule_mode": "tf_first_cascaded",
+        "auxiliary_lead_logit": 0.0,
+        "auxiliary_loss_weight": 0.333,
+        # Prior telemetry maps a 0.02 effective gate to roughly 5--15% of the
+        # native Wan token RMS. Unlike the previous exact-zero initialization,
+        # this does not make the semantic pathway functionally invisible.
+        "state_gate_init": 0.02,
+        "clock_gate_init": 0.02,
+        "cascade_tf_loss_probability": 0.4,
+        "cascade_logit_mean": 1.2,
+        "cascade_logit_std": 1.0,
+        "cascade_tf_condition_max_sigma": 0.25,
+        "cascade_validation_tf_sigma": 0.125,
+        "cascade_inference_tf_fraction": 0.5,
         "parameter_matched_control": False,
-        "research_role": "joint denoising with V-JEPA leading by logit 1",
+        "research_role": (
+            "Latent-Forcing-faithful V-JEPA-first cascaded/noised schedule"
+        ),
     },
 )
 
@@ -607,9 +629,13 @@ def _arm_contract() -> dict[str, dict[str, Any]]:
                 {
                     "tf_channels": 64,
                     "auxiliary_history_mode": "diffuse_all",
-                    "state_gate_init": 0.0,
+                    "state_gate_init": float(
+                        arm.get("state_gate_init", 0.0)
+                    ),
                     "state_gate_trainable": True,
-                    "clock_gate_init": 0.0,
+                    "clock_gate_init": float(
+                        arm.get("clock_gate_init", 0.0)
+                    ),
                     "clock_gate_trainable": True,
                     "head_condition_on_tf_clock": True,
                     "video_only_control": False,
@@ -2009,13 +2035,28 @@ def _study_manifest(
                         "latent and decoded raw-video reconstruction metrics "
                         "only; VAE-reconstruction comparisons are diagnostic"
                     ),
+                    "nfe_1_cascade_policy": (
+                        "explicit degenerate aligned negative control; a strict "
+                        "two-phase cascade requires at least two Wan calls"
+                    ),
                 },
             },
             "clock": {
                 "convention": SIGMA_CONVENTION,
                 "J0": "auxiliary_sigma = video_sigma",
-                "J1": "auxiliary_sigma = sigmoid(logit(video_sigma) - 1)",
+                "A1": (
+                    "V-JEPA-first branch schedule, but V-JEPA state/clock "
+                    "cannot enter the video trunk"
+                ),
+                "J1": (
+                    "V-JEPA-first cascade: V-JEPA denoises while video remains "
+                    "at sigma=1, then video denoises while V-JEPA remains clean"
+                ),
                 "exact_endpoints": True,
+                "cascade_auxiliary_loss_weight": 0.333,
+                "cascade_auxiliary_loss_weight_source": (
+                    "released Latent Forcing dino_weight; fixed before this run"
+                ),
             },
             "comparisons": {
                 "training_convergence": [
@@ -2027,7 +2068,7 @@ def _study_manifest(
                 "autonomous_inference": [
                     "J1 autonomous vs same-checkpoint off",
                     "J1 autonomous vs same-checkpoint autonomous_shuffled",
-                    "J1@NFE4 vs VPM@NFE4 and VPM@NFE8",
+                    "fresh validation-selected J1@K vs VPM@M with K < M",
                 ],
                 "oracle_policy": (
                     "oracle results quantify headroom only and cannot support a "
@@ -2339,8 +2380,18 @@ def _assert_resolved_contract(
             "model.dual_diffusion",
             "model.forward_model.dual_diffusion",
         ):
-            _assert_float(problems, config, f"{prefix}.state_gate_init", 0.0)
-            _assert_float(problems, config, f"{prefix}.clock_gate_init", 0.0)
+            _assert_float(
+                problems,
+                config,
+                f"{prefix}.state_gate_init",
+                float(arm.get("state_gate_init", 0.0)),
+            )
+            _assert_float(
+                problems,
+                config,
+                f"{prefix}.clock_gate_init",
+                float(arm.get("clock_gate_init", 0.0)),
+            )
             _assert_float(
                 problems,
                 config,
@@ -2353,6 +2404,21 @@ def _assert_resolved_contract(
                 f"{prefix}.tf_lead_logit",
                 float(arm["auxiliary_lead_logit"]),
             )
+            if arm["schedule_mode"] == "tf_first_cascaded":
+                for key, default in (
+                    ("cascade_tf_loss_probability", 0.4),
+                    ("cascade_logit_mean", 1.2),
+                    ("cascade_logit_std", 1.0),
+                    ("cascade_tf_condition_max_sigma", 0.25),
+                    ("cascade_validation_tf_sigma", 0.125),
+                    ("cascade_inference_tf_fraction", 0.5),
+                ):
+                    _assert_float(
+                        problems,
+                        config,
+                        f"{prefix}.{key}",
+                        float(arm.get(key, default)),
+                    )
         if _config_value(config, "model.time_frequency_transform", missing=None) is not None:
             problems.append("V-JEPA dual arms must not instantiate an online TF transform")
     else:
@@ -2473,8 +2539,16 @@ def command_arm_contract(args: argparse.Namespace) -> int:
                 if arm["auxiliary_lead_logit"] is None
                 else f"{arm['auxiliary_lead_logit']:.2f}"
             ),
-            f"{arm['auxiliary_loss_weight']:.2f}",
+            f"{arm['auxiliary_loss_weight']:.3f}",
             str(arm["parameter_matched_control"]).lower(),
+            f"{float(arm.get('state_gate_init', 0.0)):.3f}",
+            f"{float(arm.get('clock_gate_init', 0.0)):.3f}",
+            f"{float(arm.get('cascade_tf_loss_probability', 0.4)):.3f}",
+            f"{float(arm.get('cascade_logit_mean', 1.2)):.3f}",
+            f"{float(arm.get('cascade_logit_std', 1.0)):.3f}",
+            f"{float(arm.get('cascade_tf_condition_max_sigma', 0.25)):.3f}",
+            f"{float(arm.get('cascade_validation_tf_sigma', 0.125)):.3f}",
+            f"{float(arm.get('cascade_inference_tf_fraction', 0.5)):.3f}",
         ]
         delimiter = "\t" if args.format == "tsv" else "|"
         if any(

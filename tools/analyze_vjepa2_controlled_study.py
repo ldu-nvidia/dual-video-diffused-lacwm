@@ -104,7 +104,7 @@ EXPECTED_INTERVENTIONS = {
     "A1": {
         "condition_on_tf": 0,
         "condition_mode_code": 0,
-        "tf_loss_weight": 1.0,
+        "tf_loss_weight": 0.333,
         "parameter_matched_control": 0,
     },
     "J0": {
@@ -116,7 +116,7 @@ EXPECTED_INTERVENTIONS = {
     "J1": {
         "condition_on_tf": 1,
         "condition_mode_code": 1,
-        "tf_loss_weight": 1.0,
+        "tf_loss_weight": 0.333,
         "parameter_matched_control": 0,
     },
 }
@@ -2392,25 +2392,58 @@ def _load_quality_evidence(
                             if source != "off"
                         ]
                     else:
-                        continue
-                    if len(compare_sources) < 2:
-                        continue
-                    reference_hashes = rows_by_key[
-                        (clip_index, compare_sources[0], nfe)
-                    ]["tensor_sha256"]
-                    for source in compare_sources[1:]:
-                        candidate = rows_by_key[
-                            (clip_index, source, nfe)
+                        compare_sources = []
+                    if len(compare_sources) >= 2:
+                        reference_hashes = rows_by_key[
+                            (clip_index, compare_sources[0], nfe)
                         ]["tensor_sha256"]
-                        if any(
-                            candidate[field] != reference_hashes[field]
-                            for field in output_hash_keys
-                        ):
-                            raise StudyValidationError(
-                                f"{arm} update {update} exact causal no-op "
-                                f"failed for clip {clip_index}, NFE {nfe}, "
-                                f"source {source}"
+                        for source in compare_sources[1:]:
+                            candidate = rows_by_key[
+                                (clip_index, source, nfe)
+                            ]["tensor_sha256"]
+                            if any(
+                                candidate[field] != reference_hashes[field]
+                                for field in output_hash_keys
+                            ):
+                                raise StudyValidationError(
+                                    f"{arm} update {update} exact causal no-op "
+                                    f"failed for clip {clip_index}, NFE {nfe}, "
+                                    f"source {source}"
+                                )
+                    if arm == "J1" and nfe >= 2:
+                        phase_boundary_sources = [
+                            source
+                            for source in (
+                                "autonomous",
+                                "off",
+                                "autonomous_shuffled",
                             )
+                            if source in available_sources
+                        ]
+                        if len(phase_boundary_sources) >= 2:
+                            reference_auxiliary_hash = rows_by_key[
+                                (
+                                    clip_index,
+                                    phase_boundary_sources[0],
+                                    nfe,
+                                )
+                            ]["tensor_sha256"]["auxiliary_final_sha256"]
+                            for source in phase_boundary_sources[1:]:
+                                candidate_auxiliary_hash = rows_by_key[
+                                    (clip_index, source, nfe)
+                                ]["tensor_sha256"][
+                                    "auxiliary_final_sha256"
+                                ]
+                                if (
+                                    candidate_auxiliary_hash
+                                    != reference_auxiliary_hash
+                                ):
+                                    raise StudyValidationError(
+                                        "J1 phase-boundary auxiliary state "
+                                        "differs across autonomous/off/shuffled "
+                                        f"for clip {clip_index}, NFE {nfe}, "
+                                        f"source {source}"
+                                    )
             inventory_summary["arms"][arm][str(update)] = {
                 "inventory_path": str(inventory_path),
                 "inventory_sha256": _hash_file(inventory_path),
@@ -4343,7 +4376,7 @@ def _build_analysis(
     vpm_p95 = float(latency_vpm["latency_ms"]["p95"])
     paired_effect = paired_latency["counterbalanced_paired_effect"]
     order_strata = paired_latency["order_strata"]
-    latency_pass = (
+    diagnostic_latency_pass = (
         float(paired_effect["bootstrap_ci"]["low"]) > 0.0
         and j1_p95 < vpm_p95
         and all(
@@ -4360,6 +4393,12 @@ def _build_analysis(
         "p95_relative_reduction": (vpm_p95 - j1_p95) / vpm_p95,
         "counterbalanced_paired_mean_effect": paired_effect,
         "execution_order_strata": order_strata,
+        "diagnostic_gate_passed": diagnostic_latency_pass,
+        "claim_eligible": False,
+        "claim_ineligibility_reason": (
+            "the fixed J1@4 versus VPM@8 pair was not selected from a fresh "
+            "validation NFE/quality frontier"
+        ),
     }
     j1_p95_fps = float(
         latency_j1["generated_frames_per_second_at_p95"]
@@ -4545,17 +4584,16 @@ def _build_analysis(
             _gate(
                 gate_id="I6",
                 description=(
-                    "Four-step J1 has robustly lower end-to-end latency than "
-                    "eight-step VPM on the same B200"
+                    "Fresh-frontier end-to-end acceleration evidence is required"
                 ),
                 rule=(
-                    "same-allocation counterbalanced paired-bootstrap 95% CI "
-                    "lower bound on mean relative speedup >0, J1@4 p95 < "
-                    "VPM@8 p95, and favorable mean difference in both "
-                    "execution-order strata"
+                    "select J1@K versus VPM@M with K<M on fresh validation, "
+                    "confirm quality on the registered lockbox, then require "
+                    "positive paired speed CI and >=20% p95 reduction; the "
+                    "historical fixed J1@4/VPM@8 timing is diagnostic only"
                 ),
                 value=latency_value,
-                passed=latency_pass,
+                passed=None,
             ),
         ],
         "mechanism": [
@@ -4598,9 +4636,9 @@ def _build_analysis(
     if literal_training_pass and literal_inference_pass:
         conclusion = (
             "The preregistered evidence supports both faster training convergence "
-            "and lower-error/faster deployable held-out reconstruction for J1 "
-            "versus VPM. The separate oracle mechanism diagnostic does not "
-            "supply or gate this deployable claim."
+            "and fresh-frontier-confirmed lower-error/faster deployable held-out "
+            "reconstruction for J1 versus VPM. The separate oracle mechanism "
+            "diagnostic does not supply or gate this deployable claim."
         )
     elif any_unavailable:
         conclusion = (
@@ -4651,9 +4689,18 @@ def _build_analysis(
             "auxiliary_history_latent_frames_required": 0,
             "online_teacher_calls_required": 0,
             "actual_wan_calls_must_equal_nfe": True,
-            "final_speed_comparison": (
-                "same-allocation, same-process, counterbalanced paired "
-                "J1 autonomous NFE=4 versus VPM autonomous NFE=8"
+            "legacy_fixed_speed_comparison": {
+                "comparison": (
+                    "same-allocation, same-process, counterbalanced paired "
+                    "J1 autonomous NFE=4 versus VPM autonomous NFE=8"
+                ),
+                "diagnostic_only": True,
+                "claim_eligible": False,
+            },
+            "required_speed_comparison": (
+                "fresh validation-frontier-selected J1@K versus VPM@M with "
+                "K<M, registered lockbox quality confirmation, positive paired "
+                "speed CI, and at least 20% p95 reduction"
             ),
             "paired_unit": "immutable fixed-test clip_id/clip_index",
             "fixed_test_clip_count": EXPECTED_TEST_CLIPS,
@@ -4681,6 +4728,9 @@ def _build_analysis(
             "all_non_off_sources_equal_at_nfe1": True,
             "VPM_A1_all_source_outputs_are_exact_no_ops": True,
             "VPM_A1_effective_state_and_clock_gates_are_exactly_zero": True,
+            "J1_phase_boundary_auxiliary_state_identical_across_controls": (
+                True
+            ),
             "trainer_visualization_excluded_from_scientific_aggregates": True,
             "raw_held_out_rgb_is_primary_decoded_target": True,
             "paired_speed_evidence_same_allocation_node_gpu_process": True,
@@ -4737,11 +4787,11 @@ def _build_analysis(
             "No LPIPS, FVD, or pretrained perceptual metric is reported because "
             "the immutable study pins no such checkpoint; claims are restricted "
             "to held-out latent and raw-RGB reconstruction metrics.",
-            "The final latency claim compares J1 autonomous NFE=4 with the "
-            "parameter-matched VPM autonomous NFE=8 baseline in one process on "
-            "one B200 using identical inputs and counterbalanced paired rounds. "
-            "The wider per-arm grid is diagnostic only. V0 has no compatible "
-            "deployable latency evaluator and is not part of the speed claim.",
+            "The fixed J1 autonomous NFE=4 versus VPM autonomous NFE=8 paired "
+            "benchmark is diagnostic only. A speed claim requires a fresh "
+            "validation-selected lower-call pair, registered-lockbox quality "
+            "confirmation, and the separate frontier latency gate. V0 has no "
+            "compatible deployable latency evaluator.",
         ],
     }
 

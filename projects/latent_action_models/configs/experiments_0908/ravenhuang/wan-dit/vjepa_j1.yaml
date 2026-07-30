@@ -3,15 +3,23 @@ defaults:
   - /experiments_0908/vjepa_latent_forcing_common
   - _self_
 
-name: vjepa-j1-leading-joint
+name: vjepa-j1-faithful-cascade
 model:
   dual_diffusion:
     condition_on_tf: true
     condition_on_tf_clock: true
     condition_mode: matched
-    schedule_mode: tf_leads
-    tf_lead_logit: 1.0
-    tf_loss_weight: 1.0
+    schedule_mode: tf_first_cascaded
+    tf_lead_logit: 0.0
+    tf_loss_weight: 0.333
+    state_gate_init: 0.02
+    clock_gate_init: 0.02
+    cascade_tf_loss_probability: 0.4
+    cascade_logit_mean: 1.2
+    cascade_logit_std: 1.0
+    cascade_tf_condition_max_sigma: 0.25
+    cascade_validation_tf_sigma: 0.125
+    cascade_inference_tf_fraction: 0.5
     parameter_matched_control: false
 wandb:
-  tags: [abc, vjepa2.1, latent-forcing, J1, semantic-lead-logit-1]
+  tags: [abc, vjepa2.1, latent-forcing, J1, faithful-cascade]

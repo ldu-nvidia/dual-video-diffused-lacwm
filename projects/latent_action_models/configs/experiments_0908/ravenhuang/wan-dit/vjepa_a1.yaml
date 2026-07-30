@@ -3,13 +3,21 @@ defaults:
   - /experiments_0908/vjepa_latent_forcing_common
   - _self_
 
-name: vjepa-a1-auxiliary-supervision
+name: vjepa-a1-faithful-cascade-fusion-off
 model:
   dual_diffusion:
     condition_on_tf: false
     condition_on_tf_clock: false
     condition_mode: "off"
-    tf_loss_weight: 1.0
+    schedule_mode: tf_first_cascaded
+    tf_lead_logit: 0.0
+    tf_loss_weight: 0.333
+    cascade_tf_loss_probability: 0.4
+    cascade_logit_mean: 1.2
+    cascade_logit_std: 1.0
+    cascade_tf_condition_max_sigma: 0.25
+    cascade_validation_tf_sigma: 0.125
+    cascade_inference_tf_fraction: 0.5
     parameter_matched_control: false
 wandb:
-  tags: [abc, vjepa2.1, latent-forcing, A1, auxiliary-supervision]
+  tags: [abc, vjepa2.1, latent-forcing, A1, faithful-cascade-fusion-off]

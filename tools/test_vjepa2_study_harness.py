@@ -34,6 +34,17 @@ class VJEPA2StudyHarnessTest(unittest.TestCase):
             [False, False, False],
         )
         self.assertTrue(all(arm["dual_enabled"] for arm in dual))
+        a1 = study.ARMS[2]
+        j1 = study.ARMS[4]
+        self.assertEqual(a1["schedule_mode"], "tf_first_cascaded")
+        self.assertEqual(j1["schedule_mode"], "tf_first_cascaded")
+        self.assertEqual(
+            a1["auxiliary_loss_weight"],
+            j1["auxiliary_loss_weight"],
+        )
+        self.assertFalse(a1["condition_on_auxiliary_state"])
+        self.assertTrue(j1["condition_on_auxiliary_state"])
+        self.assertEqual(j1["state_gate_init"], 0.02)
 
     def test_update_and_nfe_contracts_use_completed_update_semantics(self):
         self.assertEqual(
@@ -147,8 +158,16 @@ class VJEPA2StudyHarnessTest(unittest.TestCase):
                 "false",
                 "",
                 "",
-                "0.00",
+                "0.000",
                 "false",
+                "0.000",
+                "0.000",
+                "0.400",
+                "1.200",
+                "1.000",
+                "0.250",
+                "0.125",
+                "0.500",
             ],
         )
 

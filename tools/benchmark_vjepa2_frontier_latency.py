@@ -218,9 +218,14 @@ def timing_gate(
     if not isinstance(interval, Mapping) or not isinstance(strata, Mapping):
         raise FrontierLatencyError("timing effect lacks CI or order strata")
     ci_low = float(interval["low"])
+    p95_relative_reduction = (
+        reference_p95 - left_p95
+    ) / reference_p95
     checks = {
         "paired_speedup_ci_low_strictly_positive": ci_low > 0.0,
-        "left_p95_lower_than_reference_p95": left_p95 < reference_p95,
+        "p95_relative_reduction_at_least_20_percent": (
+            p95_relative_reduction >= 0.20
+        ),
         "both_execution_order_strata_favorable": (
             len(strata) == 2
             and all(
@@ -232,9 +237,10 @@ def timing_gate(
     return {
         "passed": all(checks.values()),
         "checks": checks,
+        "p95_relative_reduction": p95_relative_reduction,
         "rule": (
             "paired stratified-bootstrap relative speedup CI-low > 0; "
-            "J1 p95 lower; both pairwise order strata favorable"
+            "J1 p95 at least 20% lower; both pairwise order strata favorable"
         ),
     }
 
