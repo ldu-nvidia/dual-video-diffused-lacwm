@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROJECT_ROOT="$REPO_ROOT/projects/latent_action_models"
 HELPER="$REPO_ROOT/tools/vjepa2_controlled_study.py"
 SBATCH_SCRIPT="$REPO_ROOT/tools/slurm/vjepa2_controlled_study.sbatch"
+ACTIVATE="$REPO_ROOT/tools/env/activate_b200.sh"
 
 LACWM_BASE="${LACWM_BASE:-/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train}"
 PYTHON_BIN="${LACWM_PYTHON:-$LACWM_BASE/envs/lacwm-b200-py310/bin/python}"
@@ -206,7 +207,7 @@ done
   die "warm-start SHA-256 must be 64 lowercase hex characters"
 
 for path in \
-  "$HELPER" "$SBATCH_SCRIPT" "$PYTHON_BIN" "$EXTRACTOR_PYTHON" \
+  "$HELPER" "$SBATCH_SCRIPT" "$ACTIVATE" "$PYTHON_BIN" "$EXTRACTOR_PYTHON" \
   "$BASELINE_CONFIG" "$DUAL_CONFIG" "$WARMSTART" "$VJEPA_CHECKPOINT" \
   "$PCA_STATS" "$TRAIN_MANIFEST" "$TRAIN_CACHE_METADATA" \
   "$VALIDATION_MANIFEST" "$VALIDATION_CACHE_METADATA" \
@@ -219,6 +220,23 @@ done
 [[ -d "$VJEPA_SOURCE/.git" ]] || die "V-JEPA source is not a Git checkout"
 [[ -d "$WAN_DIR_VALUE" && -d "$VIDEOX_HOME_VALUE/.git" ]] || \
   die "Wan/VideoX runtime assets are unavailable"
+
+# The submit host may already have another LACWM checkout on PYTHONPATH. Bind
+# Hydra's package search and every imported module to this exact clean commit
+# before the read-only preflight composes any study configuration.
+export LACWM_BASE
+export LACWM_PYTHON="$PYTHON_BIN"
+export WAN_DIR="$WAN_DIR_VALUE"
+export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
+source "$ACTIVATE"
+ROBOT_WM_ORIGIN="$(
+  "$PYTHON_BIN" -c \
+    'from pathlib import Path; import robot_wm; print(Path(robot_wm.__file__).resolve())'
+)"
+case "$ROBOT_WM_ORIGIN" in
+  "$REPO_ROOT"/robot_wm/*) ;;
+  *) die "Python resolved robot_wm outside the study repository: $ROBOT_WM_ORIGIN" ;;
+esac
 
 ACTUAL_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 [[ "$ACTUAL_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "could not resolve Git commit"

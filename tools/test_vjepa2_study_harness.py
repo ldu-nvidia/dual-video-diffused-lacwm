@@ -11,6 +11,7 @@ import vjepa2_controlled_study as study
 
 ROOT = Path(__file__).resolve().parents[1]
 SBATCH = ROOT / "tools" / "slurm" / "vjepa2_controlled_study.sbatch"
+SUBMIT = ROOT / "tools" / "slurm" / "submit_vjepa2_controlled_study.sh"
 
 
 class VJEPA2StudyHarnessTest(unittest.TestCase):
@@ -96,6 +97,12 @@ class VJEPA2StudyHarnessTest(unittest.TestCase):
         self.assertIn("val_dataset.img_augment=false", source)
         self.assertIn("viz_dataset.img_augment=false", source)
         self.assertNotIn("transform.wrist_mask_prob", source)
+
+    def test_submit_preflight_binds_python_to_the_pinned_checkout(self):
+        source = SUBMIT.read_text(encoding="utf-8")
+        self.assertIn('source "$ACTIVATE"', source)
+        self.assertIn('ROBOT_WM_ORIGIN="$(', source)
+        self.assertIn('"$REPO_ROOT"/robot_wm/*', source)
 
 
 if __name__ == "__main__":
