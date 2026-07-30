@@ -350,7 +350,14 @@ def _canonical_episode_directory(value: Any, label: str) -> Path:
     return resolved
 
 
-def _python_executable(value: str | Path) -> Path:
+def _python_launcher(value: str | Path) -> Path:
+    """Validate Python while preserving a virtual-environment launcher path.
+
+    Resolving ``venv/bin/python`` and then executing its base-CPython target
+    bypasses the adjacent ``pyvenv.cfg`` and loses the pinned site-packages.
+    Callers that execute Python must use this path; immutable provenance can
+    separately record the canonical target through ``_python_executable``.
+    """
     requested = Path(value).expanduser().absolute()
     if not requested.is_file() or not os.access(requested, os.X_OK):
         raise ContractError(f"Python is missing or not executable: {requested}")
@@ -364,7 +371,12 @@ def _python_executable(value: str | Path) -> Path:
         raise ContractError(
             f"resolved Python is not an executable regular file: {path}"
         )
-    return path
+    return requested
+
+
+def _python_executable(value: str | Path) -> Path:
+    """Return the canonical real binary used for immutable provenance."""
+    return _python_launcher(value).resolve(strict=True)
 
 
 def _validated_id(value: str, label: str) -> str:
@@ -2666,7 +2678,7 @@ def command_prepare_stage(args: argparse.Namespace) -> int:
     repo = _canonical_directory(args.repo_root, "repository root")
     _assert_clean_commit(repo, expected_commit)
     project_root = _canonical_directory(args.project_root, "project root")
-    python = _python_executable(args.python)
+    python = _python_launcher(args.python)
     run_dir = _canonical_directory(args.run_dir, "arm run directory")
     arm_manifest_path = _canonical_file(args.arm_manifest, "arm manifest")
     arm_manifest = _validate_arm_manifest(
@@ -2683,6 +2695,11 @@ def command_prepare_stage(args: argparse.Namespace) -> int:
         expected_study_id=arm_manifest["study_id"],
         expected_commit=expected_commit,
     )
+    recorded_python = Path(study["inputs"]["runtime"]["python"])
+    if python.resolve(strict=True) != recorded_python:
+        raise ContractError(
+            "stage Python launcher resolves to another runtime binary"
+        )
     if arm_manifest["study_identity_sha256"] != study["identity_sha256"]:
         raise ContractError("arm manifest refers to another study identity")
     # Keep the command safe even when invoked outside the audited Slurm

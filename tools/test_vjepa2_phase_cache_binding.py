@@ -752,9 +752,29 @@ class PhaseReportSemanticBindingTest(unittest.TestCase):
         link.symlink_to(self.runtime_python)
         self.assertTrue(link.is_symlink())
         self.assertEqual(
+            study._python_launcher(link),
+            link.absolute(),
+        )
+        self.assertEqual(
             study._python_executable(link),
             self.runtime_python,
         )
+
+    def test_prepare_stage_executes_the_unresolved_python_launcher(self) -> None:
+        source = Path(study.__file__).read_text(encoding="utf-8")
+        function_start = source.index("def command_prepare_stage(")
+        function_end = source.index("\ndef command_record_stage(", function_start)
+        function = source[function_start:function_end]
+        self.assertIn("python = _python_launcher(args.python)", function)
+        self.assertIn(
+            "python.resolve(strict=True) != recorded_python",
+            function,
+        )
+        self.assertIn(
+            "content = _compose_config(python, project_root, args.override)",
+            function,
+        )
+        self.assertNotIn("python = _python_executable(args.python)", function)
 
 
 class CacheBuildBindingTest(unittest.TestCase):
