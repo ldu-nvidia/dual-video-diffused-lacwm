@@ -3799,7 +3799,6 @@ def _load_paired_latency(
         "same_B200": True,
         "same_process": True,
         "submission_job_id": expected_slurm_job_id,
-        "original_submission_job_id": paired_job["job_id"],
         "protocol": dict(protocol),
         "immutable_input_identity": {
             field: immutable[field] for field in sample_identity_fields

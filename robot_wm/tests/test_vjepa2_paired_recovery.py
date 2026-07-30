@@ -578,6 +578,9 @@ def test_legacy_benchmark_mode_remains_default():
     assert args.recovery_submission_record is None
     assert args.recovery_runtime_record is None
     assert args.controller_commit is None
+    source = inspect.getsource(benchmark.command_benchmark)
+    assert "record_origins=recovery_mode" in source
+    assert "if recovery_mode:\n        _promote_scientific_paths" in source
 
 
 def test_recovery_shell_entrypoints_are_fail_closed():

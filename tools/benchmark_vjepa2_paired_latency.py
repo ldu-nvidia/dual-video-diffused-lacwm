@@ -445,7 +445,8 @@ def _load_model_and_sample(
     device: Any,
     repo: Path,
     project_root: Path,
-) -> tuple[Any, Any, dict[str, dict[str, str]]]:
+    record_origins: bool,
+) -> tuple[Any, Any, dict[str, dict[str, str]] | None]:
     import torch
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
@@ -475,11 +476,15 @@ def _load_model_and_sample(
             f"{provenance['code']} viz dataset is not the pinned test cache"
         )
     dataset = instantiate(config.viz_dataset)
-    dataset_origin = _instantiated_class_origin(
-        dataset,
-        package="robot_wm",
-        root=repo,
-        label=f"{provenance['code']} dataset",
+    dataset_origin = (
+        _instantiated_class_origin(
+            dataset,
+            package="robot_wm",
+            root=repo,
+            label=f"{provenance['code']} dataset",
+        )
+        if record_origins
+        else None
     )
     if len(dataset) != 128:
         raise PairedLatencyError(
@@ -489,11 +494,15 @@ def _load_model_and_sample(
     del dataset
 
     model = instantiate(config.model)
-    model_origin = _instantiated_class_origin(
-        model,
-        package="lam",
-        root=project_root,
-        label=f"{provenance['code']} model",
+    model_origin = (
+        _instantiated_class_origin(
+            model,
+            package="lam",
+            root=project_root,
+            label=f"{provenance['code']} model",
+        )
+        if record_origins
+        else None
     )
     snapshot = torch.load(
         provenance["snapshot_path"],
@@ -527,10 +536,15 @@ def _load_model_and_sample(
     model.evaluation_nfe_steps = (provenance["nfe"],)
     model.viz_num_steps = provenance["nfe"]
     model.capture_latent_trajectories = False
-    return model, sample, {
-        "dataset": dataset_origin,
-        "model": model_origin,
-    }
+    class_origins = (
+        {
+            "dataset": dataset_origin,
+            "model": model_origin,
+        }
+        if dataset_origin is not None and model_origin is not None
+        else None
+    )
+    return model, sample, class_origins
 
 
 def _host_sample(sample: Mapping[str, Any], *, arm: str) -> dict[str, Any]:
@@ -594,7 +608,12 @@ def command_benchmark(args: argparse.Namespace) -> int:
     project_root = repo / "projects" / "latent_action_models"
     if not project_root.is_dir():
         raise PairedLatencyError("latent-action project root is missing")
-    _promote_scientific_paths(repo, project_root)
+    if recovery_mode:
+        _promote_scientific_paths(repo, project_root)
+    else:
+        for root in (str(repo), str(project_root)):
+            if root not in sys.path:
+                sys.path.insert(0, root)
     controller_repo: Path | None = None
     scientific_import_origins: dict[str, Any] | None = None
     if recovery_mode:
@@ -765,10 +784,12 @@ def command_benchmark(args: argparse.Namespace) -> int:
             device=device,
             repo=repo,
             project_root=project_root,
+            record_origins=recovery_mode,
         )
         models[arm] = model
         host_samples[arm] = _host_sample(sample, arm=arm)
-        instantiated_classes[arm] = class_origins
+        if class_origins is not None:
+            instantiated_classes[arm] = class_origins
         del sample
     if recovery_mode:
         assert scientific_import_origins is not None
