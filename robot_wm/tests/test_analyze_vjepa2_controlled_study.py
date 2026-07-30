@@ -1,3 +1,4 @@
+import inspect
 import math
 
 import pytest
@@ -123,6 +124,14 @@ def test_latency_sources_exclude_shuffled_and_oracles():
     assert not analysis.LATENCY_RE.fullmatch(
         "source_oracle_matched_nfe_4.json"
     )
+
+
+def test_final_stage_snapshot_provenance_preserves_and_validates_size():
+    source = inspect.getsource(analysis._manifest_and_stage_inventory)
+    assert '"bytes": resolved_record["bytes"]' in source
+    assert "resolved_path.stat().st_size" in source
+    assert '"bytes": observed_snapshot["bytes"]' in source
+    assert "final_snapshot_path.stat().st_size" in source
 
 
 def test_scientific_quality_grid_is_128_clip_protocol():

@@ -31,6 +31,26 @@ def test_latency_summary_binds_all_raw_values():
     ).hexdigest()
 
 
+def test_file_record_requires_exact_path_hash_and_size(tmp_path):
+    snapshot = tmp_path / "snapshot.pt"
+    snapshot.write_bytes(b"sealed checkpoint bytes")
+    record = paired._record(snapshot)
+
+    assert paired._file_record_matches(record, snapshot)
+    assert not paired._file_record_matches(
+        {key: value for key, value in record.items() if key != "bytes"},
+        snapshot,
+    )
+    assert not paired._file_record_matches(
+        {**record, "bytes": record["bytes"] + 1},
+        snapshot,
+    )
+    assert not paired._file_record_matches(
+        {**record, "unexpected": True},
+        snapshot,
+    )
+
+
 def test_timed_implementation_uses_only_public_deployable_sampler():
     source = inspect.getsource(paired.command_benchmark)
     assert "sample_future_deployable(" in source

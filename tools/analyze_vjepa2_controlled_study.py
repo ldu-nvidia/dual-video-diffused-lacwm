@@ -1519,6 +1519,7 @@ def _manifest_and_stage_inventory(
                 resolved_path
                 != root / f"resolved_update_{endpoint:04d}.yaml"
                 or resolved_record.get("sha256") != _hash_file(resolved_path)
+                or resolved_record.get("bytes") != resolved_path.stat().st_size
             ):
                 raise StudyValidationError(
                     f"{code} stage {endpoint} resolved-config provenance differs"
@@ -1561,6 +1562,9 @@ def _manifest_and_stage_inventory(
                 or observed_snapshot.get("path") != str(root / "snapshot.pt")
                 or not isinstance(observed_snapshot.get("sha256"), str)
                 or SHA256_RE.fullmatch(observed_snapshot["sha256"]) is None
+                or isinstance(observed_snapshot.get("bytes"), bool)
+                or not isinstance(observed_snapshot.get("bytes"), int)
+                or observed_snapshot["bytes"] <= 0
             ):
                 raise StudyValidationError(
                     f"{code} stage {endpoint} snapshot provenance differs"
@@ -1573,6 +1577,7 @@ def _manifest_and_stage_inventory(
                 "resolved_config": {
                     "path": str(resolved_path),
                     "sha256": resolved_record["sha256"],
+                    "bytes": resolved_record["bytes"],
                 },
                 "path": str(path),
                 "sha256": _hash_file(path),
@@ -1582,6 +1587,7 @@ def _manifest_and_stage_inventory(
                 "snapshot_observed_at_stage_end": {
                     "path": observed_snapshot["path"],
                     "sha256": observed_snapshot["sha256"],
+                    "bytes": observed_snapshot["bytes"],
                 },
                 "stage_wall_seconds_including_validation_and_visualization": wall,
                 "cumulative_wall_seconds_including_validation_and_visualization": (
@@ -1616,6 +1622,7 @@ def _manifest_and_stage_inventory(
         if (
             final_snapshot_path != root / "snapshot.pt"
             or final_snapshot.get("sha256") != _hash_file(final_snapshot_path)
+            or final_snapshot.get("bytes") != final_snapshot_path.stat().st_size
             or final_snapshot
             != stage_records["1000"]["snapshot_observed_at_stage_end"]
         ):

@@ -126,6 +126,22 @@ def _record(path: Path, *, identity: str | None = None) -> dict[str, Any]:
     return result
 
 
+def _file_record_matches(
+    record: Any,
+    path: Path,
+    *,
+    sha256: str | None = None,
+) -> bool:
+    """Require the producer's exact, content-bound file-record schema."""
+
+    expected = {
+        "path": str(path),
+        "sha256": sha256 if sha256 is not None else single._sha256(path),
+        "bytes": path.stat().st_size,
+    }
+    return isinstance(record, Mapping) and dict(record) == expected
+
+
 def _recursive_values(value: Any, key: str) -> list[Any]:
     found: list[Any] = []
     if isinstance(value, Mapping):
@@ -287,19 +303,18 @@ def _arm_provenance(
         or stage.get("arm_code") != arm_code
         or stage.get("stage_endpoint_completed_updates") != 1000
         or stage.get("trainer_terminal_iteration") != 999
-        or stage.get("resolved_config")
-        != {
-            "path": str(resolved_path),
-            "sha256": single._sha256(resolved_path),
-        }
+        or not _file_record_matches(stage.get("resolved_config"), resolved_path)
         or not _identity_valid(stage_outcome)
         or stage_outcome.get("arm_identity_sha256")
         != arm["identity_sha256"]
         or stage_outcome.get("stage_identity_sha256")
         != stage["identity_sha256"]
         or stage_outcome.get("completed_updates") != 1000
-        or observed_snapshot
-        != {"path": str(snapshot_path), "sha256": snapshot_sha256}
+        or not _file_record_matches(
+            observed_snapshot,
+            snapshot_path,
+            sha256=snapshot_sha256,
+        )
         or not _identity_valid(outcome)
         or outcome.get("arm_identity_sha256") != arm["identity_sha256"]
         or outcome.get("arm_code") != arm_code
