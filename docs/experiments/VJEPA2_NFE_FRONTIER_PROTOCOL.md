@@ -47,16 +47,20 @@ jobs when
 remaining `afterok` chain: a two-task VPM/J1 lockbox array, confirmation,
 one-B200 timing, and finalization.
 
-At execution, the launcher queries Slurm accounting for the recorded u1000
-array using formatted array-task IDs. It expands Slurm's compressed active
-rows and requires the exact task set `481132_0` through `481132_4`, once each.
-While any task is pending/running, cache and artifact-gate jobs use
-`afterok:481132`. Only when every one of those five allocations reports
-`COMPLETED/0:0` does the launcher omit that controller dependency—which may be
-stale after `MinJobAge`—and immediately run the same full final-artifact gate.
-Failed, missing, duplicate, extra, or ambiguous accounting aborts submission.
-The unrelated original paired job `481133` may finish independently against
-the untouched training checkout.
+At execution, the launcher combines Slurm's two views of the recorded u1000
+array. While it is active, a current-user `squeue -r` inventory, filtered
+locally by Slurm's explicit base-array/task fields, must expose the exact task
+set `481132_0` through `481132_4`, once each, in allowed active states; every
+task currently visible through allocation-only `sacct` must agree and must
+have no failed/nonzero record. Cache and artifact-gate jobs then use
+`afterok:481132`.
+When `squeue` has no remaining rows, terminal success instead requires all five
+formatted task records in `sacct`, each exactly `COMPLETED/0:0`. Only then does
+the launcher omit the controller dependency—which may be stale after
+`MinJobAge`—and immediately run the same full final-artifact gate. Missing,
+duplicate, extra, mismatched, failed, or ambiguous state aborts submission. The
+unrelated original paired job `481133` may finish independently against the
+untouched training checkout.
 
 All `batch` control allocations request one B200, including the final-artifact
 gate, validation-selection gate, and lockbox-confirmation job. The GPU is a

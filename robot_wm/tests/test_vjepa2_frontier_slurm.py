@@ -203,9 +203,16 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
             workflow.classify_final_job_rows(
                 "481132",
                 [
-                    "481132_[0-2%2]|PENDING|0:0",
-                    "481132_3|RUNNING|0:0",
-                    "481132_4|COMPLETED|0:0",
+                    "481132_0|RUNNING|0:0",
+                    "481132_4|PENDING|0:0",
+                ],
+                [
+                    "999999|0|RUNNING|None",
+                    "481132|0|RUNNING|None",
+                    "481132|1|RUNNING|None",
+                    "481132|2|RUNNING|None",
+                    "481132|3|RUNNING|None",
+                    "481132|4|PENDING|Dependency",
                 ],
             ),
             "active_afterok",
@@ -231,6 +238,47 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
                 [
                     "481132_0|FAILED|1:0",
                     "481132_[1-4]|COMPLETED|0:0",
+                ],
+            )
+
+    def test_active_final_job_requires_exact_consistent_squeue_tasks(self) -> None:
+        accounting = [
+            "481132_0|RUNNING|0:0",
+            "481132_4|PENDING|0:0",
+        ]
+        with self.assertRaisesRegex(workflow.WorkflowError, "squeue task set differs"):
+            workflow.classify_final_job_rows(
+                "481132",
+                accounting,
+                [
+                    "481132|0|RUNNING|None",
+                    "481132|1|RUNNING|None",
+                    "481132|2|RUNNING|None",
+                    "481132|4|PENDING|Dependency",
+                ],
+            )
+        with self.assertRaisesRegex(workflow.WorkflowError, "active state mismatch"):
+            workflow.classify_final_job_rows(
+                "481132",
+                accounting,
+                [
+                    "481132|0|PENDING|Priority",
+                    "481132|1|RUNNING|None",
+                    "481132|2|RUNNING|None",
+                    "481132|3|RUNNING|None",
+                    "481132|4|PENDING|Dependency",
+                ],
+            )
+        with self.assertRaisesRegex(workflow.WorkflowError, "ambiguous active state"):
+            workflow.classify_final_job_rows(
+                "481132",
+                accounting,
+                [
+                    "481132|0|RUNNING|None",
+                    "481132|1|FAILED|NonZeroExitCode",
+                    "481132|2|RUNNING|None",
+                    "481132|3|RUNNING|None",
+                    "481132|4|PENDING|Dependency",
                 ],
             )
 
@@ -260,14 +308,31 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
             )
 
     def test_final_job_query_uses_formatted_job_ids(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=(),
-            returncode=0,
-            stdout="481132_[0-4%2]|PENDING|0:0\n",
-            stderr="",
-        )
+        completed = [
+            subprocess.CompletedProcess(
+                args=(),
+                returncode=0,
+                stdout=(
+                    "481132_0|RUNNING|0:0\n"
+                    "481132_4|PENDING|0:0\n"
+                ),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=(),
+                returncode=0,
+                stdout=(
+                    "481132|0|RUNNING|None\n"
+                    "481132|1|RUNNING|None\n"
+                    "481132|2|RUNNING|None\n"
+                    "481132|3|RUNNING|None\n"
+                    "481132|4|PENDING|Dependency\n"
+                ),
+                stderr="",
+            ),
+        ]
         with mock.patch.object(
-            workflow.subprocess, "run", return_value=completed
+            workflow.subprocess, "run", side_effect=completed
         ) as runner:
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -276,9 +341,53 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
                 )
         self.assertEqual(status, 0)
         self.assertEqual(output.getvalue().strip(), "active_afterok")
-        command = runner.call_args.args[0]
-        self.assertIn("--format=JobID%64,State%32,ExitCode", command)
-        self.assertNotIn("JobIDRaw", " ".join(command))
+        accounting_command = runner.call_args_list[0].args[0]
+        queue_command = runner.call_args_list[1].args[0]
+        self.assertIn(
+            "--format=JobID%64,State%32,ExitCode", accounting_command
+        )
+        self.assertNotIn("JobIDRaw", " ".join(accounting_command))
+        self.assertEqual(
+            queue_command,
+            [
+                "squeue",
+                "-r",
+                "--user",
+                workflow.pwd.getpwuid(os.getuid()).pw_name,
+                "-h",
+                "-o",
+                "%F|%K|%T|%r",
+            ],
+        )
+
+    def test_final_job_query_terminal_ignores_unrelated_live_arrays(self) -> None:
+        completed = [
+            subprocess.CompletedProcess(
+                args=(),
+                returncode=0,
+                stdout="".join(
+                    f"481132_{task}|COMPLETED|0:0\n"
+                    for task in range(5)
+                ),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=(),
+                returncode=0,
+                stdout="999999|0|RUNNING|None\n",
+                stderr="",
+            ),
+        ]
+        with mock.patch.object(
+            workflow.subprocess, "run", side_effect=completed
+        ):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = workflow.command_classify_final_job(
+                    argparse.Namespace(final_job_id="481132")
+                )
+        self.assertEqual(status, 0)
+        self.assertEqual(output.getvalue().strip(), "terminal_success")
 
     def _adopted_cache_fixture(
         self,

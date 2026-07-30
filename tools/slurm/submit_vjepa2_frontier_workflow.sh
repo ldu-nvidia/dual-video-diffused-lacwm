@@ -363,6 +363,7 @@ fi
 
 command -v sbatch >/dev/null 2>&1 || die "sbatch is unavailable"
 command -v sacct >/dev/null 2>&1 || die "sacct is unavailable"
+command -v squeue >/dev/null 2>&1 || die "squeue is unavailable"
 command -v flock >/dev/null 2>&1 || die "flock is unavailable"
 FINAL_JOB_MODE="$(
   "$PYTHON_BIN" "$WORKFLOW_HELPER" classify-final-job \

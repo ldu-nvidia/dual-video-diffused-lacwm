@@ -334,16 +334,21 @@ def _array_task_ids(job_id: str, observed_job: str) -> tuple[int, ...] | None:
     return tuple(task_ids)
 
 
-def classify_final_job_rows(job_id: str, rows: Sequence[str]) -> str:
-    """Classify exact formatted ``sacct -X`` rows without trusting stale IDs."""
+def _final_accounting_records(
+    job_id: str,
+    rows: Sequence[str],
+) -> dict[int, tuple[str, str, str]]:
+    """Parse the allocation subset currently visible through ``sacct -X``."""
 
-    if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
-        raise WorkflowError("final job ID must be a positive integer")
     records: dict[int, tuple[str, str, str]] = {}
     for line in rows:
+        if not line.strip():
+            continue
         fields = [field.strip() for field in line.strip().split("|")]
         if len(fields) < 3:
-            continue
+            raise WorkflowError(
+                "final u1000 accounting row has the wrong schema"
+            )
         observed_job, raw_state, exit_code = fields[:3]
         task_ids = _array_task_ids(job_id, observed_job)
         if task_ids is None:
@@ -365,20 +370,12 @@ def classify_final_job_rows(job_id: str, rows: Sequence[str]) -> str:
         raise WorkflowError(
             "Slurm accounting has no allocation record for final u1000 job"
         )
-    observed_tasks = set(records)
-    if observed_tasks != FINAL_ARRAY_TASK_IDS:
-        missing = sorted(FINAL_ARRAY_TASK_IDS - observed_tasks)
-        extra = sorted(observed_tasks - FINAL_ARRAY_TASK_IDS)
-        raise WorkflowError(
-            "final u1000 accounting task set differs: "
-            f"missing={missing}, extra={extra}"
-        )
     task_records = list(records.values())
     failed = [
         record
         for record in task_records
         if record[1] in FAILED_SLURM_STATES
-        or (record[1] == "COMPLETED" and record[2] != "0:0")
+        or record[2] != "0:0"
     ]
     if failed:
         raise WorkflowError(
@@ -394,14 +391,92 @@ def classify_final_job_rows(job_id: str, rows: Sequence[str]) -> str:
         raise WorkflowError(
             f"final u1000 job has ambiguous accounting states: {unknown}"
         )
-    if any(record[1] in ACTIVE_SLURM_STATES for record in task_records):
+    return records
+
+
+def _final_queue_records(
+    job_id: str,
+    rows: Sequence[str],
+) -> dict[int, tuple[str, str]]:
+    """Parse current-user ``squeue -r`` rows by base and array-task ID."""
+
+    records: dict[int, tuple[str, str]] = {}
+    for line in rows:
+        if not line.strip():
+            continue
+        fields = [field.strip() for field in line.rstrip("\n").split("|", 3)]
+        if len(fields) != 4:
+            raise WorkflowError("final u1000 squeue row has the wrong schema")
+        base_job_id, raw_task_id, raw_state, reason = fields
+        if base_job_id != job_id:
+            continue
+        if re.fullmatch(r"[0-9]+", raw_task_id) is None:
+            raise WorkflowError(
+                f"final u1000 squeue has malformed task ID: {raw_task_id}"
+            )
+        task_id = int(raw_task_id)
+        if task_id not in FINAL_ARRAY_TASK_IDS:
+            raise WorkflowError(
+                f"final u1000 squeue has unexpected array task: {task_id}"
+            )
+        if task_id in records:
+            raise WorkflowError(
+                f"final u1000 squeue duplicates array task: {task_id}"
+            )
+        state = raw_state.split("+", 1)[0].split(maxsplit=1)[0].upper()
+        if state not in ACTIVE_SLURM_STATES:
+            raise WorkflowError(
+                f"final u1000 squeue has ambiguous active state: {raw_state}"
+            )
+        records[task_id] = (state, reason)
+    return records
+
+
+def classify_final_job_rows(
+    job_id: str,
+    accounting_rows: Sequence[str],
+    squeue_rows: Sequence[str] = (),
+) -> str:
+    """Combine live queue truth with fail-closed allocation accounting."""
+
+    if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
+        raise WorkflowError("final job ID must be a positive integer")
+    accounting = _final_accounting_records(job_id, accounting_rows)
+    queue = _final_queue_records(job_id, squeue_rows)
+    if queue:
+        observed_queue_tasks = set(queue)
+        if observed_queue_tasks != FINAL_ARRAY_TASK_IDS:
+            missing = sorted(FINAL_ARRAY_TASK_IDS - observed_queue_tasks)
+            extra = sorted(observed_queue_tasks - FINAL_ARRAY_TASK_IDS)
+            raise WorkflowError(
+                "final u1000 squeue task set differs: "
+                f"missing={missing}, extra={extra}"
+            )
+        for task_id, (_, accounting_state, _) in accounting.items():
+            queue_state = queue[task_id][0]
+            if accounting_state != queue_state:
+                raise WorkflowError(
+                    "final u1000 active state mismatch for task "
+                    f"{task_id}: sacct={accounting_state}, squeue={queue_state}"
+                )
         return "active_afterok"
+
+    observed_accounting_tasks = set(accounting)
+    if observed_accounting_tasks != FINAL_ARRAY_TASK_IDS:
+        missing = sorted(FINAL_ARRAY_TASK_IDS - observed_accounting_tasks)
+        extra = sorted(observed_accounting_tasks - FINAL_ARRAY_TASK_IDS)
+        raise WorkflowError(
+            "final u1000 terminal accounting task set differs: "
+            f"missing={missing}, extra={extra}"
+        )
     if all(
         record[1] == "COMPLETED" and record[2] == "0:0"
-        for record in task_records
+        for record in accounting.values()
     ):
         return "terminal_success"
-    raise WorkflowError("final u1000 accounting state is inconsistent")
+    raise WorkflowError(
+        "final u1000 left squeue before exact successful terminal accounting"
+    )
 
 
 def command_classify_final_job(args: argparse.Namespace) -> int:
@@ -424,8 +499,29 @@ def command_classify_final_job(args: argparse.Namespace) -> int:
             "could not query final u1000 Slurm accounting: "
             f"{completed.stderr.strip() or completed.stdout.strip()}"
         )
+    queued = subprocess.run(
+        [
+            "squeue",
+            "-r",
+            "--user",
+            pwd.getpwuid(os.getuid()).pw_name,
+            "-h",
+            "-o",
+            "%F|%K|%T|%r",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if queued.returncode:
+        raise WorkflowError(
+            "could not query final u1000 live Slurm queue: "
+            f"{queued.stderr.strip() or queued.stdout.strip()}"
+        )
     mode = classify_final_job_rows(
-        args.final_job_id, completed.stdout.splitlines()
+        args.final_job_id,
+        completed.stdout.splitlines(),
+        queued.stdout.splitlines(),
     )
     print(mode)
     return 0
