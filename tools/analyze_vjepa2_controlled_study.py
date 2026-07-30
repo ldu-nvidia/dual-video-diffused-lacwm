@@ -53,6 +53,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import vjepa2_paired_recovery as paired_recovery  # noqa: E402
+from tools import (  # noqa: E402
+    vjepa2_paired_analysis_recovery as paired_analysis_recovery,
+)
 
 
 SCHEMA_VERSION = 1
@@ -1675,8 +1678,16 @@ def _quality_expected_input_records(
             "study manifest lacks fixed-test manifest/cache provenance"
         )
     return {
-        "resolved_config": dict(stage["resolved_config"]),
-        "snapshot": dict(stage["snapshot_observed_at_stage_end"]),
+        # These records reproduce the schema emitted by the immutable
+        # scientific evaluator.  The stage inventory independently validates
+        # the later ``bytes`` fields against the files, but those fields were
+        # never part of historical quality-manifest identities.
+        "resolved_config": _historical_path_sha256_record(
+            stage["resolved_config"]
+        ),
+        "snapshot": _historical_path_sha256_record(
+            stage["snapshot_observed_at_stage_end"]
+        ),
         "arm_manifest": {
             "path": stages[arm]["arm_manifest_path"],
             "sha256": stages[arm]["arm_manifest_sha256"],
@@ -1713,6 +1724,21 @@ def _quality_expected_input_records(
             for name in ("target", "rgb", "actions")
         },
     }
+
+
+def _historical_path_sha256_record(record: Mapping[str, Any]) -> dict[str, str]:
+    """Project a validated file record to the immutable evaluator schema."""
+
+    path = record.get("path")
+    digest = record.get("sha256")
+    if (
+        not isinstance(path, str)
+        or not path
+        or not isinstance(digest, str)
+        or SHA256_RE.fullmatch(digest) is None
+    ):
+        raise StudyValidationError("historical file provenance is invalid")
+    return {"path": path, "sha256": digest}
 
 
 def _quality_metric_scope_valid(scope: Any) -> bool:
@@ -2482,12 +2508,18 @@ def _load_latency(
             if not isinstance(inputs, dict):
                 raise StudyValidationError(f"latency inputs are missing: {path}")
             expected_input_records = {
-                "resolved_config": stages[arm]["stages"]["1000"][
-                    "resolved_config"
-                ],
-                "snapshot": stages[arm]["stages"]["1000"][
-                    "snapshot_observed_at_stage_end"
-                ],
+                # Per-arm latency telemetry predates the addition of sizes to
+                # the analyzer's internal stage inventory.  Reconstruct its
+                # signed input schema exactly; file sizes were already checked
+                # when the stage inventory was loaded.
+                "resolved_config": _historical_path_sha256_record(
+                    stages[arm]["stages"]["1000"]["resolved_config"]
+                ),
+                "snapshot": _historical_path_sha256_record(
+                    stages[arm]["stages"]["1000"][
+                        "snapshot_observed_at_stage_end"
+                    ]
+                ),
                 "arm_manifest": {
                     "path": stages[arm]["arm_manifest_path"],
                     "sha256": stages[arm]["arm_manifest_sha256"],
@@ -4897,6 +4929,8 @@ def analyze(
     confidence: float = 0.95,
     paired_latency: str | Path | None = None,
     paired_recovery_submission: str | Path | None = None,
+    paired_analysis_recovery_submission: str | Path | None = None,
+    paired_analysis_recovery_job_id: str | None = None,
 ) -> dict[str, Any]:
     """Validate all evidence and exclusively create JSON and Markdown outputs."""
 
@@ -4908,33 +4942,75 @@ def analyze(
         raise StudyValidationError(
             "paired latency and recovery submission overrides are both required"
         )
+    if (
+        paired_analysis_recovery_submission is None
+    ) != (paired_analysis_recovery_job_id is None):
+        raise StudyValidationError(
+            "analysis recovery submission and job ID are both required"
+        )
+    if (
+        paired_analysis_recovery_submission is not None
+        and paired_recovery_submission is None
+    ):
+        raise StudyValidationError(
+            "analysis recovery requires external paired timing evidence"
+        )
+    analysis_recovery_context: tuple[
+        Path, dict[str, Any], Path, dict[str, Any]
+    ] | None = None
     if paired_recovery_submission is not None:
-        recovery_receipt_path = _regular_file(
-            Path(paired_recovery_submission),
-            "paired recovery submission",
-        )
-        recovery_receipt = _read_json(
-            recovery_receipt_path,
-            "paired recovery submission",
-        )
-        recovery_outputs = recovery_receipt.get("outputs")
         requested_json = Path(output_json).expanduser()
         requested_markdown = (
             Path(output_markdown).expanduser()
             if output_markdown is not None
             else requested_json.with_suffix(".md")
         )
-        if (
-            not paired_recovery.identity_valid(recovery_receipt)
-            or not isinstance(recovery_outputs, dict)
-            or requested_json
-            != Path(str(recovery_outputs.get("analysis_json", "")))
-            or requested_markdown
-            != Path(str(recovery_outputs.get("analysis_markdown", "")))
-        ):
-            raise StudyValidationError(
-                "analysis outputs differ from the paired recovery receipt"
+        if paired_analysis_recovery_submission is not None:
+            try:
+                analysis_recovery_context = (
+                    paired_analysis_recovery.validate_submission(
+                        paired_analysis_recovery_submission,
+                        protocol_path=Path(
+                            paired_analysis_recovery_submission
+                        ).parent
+                        / "protocol.json",
+                        slurm_job_id=str(
+                            paired_analysis_recovery_job_id
+                        ),
+                        paired_latency=paired_latency,
+                        timing_submission=paired_recovery_submission,
+                        output_json=requested_json,
+                        output_markdown=requested_markdown,
+                    )
+                )
+            except (
+                paired_analysis_recovery.AnalysisRecoveryError,
+                paired_recovery.RecoveryError,
+            ) as exc:
+                raise StudyValidationError(str(exc)) from exc
+        else:
+            recovery_receipt_path = _regular_file(
+                Path(paired_recovery_submission),
+                "paired recovery submission",
             )
+            recovery_receipt = _read_json(
+                recovery_receipt_path,
+                "paired recovery submission",
+            )
+            recovery_outputs = recovery_receipt.get("outputs")
+            if (
+                not paired_recovery.identity_valid(recovery_receipt)
+                or not isinstance(recovery_outputs, dict)
+                or requested_json
+                != Path(str(recovery_outputs.get("analysis_json", "")))
+                or requested_markdown
+                != Path(
+                    str(recovery_outputs.get("analysis_markdown", ""))
+                )
+            ):
+                raise StudyValidationError(
+                    "analysis outputs differ from the paired recovery receipt"
+                )
     root = _canonical_directory(study_root, "study root")
     json_path, markdown_path = _output_paths(
         output_json, output_markdown, root
@@ -4947,6 +5023,45 @@ def analyze(
         paired_latency_path=paired_latency,
         paired_recovery_submission_path=paired_recovery_submission,
     )
+    if analysis_recovery_context is not None:
+        (
+            submission_path,
+            submission,
+            protocol_path,
+            protocol,
+        ) = analysis_recovery_context
+        try:
+            checked = paired_analysis_recovery.validate_submission(
+                submission_path,
+                protocol_path=protocol_path,
+                slurm_job_id=str(paired_analysis_recovery_job_id),
+                paired_latency=paired_latency,
+                timing_submission=paired_recovery_submission,
+                output_json=json_path,
+                output_markdown=markdown_path,
+            )
+        except (
+            paired_analysis_recovery.AnalysisRecoveryError,
+            paired_recovery.RecoveryError,
+        ) as exc:
+            raise StudyValidationError(str(exc)) from exc
+        if (
+            checked[0] != submission_path
+            or checked[1] != submission
+            or checked[2] != protocol_path
+            or checked[3] != protocol
+        ):
+            raise StudyValidationError(
+                "analysis recovery provenance changed during analysis"
+            )
+        payload["analysis_recovery"] = (
+            paired_analysis_recovery.analysis_record(
+                protocol_path,
+                protocol,
+                submission_path,
+                submission,
+            )
+        )
     json_bytes = (
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
     ).encode("utf-8")
@@ -4989,6 +5104,17 @@ def _parser() -> argparse.ArgumentParser:
             "--paired-latency"
         ),
     )
+    parser.add_argument(
+        "--paired-analysis-recovery-submission",
+        help=(
+            "held-job receipt for an analyzer-only recovery; requires "
+            "--paired-analysis-recovery-job-id and external paired evidence"
+        ),
+    )
+    parser.add_argument(
+        "--paired-analysis-recovery-job-id",
+        help="actual Slurm job ID recorded by the analyzer-only receipt",
+    )
     return parser
 
 
@@ -5004,6 +5130,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             confidence=args.confidence,
             paired_latency=args.paired_latency,
             paired_recovery_submission=args.paired_recovery_submission,
+            paired_analysis_recovery_submission=(
+                args.paired_analysis_recovery_submission
+            ),
+            paired_analysis_recovery_job_id=(
+                args.paired_analysis_recovery_job_id
+            ),
         )
     except StudyValidationError as exc:
         print(f"ERROR: {exc}", file=os.sys.stderr)

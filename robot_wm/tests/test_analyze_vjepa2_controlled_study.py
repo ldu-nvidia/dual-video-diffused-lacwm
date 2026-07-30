@@ -134,6 +134,24 @@ def test_final_stage_snapshot_provenance_preserves_and_validates_size():
     assert "final_snapshot_path.stat().st_size" in source
 
 
+def test_historical_evaluator_records_exclude_later_size_metadata():
+    record = {
+        "path": "/immutable/snapshot.pt",
+        "sha256": "a" * 64,
+        "bytes": 123,
+    }
+    assert analysis._historical_path_sha256_record(record) == {
+        "path": "/immutable/snapshot.pt",
+        "sha256": "a" * 64,
+    }
+    quality_source = inspect.getsource(
+        analysis._quality_expected_input_records
+    )
+    latency_source = inspect.getsource(analysis._load_latency)
+    assert quality_source.count("_historical_path_sha256_record") == 2
+    assert latency_source.count("_historical_path_sha256_record") == 2
+
+
 def test_scientific_quality_grid_is_128_clip_protocol():
     assert analysis.EXPECTED_TEST_CLIPS == 128
     assert len(analysis._quality_grid(800)) == 8

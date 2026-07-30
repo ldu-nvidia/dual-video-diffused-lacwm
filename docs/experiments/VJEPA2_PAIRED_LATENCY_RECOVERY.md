@@ -117,3 +117,76 @@ This recovered timing remains a diagnostic for the original J1@4 versus VPM@8
 speed gate. It does not repair the scientific weakness that VPM quality was
 already best around NFE 1–2, so even a faster J1@4 wall-clock result cannot by
 itself establish a useful quality-matched acceleration claim.
+
+## Analyzer-only follow-up for job 481826
+
+The r1 recovery job `481826` completed the full timing protocol and exclusively
+created:
+
+```text
+paired-481133-43ed5d3-r1/paired_latency/paired_j1_nfe4_vs_vpm_nfe8.json
+```
+
+That file is 75,578 bytes with SHA-256
+`314a40090a96cd06c6e331f833b689aa06059ba1988cb83955ab9a2b9733d84c`
+and signed identity
+`f273e88fe0c5d6723958974cc93e587b78fc32e6f37d1ce0be1abca95fafe92d`.
+Its strict paired-evidence validator passes all file, checkpoint, runtime,
+same-node B200, immutable-input, deployable-sampler, round, and execution-order
+checks.
+
+The post-run analyzer then failed with
+`ERROR: VPM update 1 rank 0 manifest differs`. This was an analyzer regression:
+commit `9ba4073` correctly began validating stage file sizes, but the resulting
+internal `bytes` fields leaked into reconstructed historical quality and
+per-arm latency input records. The immutable evaluator had signed those
+records as `{path, sha256}`. The fix projects only those two historical record
+types back to their emitted schema while retaining independent byte-count and
+content validation of the actual stage files.
+
+The analyzer-only recovery preserves the entire r1 tree, including its empty
+`analysis/` directory. It creates a fresh sibling:
+
+```text
+paired-analysis-481826-<analyzer7>-r2/
+  protocol.json
+  submission.json
+  logs/
+  analysis/
+    analysis.json
+    analysis.md
+```
+
+The launcher pins the terminal `FAILED/2:0` accounting row, complete stdout and
+stderr hashes, every r1 file and identity, the paired timing SHA above, and the
+actual clean analyzer commit. It submits the analysis job held, writes the
+exclusive receipt containing the returned job ID and exact token vector, and
+then releases it. The worker validates its live accounting before analysis.
+It cannot call either benchmark, load either model or checkpoint, invoke a
+teacher, or supply future RGB to a sampler. The known
+`batch/coreai_chef_posttrain/normal` contract requires one B200, but the
+analyzer does not use it for model execution.
+
+After installing a clean controller worktree at the final fix commit:
+
+```bash
+BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
+CONTROLLER=$BASE/src/vjepa2-paired-analysis-<commit12>
+STUDY=$BASE/runs/dual_video_diffusion/vjepa2_controlled_study/vjepa2-controlled-20260730-seed1234-9cf8e69-v3
+
+LACWM_BASE=$BASE \
+"$CONTROLLER/tools/slurm/submit_vjepa2_paired_analysis_recovery.sh" \
+  --study-root "$STUDY" \
+  --controller-commit "<full-analyzer-fix-commit>"
+
+# Only after reviewing the read-only preflight:
+LACWM_BASE=$BASE \
+"$CONTROLLER/tools/slurm/submit_vjepa2_paired_analysis_recovery.sh" \
+  --study-root "$STUDY" \
+  --controller-commit "<full-analyzer-fix-commit>" \
+  --execute
+```
+
+The dry run also refuses a dirty controller, an active analyzer-recovery job,
+any changed r1 byte, or an existing destination. No timing benchmark is
+resubmitted.
