@@ -138,6 +138,8 @@ class _CapturingTFHead(nn.Module):
 def _make_dual_model(
     *,
     condition_on_tf=True,
+    condition_on_tf_clock=None,
+    tf_head_condition_on_clock=False,
     state_gate_init=0.1,
     state_gate_trainable=False,
     clock_gate_init=0.0,
@@ -150,6 +152,12 @@ def _make_dual_model(
     model.patch_size = (1, 2, 2)
     model.dual_diffusion_enabled = True
     model.condition_on_tf = condition_on_tf
+    model.condition_on_tf_clock = (
+        condition_on_tf
+        if condition_on_tf_clock is None
+        else condition_on_tf_clock
+    )
+    model.tf_head_condition_on_clock = tf_head_condition_on_clock
     model.transformer = _FakeTransformer()
     model.action_to_control = _FakeActionToControl()
     model.tf_token_adapter = ZeroInitTFTokenAdapter(
@@ -263,6 +271,53 @@ def test_conditioning_tf_shape_must_match_noisy_tf():
             conditioning_tf=torch.randn(2, 4, 2, 4, 2),
             tf_sigma=torch.tensor([0.3, 0.6]),
         )
+
+
+def test_auxiliary_only_head_sees_state_and_clock_but_video_does_not():
+    torch.manual_seed(29)
+    model = _make_dual_model(
+        condition_on_tf=False,
+        condition_on_tf_clock=False,
+        tf_head_condition_on_clock=True,
+        state_gate_init=0.25,
+        clock_gate_init=0.25,
+    )
+    video = torch.randn(2, 16, 2, 4, 4)
+    reference = torch.randn_like(video)
+    actions = torch.randn(2, 2, 3)
+    context = [torch.zeros(1, 4), torch.zeros(1, 4)]
+
+    first = model(
+        video,
+        torch.tensor([100.0, 200.0]),
+        actions,
+        reference,
+        context,
+        noisy_tf=torch.randn(2, 4, 2, 4, 4),
+        tf_sigma=torch.tensor([0.1, 0.2]),
+        condition_on_tf=False,
+        condition_on_tf_clock=False,
+    )
+    first_head_tokens = model.tf_velocity_head.last_tokens.detach().clone()
+    second = model(
+        video,
+        torch.tensor([100.0, 200.0]),
+        actions,
+        reference,
+        context,
+        noisy_tf=torch.randn(2, 4, 2, 4, 4) + 50.0,
+        tf_sigma=torch.tensor([0.8, 0.9]),
+        condition_on_tf=False,
+        condition_on_tf_clock=False,
+    )
+    second_head_tokens = model.tf_velocity_head.last_tokens.detach().clone()
+
+    # A1's private auxiliary inputs can train the shared trunk/head, but cannot
+    # directly alter the video prediction in the same forward call.
+    assert torch.equal(first.video_velocity, second.video_velocity)
+    assert not torch.equal(first_head_tokens, second_head_tokens)
+    assert torch.count_nonzero(first.tf_condition_tokens) == 0
+    assert torch.count_nonzero(second.tf_condition_tokens) == 0
 
 
 def test_frozen_zero_state_and_clock_make_video_loss_output_and_gradients_tf_invariant():

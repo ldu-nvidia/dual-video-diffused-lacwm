@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - /experiments_0908/vjepa_latent_forcing_common
+  - override /models@model: explicit_action_dit_model
+  - _self_
+
+name: vjepa-v0-original-video
+wandb:
+  tags: [abc, vjepa2.1, latent-forcing, V0, original-video]

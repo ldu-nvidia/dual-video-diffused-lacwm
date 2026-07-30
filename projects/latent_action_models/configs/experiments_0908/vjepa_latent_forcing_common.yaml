@@ -1,0 +1,123 @@
+# @package _global_
+defaults:
+  - override /datasets@dataset: transformed_fixed_abc_vjepa
+  - override /datasets@val_dataset: transformed_fixed_abc_vjepa
+  - override /datasets@viz_dataset: transformed_fixed_abc_vjepa
+  - override /models@model: dual_explicit_action_dit_vjepa
+  - override /tokenizers/rgb@model.rgb_tokenizer: wan_vae
+  - override /optimizers@optimizer_factory: adamw
+  - override /lr_schedulers@lr_scheduler_factory: linear_warmup_cosine_decay
+
+name: vjepa-latent-forcing-common
+seed: 1234
+
+dataset: &training_dataset
+  padding_dim: 157
+  seed: ${seed}
+  infinite: true
+  img_augment: false
+  emit_crop_rgb: false
+  transform: {sample_size: 13, chunk_size: 5}
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:VJEPA_TRAIN_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:VJEPA_TRAIN_CACHE_METADATA}
+val_dataset:
+  <<: *training_dataset
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:VJEPA_VAL_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:VJEPA_VAL_CACHE_METADATA}
+viz_dataset:
+  <<: *training_dataset
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:VJEPA_TEST_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:VJEPA_TEST_CACHE_METADATA}
+
+data_loader:
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+val_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${val_dataset}
+    batch_size: 4
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: false
+viz_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${viz_dataset}
+    batch_size: 2
+    num_workers: 1
+    pin_memory: true
+    prefetch_factor: 1
+    persistent_workers: false
+
+model:
+  rgb_tokenizer:
+    output_dim: 16
+    input_mean: [0.5, 0.5, 0.5]
+    input_std: [0.5, 0.5, 0.5]
+  forward_model:
+    lora_rank: 64
+    lora_alpha: 128
+    lora_dropout: 0.05
+    gradient_checkpointing: true
+  num_history_frames: 5
+  num_future_frames: 8
+  action_encoder:
+    action_dim: ${dataset.padding_dim}
+    chunk_size: ${dataset.transform.chunk_size}
+  morphology_tokens:
+    _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
+    num_embeddings: 10
+    embedding_dim: 64
+
+optimizer_factory: {lr: 1e-4, betas: [0.9, 0.95]}
+lr_scheduler_factory:
+  lr_lambda:
+    warmup_steps: 20
+    total_steps: ${trainer.config.max_iter}
+    final_learning_rate: 1e-6
+
+wandb:
+  enabled: true
+  mode: online
+  entity: zijiandu
+  project: dual-video-diffusion-private
+  group: null
+  name: ${name}
+  tags: [abc, vjepa2.1, latent-forcing, controlled-study, seed-1234]
+
+trainer:
+  config:
+    max_iter: 1000
+    gradient_accumulation_steps: 1
+    throughput_warmup_steps: 20
+    load_path: ${oc.env:LACWM_WARM_START}
+    exclude_keys:
+      - inverse_model
+      - rgb_pos_embed
+      - action_decoder
+      - action_pos_embed
+      - action_pool
+      - morphology_tokens
+      - forward_model.tf_token_adapter
+      - forward_model.tf_clock_embedding
+      - forward_model.tf_velocity_head
+    logging: {log_every: 10}
+    saving: {save_every: 200}
+    validation: {val_every: 50, n_val_samples: 4, save_best: false}
+    visualization: {viz_every: 200, require_success: true}
+    gradient_clipping: {max_norm: 1.0}
+
+hydra:
+  run:
+    dir: ${oc.env:LACWM_RUNS}/vjepa-latent-forcing/${name}
+  sweep:
+    dir: ${oc.env:LACWM_RUNS}/vjepa-latent-forcing/${name}

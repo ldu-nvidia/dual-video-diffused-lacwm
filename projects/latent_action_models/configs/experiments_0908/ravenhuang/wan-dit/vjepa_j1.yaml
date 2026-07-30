@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - /experiments_0908/vjepa_latent_forcing_common
+  - _self_
+
+name: vjepa-j1-leading-joint
+model:
+  dual_diffusion:
+    condition_on_tf: true
+    condition_on_tf_clock: true
+    condition_mode: matched
+    schedule_mode: tf_leads
+    tf_lead_logit: 1.0
+    tf_loss_weight: 1.0
+    parameter_matched_control: false
+wandb:
+  tags: [abc, vjepa2.1, latent-forcing, J1, semantic-lead-logit-1]

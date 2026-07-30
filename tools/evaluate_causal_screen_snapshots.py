@@ -1439,6 +1439,12 @@ def _validate_and_measure_artifacts(
     initial_tf = artifacts["tf_initial_state"]
     initial_tf_noise = artifacts["tf_initial_noise"]
     history_frames = int(artifacts["history_latent_frames"].item())
+    auxiliary_history_frames = int(
+        artifacts.get(
+            "auxiliary_history_latent_frames",
+            artifacts["history_latent_frames"],
+        ).item()
+    )
     if (
         video_clean.ndim != 5
         or tf_clean.ndim != 5
@@ -1446,7 +1452,8 @@ def _validate_and_measure_artifacts(
         or ground_truth.dtype != torch.uint8
         or history_frames < 0
         or history_frames >= video_clean.shape[2]
-        or history_frames >= tf_clean.shape[2]
+        or auxiliary_history_frames < 0
+        or auxiliary_history_frames >= tf_clean.shape[2]
     ):
         raise EvaluationContractError("artifact clean/history tensor contract differs")
     if (
@@ -1456,11 +1463,11 @@ def _validate_and_measure_artifacts(
     ):
         raise EvaluationContractError("artifact initial-state shape differs")
     if not torch.equal(
-        initial_tf[:, :, :history_frames],
-        tf_clean[:, :, :history_frames],
+        initial_tf[:, :, :auxiliary_history_frames],
+        tf_clean[:, :, :auxiliary_history_frames],
     ) or not torch.equal(
-        initial_tf[:, :, history_frames:],
-        initial_tf_noise[:, :, history_frames:],
+        initial_tf[:, :, auxiliary_history_frames:],
+        initial_tf_noise[:, :, auxiliary_history_frames:],
     ):
         raise EvaluationContractError(
             "TF initial state does not preserve clean history/local future noise"
@@ -1490,7 +1497,7 @@ def _validate_and_measure_artifacts(
                     video, video_clean, history_frames, video_key
                 ),
                 "tf_future_nmse": _future_nmse(
-                    tf, tf_clean, history_frames, tf_key
+                    tf, tf_clean, auxiliary_history_frames, tf_key
                 ),
                 **_decoded_metrics(decoded, ground_truth),
             }
@@ -1507,6 +1514,7 @@ def _validate_and_measure_artifacts(
 
     paired_identity = {
         "history_latent_frames": history_frames,
+        "auxiliary_history_latent_frames": auxiliary_history_frames,
         "video_clean_sha256": _tensor_sha256(video_clean),
         "tf_clean_sha256": _tensor_sha256(tf_clean),
         "ground_truth_future_uint8_sha256": _tensor_sha256(ground_truth),

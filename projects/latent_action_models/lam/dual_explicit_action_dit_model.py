@@ -49,12 +49,12 @@ EVALUATION_CONDITION_SOURCE_CODES = {
 
 
 class DualExplicitActionDiTModel(ExplicitActionDiTModel):
-    """Explicit-action world model with video and causal-RFFT flow states."""
+    """Explicit-action world model with video and an auxiliary flow state."""
 
     def __init__(
         self,
         *,
-        time_frequency_transform,
+        time_frequency_transform=None,
         dual_diffusion: Mapping,
         **kwargs,
     ):
@@ -81,10 +81,46 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 f"got {self.tf_condition_mode!r}"
             )
         self.condition_on_tf = self.tf_condition_mode != "off"
+        self.condition_on_tf_clock = bool(
+            # The original dual implementation always injected its separately
+            # gated clock, even when state conditioning was off.
+            config.get("condition_on_tf_clock", True)
+        )
+        self.auxiliary_history_mode = str(
+            config.get("auxiliary_history_mode", "clamp_clean")
+        )
+        if self.auxiliary_history_mode not in {"clamp_clean", "diffuse_all"}:
+            raise ValueError(
+                "auxiliary_history_mode must be one of "
+                "{'clamp_clean', 'diffuse_all'}"
+            )
+        if (
+            self.auxiliary_history_mode == "clamp_clean"
+            and bool(getattr(time_frequency_transform, "bidirectional", False))
+        ):
+            raise ValueError(
+                "bidirectional auxiliary targets cannot clamp clean history"
+            )
+        if (
+            time_frequency_transform is None
+            and self.auxiliary_history_mode != "diffuse_all"
+        ):
+            raise ValueError(
+                "offline auxiliary targets require "
+                "auxiliary_history_mode=diffuse_all; their causal prefix "
+                "cannot be verified by the trainer"
+            )
         self.tf_schedule_mode = str(config.get("schedule_mode", "tf_leads"))
         self.tf_lead_logit = float(config.get("tf_lead_logit", 1.0))
         self.tf_loss_weight = float(config.get("tf_loss_weight", 1.0))
         self.video_only_control = bool(config.get("video_only_control", False))
+        self.parameter_matched_control = bool(
+            config.get("parameter_matched_control", False)
+        )
+        if self.video_only_control and self.parameter_matched_control:
+            raise ValueError(
+                "video_only_control and parameter_matched_control are exclusive"
+            )
         self.evaluation_nfe_steps = tuple(
             sorted(
                 {
@@ -116,7 +152,6 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         )
         if (
             not self.evaluation_condition_sources
-            or "autonomous" not in self.evaluation_condition_sources
             or len(set(self.evaluation_condition_sources))
             != len(self.evaluation_condition_sources)
             or any(
@@ -126,11 +161,22 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         ):
             raise ValueError(
                 "evaluation_condition_sources must be unique supported values "
-                f"including 'autonomous'; supported={EVALUATION_CONDITION_SOURCES}"
+                f"; supported={EVALUATION_CONDITION_SOURCES}"
             )
         self.capture_latent_trajectories = bool(
             config.get("capture_latent_trajectories", True)
         )
+        artifact_batch_limit = config.get("artifact_batch_limit", 1)
+        self.artifact_batch_limit = (
+            None
+            if artifact_batch_limit is None
+            else int(artifact_batch_limit)
+        )
+        if (
+            self.artifact_batch_limit is not None
+            and self.artifact_batch_limit < 1
+        ):
+            raise ValueError("artifact_batch_limit must be positive or null")
         self.validation_video_sigmas = tuple(
             float(value)
             for value in config.get(
@@ -144,11 +190,14 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         if self.tf_loss_weight < 0:
             raise ValueError("tf_loss_weight must be non-negative")
         self._assert_video_only_control_contract()
+        self._assert_parameter_matched_control_contract()
         # Check once more on the first train/eval call, after any model-only
         # warm start has loaded.  Frozen gates cannot subsequently open, and
         # avoiding a scalar device sync on every update keeps speed telemetry
         # representative.
-        self._video_only_runtime_validated = not self.video_only_control
+        self._video_only_runtime_validated = not (
+            self.video_only_control or self.parameter_matched_control
+        )
         if not self.validation_video_sigmas or any(
             not 0 <= sigma <= 1 for sigma in self.validation_video_sigmas
         ):
@@ -156,13 +205,17 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self._visualization_artifacts = None
         logger.info(
             "DualExplicitActionDiTModel: condition_mode=%s, schedule=%s, "
-            "tf_lead_logit=%.3f, tf_loss_weight=%.3f, video_only_control=%s, "
+            "auxiliary_history_mode=%s, tf_lead_logit=%.3f, "
+            "tf_loss_weight=%.3f, video_only_control=%s, "
+            "parameter_matched_control=%s, "
             "evaluation_nfe=%s, evaluation_sources=%s",
             self.tf_condition_mode,
             self.tf_schedule_mode,
+            self.auxiliary_history_mode,
             self.tf_lead_logit,
             self.tf_loss_weight,
             self.video_only_control,
+            self.parameter_matched_control,
             self.evaluation_nfe_steps,
             self.evaluation_condition_sources,
         )
@@ -202,7 +255,43 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         if getattr(self, "_video_only_runtime_validated", False):
             return
         self._assert_video_only_control_contract()
+        self._assert_parameter_matched_control_contract()
         self._video_only_runtime_validated = True
+
+    def _assert_parameter_matched_control_contract(self) -> None:
+        """Keep the dual schema trainable while making its video path a no-op."""
+        if not getattr(self, "parameter_matched_control", False):
+            return
+        problems = []
+        if self.tf_condition_mode != "off" or self.condition_on_tf:
+            problems.append("condition mode is not off")
+        if bool(getattr(self.forward_model, "condition_on_tf", False)):
+            problems.append("forward-model auxiliary state is enabled")
+        if bool(getattr(self, "condition_on_tf_clock", False)) or bool(
+            getattr(self.forward_model, "condition_on_tf_clock", False)
+        ):
+            problems.append("forward-model auxiliary clock is enabled")
+        if self.tf_loss_weight != 0.0:
+            problems.append(
+                f"auxiliary loss weight is {self.tf_loss_weight}, not zero"
+            )
+        state_gate = self.forward_model.tf_token_adapter.gate
+        clock_gate = self.forward_model.tf_clock_embedding.gate
+        if not state_gate.requires_grad or not clock_gate.requires_grad:
+            problems.append("adapter gates are not parameter matched/trainable")
+        if float(
+            self.forward_model.tf_token_adapter.effective_gate().detach().float()
+        ) != 0.0:
+            problems.append("state gate is not exact zero")
+        if float(
+            self.forward_model.tf_clock_embedding.effective_gate().detach().float()
+        ) != 0.0:
+            problems.append("clock gate is not exact zero")
+        if problems:
+            raise RuntimeError(
+                "parameter-matched control violates its no-op contract: "
+                + "; ".join(problems)
+            )
 
     @staticmethod
     def _expand_sigma(sigma: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
@@ -276,15 +365,94 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
 
     @torch.no_grad()
     def _tf_clean(self, rgb: torch.Tensor, latent_shape) -> torch.Tensor:
+        if self.time_frequency_transform is None:
+            raise RuntimeError(
+                "no online auxiliary transform is configured; "
+                "the batch must provide auxiliary_target"
+            )
         coefficients = self.time_frequency_transform(rgb).detach()
+        return self._validate_auxiliary_clean(coefficients, latent_shape)
+
+    def _validate_auxiliary_clean(
+        self, coefficients: torch.Tensor, latent_shape
+    ) -> torch.Tensor:
+        if coefficients.ndim != 5:
+            raise RuntimeError(
+                "auxiliary target must have shape [B,C,F,H,W]"
+            )
+        expected_channels = int(self.forward_model.tf_token_adapter.tf_channels)
+        if coefficients.shape[1] != expected_channels:
+            raise RuntimeError(
+                "auxiliary target channel mismatch: "
+                f"expected {expected_channels}, got {coefficients.shape[1]}"
+            )
         if coefficients.shape[0] != latent_shape[0] or coefficients.shape[2:] != tuple(
             latent_shape[2:]
         ):
             raise RuntimeError(
-                "TF transform is not aligned to the Wan latent grid: "
-                f"TF={tuple(coefficients.shape)}, Wan={tuple(latent_shape)}"
+                "auxiliary target is not aligned to the Wan latent grid: "
+                f"auxiliary={tuple(coefficients.shape)}, Wan={tuple(latent_shape)}"
+            )
+        if not torch.isfinite(coefficients).all():
+            raise FloatingPointError("auxiliary target contains non-finite values")
+        return coefficients.detach()
+
+    def _resolve_auxiliary_clean(
+        self,
+        rgb: torch.Tensor,
+        latent_shape,
+        auxiliary_target: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if auxiliary_target is None:
+            coefficients = self._tf_clean(rgb, latent_shape)
+        else:
+            coefficients = self._validate_auxiliary_clean(
+                auxiliary_target, latent_shape
             )
         return coefficients.to(device=rgb.device, dtype=rgb.dtype)
+
+    def _auxiliary_history_frames(self, video_history_frames: int) -> int:
+        mode = getattr(self, "auxiliary_history_mode", "clamp_clean")
+        return video_history_frames if mode == "clamp_clean" else 0
+
+    @torch.no_grad()
+    def _history_reference(
+        self,
+        rgb: torch.Tensor,
+        latent_shape,
+    ) -> tuple[torch.Tensor, int]:
+        """Encode only observable RGB when constructing the Wan reference.
+
+        Even though the Wan VAE is described as causal, this explicit boundary
+        keeps the conditioning path independent of implementation details such
+        as temporal normalization.  Training, paired evaluation, and
+        deployment consequently use the exact same history encoder call.
+        """
+        if rgb.ndim != 5 or rgb.shape[1] < self.num_history_frames:
+            raise ValueError(
+                f"rgb must provide at least {self.num_history_frames} history frames"
+            )
+        history_rgb = rgb[:, : self.num_history_frames]
+        history_latents = self._encode_clip(history_rgb).to(rgb.dtype)
+        expected_history = self.num_history_latent
+        if history_latents.shape[2] != expected_history:
+            raise RuntimeError(
+                "history-only VAE latent length differs from the declared "
+                f"history: {history_latents.shape[2]} != {expected_history}"
+            )
+        if (
+            history_latents.shape[0] != int(latent_shape[0])
+            or history_latents.shape[1] != int(latent_shape[1])
+            or history_latents.shape[3:] != tuple(latent_shape[3:])
+            or expected_history >= int(latent_shape[2])
+        ):
+            raise RuntimeError(
+                "history-only VAE latents do not fit the requested rollout grid: "
+                f"history={tuple(history_latents.shape)}, grid={tuple(latent_shape)}"
+            )
+        reference = history_latents.new_zeros(tuple(int(v) for v in latent_shape))
+        reference[:, :, :expected_history] = history_latents
+        return reference, expected_history
 
     @staticmethod
     @torch.no_grad()
@@ -310,15 +478,117 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             history_frames=history_frames,
         )
 
-    def _training_tf_noise(self, tf_clean: torch.Tensor) -> torch.Tensor:
+    def _training_tf_noise(
+        self,
+        tf_clean: torch.Tensor,
+        *,
+        sample_ids: torch.Tensor | None = None,
+        timesteps: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Draw TF corruption without perturbing the video-only RNG path."""
-        if self.video_only_control:
+        if self.video_only_control or getattr(
+            self, "parameter_matched_control", False
+        ):
             # The TF target is zero-weighted and both injection gates are
             # frozen at zero.  A deterministic placeholder avoids advancing
             # the global generator before Wan's LoRA-dropout masks are drawn,
             # preserving the ordinary video RNG/scheduler path.
             return torch.zeros_like(tf_clean)
-        return torch.randn_like(tf_clean)
+        if sample_ids is None and timesteps is None:
+            # Preserve historical RFFT behavior for datasets without immutable
+            # clip identities.
+            return torch.randn_like(tf_clean)
+        if sample_ids is None or timesteps is None:
+            raise ValueError(
+                "sample_ids and timesteps must be supplied together"
+            )
+        sample_ids = sample_ids.reshape(-1)
+        timesteps = timesteps.reshape(-1)
+        if (
+            sample_ids.numel() != tf_clean.shape[0]
+            or timesteps.numel() != tf_clean.shape[0]
+        ):
+            raise ValueError(
+                "auxiliary noise identities must have one value per sample"
+            )
+
+        # A stateless, independent stream prevents auxiliary corruption from
+        # shifting—or reusing—the Wan LoRA-dropout RNG sequence. The seed is a
+        # pure function of immutable clip identity, sampled flow timestep, rank
+        # seed, and this schema constant, so staged exact resumes reproduce it.
+        base_seed = int(torch.initial_seed())
+        samples = []
+        modulus = (1 << 63) - 1
+        for sample_id, timestep in zip(
+            sample_ids.detach().cpu().tolist(),
+            timesteps.detach().cpu().tolist(),
+        ):
+            seed = (
+                base_seed
+                ^ (int(sample_id) * 0x9E3779B185EBCA87)
+                ^ (int(timestep) * 0xC2B2AE3D27D4EB4F)
+                ^ 0x564A455041323031
+            ) % modulus
+            generator = torch.Generator(device=tf_clean.device)
+            generator.manual_seed(seed)
+            samples.append(
+                torch.randn(
+                    tf_clean.shape[1:],
+                    device=tf_clean.device,
+                    dtype=tf_clean.dtype,
+                    generator=generator,
+                )
+            )
+        return torch.stack(samples)
+
+    @staticmethod
+    def _evaluation_noise(
+        shape,
+        *,
+        device,
+        dtype,
+        base_seed: int,
+        sample_ids: torch.Tensor | None,
+        stream: int,
+        rank: int,
+    ) -> torch.Tensor:
+        """Draw deterministic evaluation noise, keyed by immutable clip ID.
+
+        With ``sample_ids`` this is invariant to batch packing, rank assignment,
+        arm, and milestone.  The legacy rank-keyed stream remains available for
+        callers without dataset identities, including the latency benchmark.
+        """
+        if sample_ids is None:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(int(base_seed) + int(rank) + int(stream))
+            return torch.randn(
+                shape,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+        identifiers = sample_ids.reshape(-1)
+        if identifiers.numel() != int(shape[0]):
+            raise ValueError("sample_ids must contain one ID per batch element")
+        modulus = (1 << 63) - 1
+        samples = []
+        for sample_id in identifiers.detach().cpu().tolist():
+            seed = (
+                int(base_seed)
+                ^ (int(sample_id) * 0x9E3779B185EBCA87)
+                ^ (int(stream) * 0xD6E8FEB86659FD93)
+            ) % modulus
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seed)
+            samples.append(
+                torch.randn(
+                    tuple(int(value) for value in shape[1:]),
+                    device=device,
+                    dtype=dtype,
+                    generator=generator,
+                )
+            )
+        return torch.stack(samples)
 
     def _training_objective(
         self,
@@ -326,7 +596,9 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         tf_loss: torch.Tensor,
     ) -> torch.Tensor:
         """Combine losses while keeping the video-only graph TF-independent."""
-        if self.video_only_control:
+        if self.video_only_control or getattr(
+            self, "parameter_matched_control", False
+        ):
             return video_loss
         return video_loss + self.tf_loss_weight * tf_loss
 
@@ -386,9 +658,12 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
 
         video_clean = self._encode_clip(rgb).to(rgb.dtype)
         batch_size, _, latent_frames, height, width = video_clean.shape
-        history_frames = min(self.num_history_latent, latent_frames)
-        reference = torch.zeros_like(video_clean)
-        reference[:, :, :history_frames] = video_clean[:, :, :history_frames]
+        reference, history_frames = self._history_reference(
+            rgb, video_clean.shape
+        )
+        auxiliary_history_frames = self._auxiliary_history_frames(
+            history_frames
+        )
 
         _, z_control, _ = self._latent_actions(
             rgb,
@@ -411,20 +686,33 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         )
         video_target = video_noise - video_clean
 
-        tf_clean = self._tf_clean(rgb, video_clean.shape)
-        tf_noise = self._training_tf_noise(tf_clean)
+        tf_clean = self._resolve_auxiliary_clean(
+            rgb,
+            video_clean.shape,
+            kwargs.get("auxiliary_target"),
+        )
+        tf_noise = self._training_tf_noise(
+            tf_clean,
+            sample_ids=kwargs.get("clip_index"),
+            timesteps=timesteps if "clip_index" in kwargs else None,
+        )
         tf_sigma_expanded = self._expand_sigma(tf_sigma, tf_clean)
         tf_noisy = (1.0 - tf_sigma_expanded) * tf_clean + tf_sigma_expanded * tf_noise
-        # Observed history is deterministic conditioning; only future bins diffuse.
-        tf_noisy = tf_noisy.clone()
-        tf_noisy[:, :, :history_frames] = tf_clean[:, :, :history_frames]
+        # Causal hand-designed targets may clamp observed history.  A
+        # bidirectional learned target (V-JEPA) must diffuse all bins because
+        # even nominal prefix tokens contain full-clip context.
+        if auxiliary_history_frames:
+            tf_noisy = tf_noisy.clone()
+            tf_noisy[:, :, :auxiliary_history_frames] = tf_clean[
+                :, :, :auxiliary_history_frames
+            ]
         tf_target = tf_noise - tf_clean
         conditioning_tf = self._training_conditioning_tf(
             tf_clean=tf_clean,
             tf_noise=tf_noise,
             tf_noisy=tf_noisy,
             tf_sigma_expanded=tf_sigma_expanded,
-            history_frames=history_frames,
+            history_frames=auxiliary_history_frames,
         )
 
         context = self._build_context(batch_size, device, rgb.dtype)
@@ -440,6 +728,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             conditioning_tf=conditioning_tf,
             tf_sigma=tf_sigma,
             condition_on_tf=self.condition_on_tf,
+            condition_on_tf_clock=self.condition_on_tf_clock,
         )
         if not isinstance(prediction, DualWanOutput):
             raise RuntimeError("dual Wan forward did not return both velocities")
@@ -451,10 +740,11 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             video_target[:, :, history_frames:],
             future_mask,
         )
+        auxiliary_mask = loss_mask[:, :, auxiliary_history_frames:]
         tf_per_sample = self._masked_per_sample_mse(
-            prediction.tf_velocity[:, :, history_frames:],
-            tf_target[:, :, history_frames:],
-            future_mask,
+            prediction.tf_velocity[:, :, auxiliary_history_frames:],
+            tf_target[:, :, auxiliary_history_frames:],
+            auxiliary_mask,
         )
         video_loss = video_per_sample.mean()
         tf_loss = tf_per_sample.mean()
@@ -472,9 +762,9 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             future_mask,
         )
         tf_nmse = self._masked_per_sample_nmse(
-            tf_x0[:, :, history_frames:],
-            tf_clean[:, :, history_frames:],
-            future_mask,
+            tf_x0[:, :, auxiliary_history_frames:],
+            tf_clean[:, :, auxiliary_history_frames:],
+            auxiliary_mask,
         )
 
         self.aux_losses["flow_loss"] = video_loss.detach()
@@ -494,12 +784,21 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         self.aux_losses["condition/ztf_enabled"] = video_loss.new_tensor(
             float(self.condition_on_tf)
         )
+        self.aux_losses["condition/ztf_clock_enabled"] = video_loss.new_tensor(
+            float(self.condition_on_tf_clock)
+        )
+        self.aux_losses[
+            "condition/auxiliary_history_frames"
+        ] = video_loss.new_tensor(float(auxiliary_history_frames))
         self.aux_losses["condition/mode_code"] = video_loss.new_tensor(
             float(TF_CONDITION_MODE_CODES[self.tf_condition_mode])
         )
         self.aux_losses["condition/video_only_control"] = video_loss.new_tensor(
             float(self.video_only_control)
         )
+        self.aux_losses[
+            "condition/parameter_matched_control"
+        ] = video_loss.new_tensor(float(self.parameter_matched_control))
         self.aux_losses["condition/tf_loss_weight"] = video_loss.new_tensor(
             self.tf_loss_weight
         )
@@ -525,7 +824,16 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         return total_loss
 
     @torch.no_grad()
-    def _sample_future(self, rgb, actions=None, morphology_index=None):
+    def _sample_future(
+        self,
+        rgb,
+        actions=None,
+        morphology_index=None,
+        auxiliary_target=None,
+        collect_artifacts: bool = True,
+        deployment_mode: bool = False,
+        sample_ids: torch.Tensor | None = None,
+    ):
         """Run independent joint samplers at each requested NFE.
 
         Every NFE starts from the same deterministic video/TF noise.  A
@@ -533,13 +841,84 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         sole Wan call sees the same local future TF noise at ``sigma=1`` for
         matched and shuffled conditioning.  The first possible causal benefit
         from an autonomously denoised TF state is on the second Wan call.
+
+        ``collect_artifacts=False`` is the deployable latency path.  It avoids
+        every trajectory and CPU evidence copy while retaining the real
+        encoder, Wan calls, auxiliary Euler updates, and RGB decoder.  A small
+        Python-only counter record remains available in
+        ``_last_sampling_counters``; an untimed artifact-collecting call is
+        still required when auditing tensors and provenance.
+
+        ``deployment_mode=True`` accepts exactly the observed RGB history,
+        allocates the unavailable future latent slots from the declared model
+        horizon, and never encodes or decodes ground-truth future RGB.  It is
+        therefore the only valid path for latency or closed-loop deployment.
+        The ordinary full-clip path is retained for paired quality scoring.
         """
         self._ensure_video_only_runtime_contract()
-        video_clean = self._encode_clip(rgb).to(rgb.dtype)
-        batch_size, _, latent_frames, _, _ = video_clean.shape
-        history_frames = min(self.num_history_latent, latent_frames)
-        reference = torch.zeros_like(video_clean)
-        reference[:, :, :history_frames] = video_clean[:, :, :history_frames]
+        if rgb.ndim != 5:
+            raise ValueError("rgb must have shape [B,T,C,H,W]")
+        batch_size = rgb.shape[0]
+        if deployment_mode:
+            if rgb.shape[1] != self.num_history_frames:
+                raise ValueError(
+                    "deployable sampling accepts exactly the observed history: "
+                    f"expected {self.num_history_frames} frames, got {rgb.shape[1]}"
+                )
+            if auxiliary_target is not None:
+                raise ValueError(
+                    "deployable sampling cannot consume a clean auxiliary target"
+                )
+            nondeployable_sources = set(self.evaluation_condition_sources) - {
+                "autonomous",
+                "off",
+                "autonomous_shuffled",
+            }
+            if nondeployable_sources:
+                raise ValueError(
+                    "deployable sampling cannot use oracle condition sources: "
+                    f"{sorted(nondeployable_sources)}"
+                )
+            history_latents = self._encode_clip(rgb).to(rgb.dtype)
+            if history_latents.shape[2] != self.num_history_latent:
+                raise RuntimeError(
+                    "history-only VAE latent length differs from the declared "
+                    f"history: {history_latents.shape[2]} != "
+                    f"{self.num_history_latent}"
+                )
+            latent_frames = self.rgb_tokenizer.latent_temporal_len(
+                self.num_history_frames + self.num_future_frames
+            )
+            history_frames = history_latents.shape[2]
+            if latent_frames <= history_frames:
+                raise RuntimeError(
+                    "declared future horizon does not create future latent slots"
+                )
+            video_shape = (
+                batch_size,
+                history_latents.shape[1],
+                latent_frames,
+                history_latents.shape[3],
+                history_latents.shape[4],
+            )
+            video_clean = None
+            reference = history_latents.new_zeros(video_shape)
+            reference[:, :, :history_frames] = history_latents
+        else:
+            video_clean = self._encode_clip(rgb).to(rgb.dtype)
+            _, _, latent_frames, _, _ = video_clean.shape
+            video_shape = tuple(video_clean.shape)
+            reference, history_frames = self._history_reference(
+                rgb, video_shape
+            )
+        auxiliary_history_frames = self._auxiliary_history_frames(
+            history_frames
+        )
+        if deployment_mode and auxiliary_history_frames:
+            raise RuntimeError(
+                "deployable sampling cannot clamp a clean auxiliary history; "
+                "use auxiliary_history_mode=diffuse_all"
+            )
         _, z_control, _ = self._latent_actions(
             rgb,
             actions,
@@ -551,104 +930,225 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         context = self._build_context(batch_size, rgb.device, rgb.dtype)
         clip_fea = self._build_clip(batch_size, rgb.device, rgb.dtype)
 
-        tf_clean = self._tf_clean(rgb, video_clean.shape)
-        ground_truth_pixels = self.rgb_tokenizer.decode_temporal(
-            video_clean, out_hw=(rgb.shape[-2], rgb.shape[-1])
+        needs_auxiliary_clean = (
+            auxiliary_target is not None
+            or auxiliary_history_frames > 0
+            or any(
+                source in {"oracle_matched", "oracle_shuffled"}
+                for source in self.evaluation_condition_sources
+            )
         )
-        future_pixel_frames = min(
-            self.num_future_frames, ground_truth_pixels.shape[2]
+        tf_clean = (
+            self._resolve_auxiliary_clean(
+                rgb, video_shape, auxiliary_target
+            )
+            if needs_auxiliary_clean
+            else None
         )
+        ground_truth_pixels = None
+        if video_clean is not None:
+            ground_truth_pixels = self.rgb_tokenizer.decode_temporal(
+                video_clean, out_hw=(rgb.shape[-2], rgb.shape[-1])
+            )
+            future_pixel_frames = min(
+                self.num_future_frames, ground_truth_pixels.shape[2]
+            )
+        else:
+            future_pixel_frames = self.num_future_frames
 
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-        generator = torch.Generator(device=rgb.device)
-        generator.manual_seed(self.evaluation_noise_seed + rank)
-        initial_video_state = torch.randn(
-            video_clean.shape,
-            device=video_clean.device,
-            dtype=video_clean.dtype,
-            generator=generator,
+        auxiliary_shape = (
+            batch_size,
+            int(self.forward_model.tf_token_adapter.tf_channels),
+            *video_shape[2:],
         )
-        initial_tf_noise = torch.randn(
-            tf_clean.shape,
-            device=tf_clean.device,
-            dtype=tf_clean.dtype,
-            generator=generator,
-        )
+        if sample_ids is None:
+            # Preserve the historical paired evaluation stream for callers
+            # without immutable dataset identities.
+            generator = torch.Generator(device=rgb.device)
+            generator.manual_seed(self.evaluation_noise_seed + rank)
+            initial_video_state = torch.randn(
+                video_shape,
+                device=rgb.device,
+                dtype=rgb.dtype,
+                generator=generator,
+            )
+            initial_tf_noise = torch.randn(
+                auxiliary_shape,
+                device=rgb.device,
+                dtype=rgb.dtype,
+                generator=generator,
+            )
+        else:
+            initial_video_state = self._evaluation_noise(
+                video_shape,
+                device=rgb.device,
+                dtype=rgb.dtype,
+                base_seed=self.evaluation_noise_seed,
+                sample_ids=sample_ids,
+                stream=0,
+                rank=rank,
+            )
+            initial_tf_noise = self._evaluation_noise(
+                auxiliary_shape,
+                device=rgb.device,
+                dtype=rgb.dtype,
+                base_seed=self.evaluation_noise_seed,
+                sample_ids=sample_ids,
+                stream=1,
+                rank=rank,
+            )
         initial_tf_state = initial_tf_noise.clone()
-        initial_tf_state[:, :, :history_frames] = tf_clean[
-            :, :, :history_frames
-        ]
+        if auxiliary_history_frames:
+            if tf_clean is None:
+                raise RuntimeError("clean auxiliary history is unavailable")
+            initial_tf_state[:, :, :auxiliary_history_frames] = tf_clean[
+                :, :, :auxiliary_history_frames
+            ]
 
-        artifacts = {
-            "video_clean": video_clean[:1].detach().cpu().to(torch.float16),
-            "tf_clean": tf_clean[:1].detach().cpu().to(torch.float16),
-            "video_initial_state": (
-                initial_video_state[:1].detach().cpu().to(torch.float16)
-            ),
-            "tf_initial_state": (
-                initial_tf_state[:1].detach().cpu().to(torch.float16)
-            ),
-            "tf_initial_noise": (
-                initial_tf_noise[:1].detach().cpu().to(torch.float16)
-            ),
-            "ground_truth_future_uint8": (
-                (
-                    ground_truth_pixels[:1, :, -future_pixel_frames:]
+        artifact_batch_limit = getattr(self, "artifact_batch_limit", 1)
+        evidence_count = (
+            batch_size
+            if artifact_batch_limit is None
+            else min(batch_size, artifact_batch_limit)
+        )
+        evidence_slice = slice(0, evidence_count)
+        artifacts = None
+        if collect_artifacts:
+            artifacts = {
+                "video_initial_state": (
+                    initial_video_state[evidence_slice]
+                    .detach()
+                    .cpu()
+                    .to(torch.float16)
+                ),
+                "reference_latents": (
+                    reference[evidence_slice]
+                    .detach()
+                    .cpu()
+                    .to(torch.float16)
+                ),
+                "tf_initial_state": (
+                    initial_tf_state[evidence_slice]
+                    .detach()
+                    .cpu()
+                    .to(torch.float16)
+                ),
+                "tf_initial_noise": (
+                    initial_tf_noise[evidence_slice]
+                    .detach()
+                    .cpu()
+                    .to(torch.float16)
+                ),
+                "deployment_mode": torch.tensor(
+                    [int(deployment_mode)], dtype=torch.int64
+                ),
+                "history_latent_frames": torch.tensor([history_frames]),
+                "auxiliary_history_latent_frames": torch.tensor(
+                    [auxiliary_history_frames]
+                ),
+                "auxiliary_clean_available": torch.tensor(
+                    [int(tf_clean is not None)], dtype=torch.int64
+                ),
+                "condition_on_tf": torch.tensor([int(self.condition_on_tf)]),
+                "condition_mode_code": torch.tensor(
+                    [TF_CONDITION_MODE_CODES[self.tf_condition_mode]]
+                ),
+                "video_only_control": torch.tensor(
+                    [int(self.video_only_control)], dtype=torch.int64
+                ),
+                "parameter_matched_control": torch.tensor(
+                    [int(getattr(self, "parameter_matched_control", False))],
+                    dtype=torch.int64,
+                ),
+                "tf_loss_weight": torch.tensor(
+                    [self.tf_loss_weight], dtype=torch.float32
+                ),
+                "effective_state_gate": (
+                    self.forward_model.tf_token_adapter.effective_gate()
+                    .detach()
+                    .cpu()
                     .float()
-                    .clamp(-1.0, 1.0)
-                    + 1.0
+                    .reshape(1)
+                ),
+                "effective_clock_gate": (
+                    self.forward_model.tf_clock_embedding.effective_gate()
+                    .detach()
+                    .cpu()
+                    .float()
+                    .reshape(1)
+                ),
+                "evaluation_noise_seed": torch.tensor(
+                    [self.evaluation_noise_seed], dtype=torch.int64
+                ),
+                "sample_ids": (
+                    sample_ids.reshape(-1)[evidence_slice]
+                    .detach()
+                    .cpu()
+                    .to(torch.int64)
+                    if sample_ids is not None
+                    else torch.full(
+                        (evidence_count,), -1, dtype=torch.int64
+                    )
+                ),
+                "evaluation_nfe_steps": torch.tensor(
+                    self.evaluation_nfe_steps, dtype=torch.int64
+                ),
+                "evaluation_condition_source_codes": torch.tensor(
+                    [
+                        EVALUATION_CONDITION_SOURCE_CODES[source]
+                        for source in self.evaluation_condition_sources
+                    ],
+                    dtype=torch.int64,
+                ),
+                "oracle_sources_are_leakage": torch.tensor(
+                    [1], dtype=torch.int64
+                ),
+                # The frozen teacher is not registered on this model and cannot
+                # be invoked by the autonomous sampler. Keep an explicit
+                # machine-checked field in every evaluation artifact.
+                "online_teacher_call_count": torch.tensor(
+                    [0], dtype=torch.int64
+                ),
+            }
+            if video_clean is not None and ground_truth_pixels is not None:
+                artifacts["video_clean"] = (
+                    video_clean[evidence_slice]
+                    .detach()
+                    .cpu()
+                    .to(torch.float16)
                 )
-                .mul(127.5)
-                .round()
-                .to(torch.uint8)
-                .cpu()
-            ),
-            "history_latent_frames": torch.tensor([history_frames]),
-            "condition_on_tf": torch.tensor([int(self.condition_on_tf)]),
-            "condition_mode_code": torch.tensor(
-                [TF_CONDITION_MODE_CODES[self.tf_condition_mode]]
-            ),
-            "video_only_control": torch.tensor(
-                [int(self.video_only_control)], dtype=torch.int64
-            ),
-            "tf_loss_weight": torch.tensor(
-                [self.tf_loss_weight], dtype=torch.float32
-            ),
-            "effective_state_gate": (
-                self.forward_model.tf_token_adapter.effective_gate()
-                .detach()
-                .cpu()
-                .float()
-                .reshape(1)
-            ),
-            "effective_clock_gate": (
-                self.forward_model.tf_clock_embedding.effective_gate()
-                .detach()
-                .cpu()
-                .float()
-                .reshape(1)
-            ),
-            "evaluation_noise_seed": torch.tensor(
-                [self.evaluation_noise_seed], dtype=torch.int64
-            ),
-            "evaluation_nfe_steps": torch.tensor(
-                self.evaluation_nfe_steps, dtype=torch.int64
-            ),
-            "evaluation_condition_source_codes": torch.tensor(
-                [
-                    EVALUATION_CONDITION_SOURCE_CODES[source]
-                    for source in self.evaluation_condition_sources
-                ],
-                dtype=torch.int64,
-            ),
-            "oracle_sources_are_leakage": torch.tensor([1], dtype=torch.int64),
-        }
+                artifacts["ground_truth_future_uint8"] = (
+                    (
+                        ground_truth_pixels[
+                            evidence_slice, :, -future_pixel_frames:
+                        ]
+                        .float()
+                        .clamp(-1.0, 1.0)
+                        + 1.0
+                    )
+                    .mul(127.5)
+                    .round()
+                    .to(torch.uint8)
+                    .cpu()
+                )
+            if tf_clean is not None:
+                artifacts["tf_clean"] = (
+                    tf_clean[evidence_slice]
+                    .detach()
+                    .cpu()
+                    .to(torch.float16)
+                )
         primary_pixels = None
+        sampling_call_counts: dict[str, int] = {}
 
         wrong_tf_clean = None
         if "oracle_shuffled" in self.evaluation_condition_sources:
+            if tf_clean is None:
+                raise RuntimeError("oracle evaluation requires auxiliary_target")
             wrong_tf_clean = self._roll_across_global_batch(tf_clean)
 
+        primary_condition_source = self.evaluation_condition_sources[0]
         for condition_source in self.evaluation_condition_sources:
             source_infix = (
                 "" if condition_source == "autonomous" else f"_{condition_source}"
@@ -656,6 +1156,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             for num_steps in self.evaluation_nfe_steps:
                 video_state = initial_video_state.clone()
                 tf_state = initial_tf_state.clone()
+                backbone_call_count = 0
                 self.sample_scheduler.set_timesteps(num_steps, device=rgb.device)
                 native_video_sigmas = self.sample_scheduler.sigmas.to(
                     device=rgb.device, dtype=torch.float32
@@ -666,17 +1167,32 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     tf_lead_logit=self.tf_lead_logit,
                 )
 
-                capture_this_trajectory = (
-                    condition_source == "autonomous"
+                is_primary_result = (
+                    condition_source == primary_condition_source
                     and num_steps == self.viz_num_steps
                 )
+                capture_this_trajectory = (
+                    collect_artifacts
+                    and self.capture_latent_trajectories
+                    and is_primary_result
+                )
                 video_trajectory = (
-                    [video_state[:1].detach().cpu().to(torch.float16)]
+                    [
+                        video_state[evidence_slice]
+                        .detach()
+                        .cpu()
+                        .to(torch.float16)
+                    ]
                     if capture_this_trajectory
                     else []
                 )
                 tf_trajectory = (
-                    [tf_state[:1].detach().cpu().to(torch.float16)]
+                    [
+                        tf_state[evidence_slice]
+                        .detach()
+                        .cpu()
+                        .to(torch.float16)
+                    ]
                     if capture_this_trajectory
                     else []
                 )
@@ -687,6 +1203,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     self.sample_scheduler.timesteps
                 ):
                     video_sigma = schedule.video[index]
+                    next_video_sigma = schedule.video[index + 1]
                     tf_sigma = schedule.time_frequency[index]
                     next_tf_sigma = schedule.time_frequency[index + 1]
                     timesteps = timestep.expand(batch_size).to(rgb.device)
@@ -714,7 +1231,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                                 tf_state,
                                 initial_tf_noise,
                                 tf_sigma_expanded,
-                                history_frames,
+                                auxiliary_history_frames,
                             )
                         else:
                             conditioning_tf = make_sampling_conditioning_tf(
@@ -722,13 +1239,23 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                                 tf_state=tf_state,
                                 tf_noise=initial_tf_noise,
                                 tf_sigma_expanded=tf_sigma_expanded,
-                                history_frames=history_frames,
+                                history_frames=auxiliary_history_frames,
                             )
                         use_tf_condition = self.condition_on_tf
+                        use_tf_clock_condition = getattr(
+                            self,
+                            "condition_on_tf_clock",
+                            self.condition_on_tf,
+                        )
                     elif condition_source == "off":
                         conditioning_tf = tf_state
                         use_tf_condition = False
+                        use_tf_clock_condition = False
                     else:
+                        if tf_clean is None:
+                            raise RuntimeError(
+                                "oracle evaluation requires auxiliary_target"
+                            )
                         oracle_clean = (
                             tf_clean
                             if condition_source == "oracle_matched"
@@ -742,7 +1269,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                             tf_clean=tf_clean,
                             tf_noise=initial_tf_noise,
                             tf_sigma_expanded=tf_sigma_expanded,
-                            history_frames=history_frames,
+                            history_frames=auxiliary_history_frames,
                             wrong_tf_clean=(
                                 None
                                 if condition_source == "oracle_matched"
@@ -750,7 +1277,20 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                             ),
                         )
                         use_tf_condition = True
+                        use_tf_clock_condition = self.condition_on_tf_clock
 
+                    forward_kwargs = {
+                        "noisy_tf": tf_state,
+                        "conditioning_tf": conditioning_tf,
+                        "tf_sigma": tf_batch_sigma,
+                        "condition_on_tf": use_tf_condition,
+                    }
+                    # Preserve compatibility with historical test doubles and
+                    # checkpoints that predate the separately switchable clock.
+                    if hasattr(self, "condition_on_tf_clock"):
+                        forward_kwargs[
+                            "condition_on_tf_clock"
+                        ] = use_tf_clock_condition
                     prediction = self.forward_model(
                         video_state,
                         timesteps,
@@ -758,11 +1298,9 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                         reference,
                         context,
                         clip_fea,
-                        noisy_tf=tf_state,
-                        conditioning_tf=conditioning_tf,
-                        tf_sigma=tf_batch_sigma,
-                        condition_on_tf=use_tf_condition,
+                        **forward_kwargs,
                     )
+                    backbone_call_count += 1
                     if not isinstance(prediction, DualWanOutput):
                         raise RuntimeError(
                             "dual Wan sampler did not return both velocities"
@@ -779,10 +1317,16 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     )
                     if capture_this_trajectory:
                         video_x0_trajectory.append(
-                            video_x0[:1].detach().cpu().to(torch.float16)
+                            video_x0[evidence_slice]
+                            .detach()
+                            .cpu()
+                            .to(torch.float16)
                         )
                         tf_x0_trajectory.append(
-                            tf_x0[:1].detach().cpu().to(torch.float16)
+                            tf_x0[evidence_slice]
+                            .detach()
+                            .cpu()
+                            .to(torch.float16)
                         )
 
                     video_state = self.sample_scheduler.step(
@@ -790,49 +1334,98 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                         timestep,
                         video_state.float(),
                     ).prev_sample.to(rgb.dtype)
+                    # The video objective supervises future latent slots only.
+                    # Keep observed history exactly on its known forward-noise
+                    # trajectory so every subsequent Wan call matches the
+                    # training distribution, then reaches the clean reference
+                    # at sigma=0 before the causal VAE decoder runs.
+                    history_sigma = next_video_sigma.to(
+                        device=video_state.device,
+                        dtype=video_state.dtype,
+                    )
+                    video_state[:, :, :history_frames] = (
+                        (1.0 - history_sigma)
+                        * reference[:, :, :history_frames]
+                        + history_sigma
+                        * initial_video_state[:, :, :history_frames]
+                    )
                     tf_state = euler_flow_step(
                         tf_state.float(),
                         prediction.tf_velocity.float(),
                         tf_sigma,
                         next_tf_sigma,
                     ).to(rgb.dtype)
-                    tf_state[:, :, :history_frames] = tf_clean[
-                        :, :, :history_frames
-                    ]
+                    if auxiliary_history_frames:
+                        if tf_clean is None:
+                            raise RuntimeError(
+                                "clean auxiliary history is unavailable"
+                            )
+                        tf_state[
+                            :, :, :auxiliary_history_frames
+                        ] = tf_clean[:, :, :auxiliary_history_frames]
                     if capture_this_trajectory:
                         video_trajectory.append(
-                            video_state[:1].detach().cpu().to(torch.float16)
+                            video_state[evidence_slice]
+                            .detach()
+                            .cpu()
+                            .to(torch.float16)
                         )
                         tf_trajectory.append(
-                            tf_state[:1].detach().cpu().to(torch.float16)
+                            tf_state[evidence_slice]
+                            .detach()
+                            .cpu()
+                            .to(torch.float16)
                         )
 
                 predicted_pixels = self.rgb_tokenizer.decode_temporal(
                     video_state, out_hw=(rgb.shape[-2], rgb.shape[-1])
                 )
-                artifacts[
-                    f"video_final{source_infix}_nfe_{num_steps}"
-                ] = video_state[:1].detach().cpu().to(torch.float16)
-                artifacts[
-                    f"tf_final{source_infix}_nfe_{num_steps}"
-                ] = tf_state[:1].detach().cpu().to(torch.float16)
-                artifacts[
-                    f"decoded_future{source_infix}_nfe_{num_steps}"
-                ] = (
-                    (
-                        predicted_pixels[:1, :, -future_pixel_frames:]
-                        .float()
-                        .clamp(-1.0, 1.0)
-                        + 1.0
+                if backbone_call_count != num_steps:
+                    raise RuntimeError(
+                        "reported NFE does not equal actual Wan calls: "
+                        f"{backbone_call_count} != {num_steps}"
                     )
-                    .mul(127.5)
-                    .round()
-                    .to(torch.uint8)
-                    .cpu()
-                )
+                counter_key = f"{condition_source}:nfe_{num_steps}"
+                sampling_call_counts[counter_key] = backbone_call_count
+                if artifacts is not None:
+                    artifacts[
+                        f"wan_call_count{source_infix}_nfe_{num_steps}"
+                    ] = torch.tensor([backbone_call_count], dtype=torch.int64)
+                    artifacts[
+                        f"video_final{source_infix}_nfe_{num_steps}"
+                    ] = (
+                        video_state[evidence_slice]
+                        .detach()
+                        .cpu()
+                        .to(torch.float16)
+                    )
+                    artifacts[
+                        f"tf_final{source_infix}_nfe_{num_steps}"
+                    ] = (
+                        tf_state[evidence_slice]
+                        .detach()
+                        .cpu()
+                        .to(torch.float16)
+                    )
+                    artifacts[
+                        f"decoded_future{source_infix}_nfe_{num_steps}"
+                    ] = (
+                        (
+                            predicted_pixels[
+                                evidence_slice, :, -future_pixel_frames:
+                            ]
+                            .float()
+                            .clamp(-1.0, 1.0)
+                            + 1.0
+                        )
+                        .mul(127.5)
+                        .round()
+                        .to(torch.uint8)
+                        .cpu()
+                    )
 
                 if capture_this_trajectory:
-                    primary_pixels = predicted_pixels
+                    assert artifacts is not None
                     artifacts.update(
                         {
                             "video_trajectory": torch.stack(
@@ -853,14 +1446,81 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                             ),
                         }
                     )
+                if is_primary_result:
+                    primary_pixels = predicted_pixels
 
         if primary_pixels is None:
             raise RuntimeError(
                 f"viz_num_steps={self.viz_num_steps} was not evaluated"
             )
-        if self.capture_latent_trajectories:
+        self._last_sampling_counters = {
+            "wan_calls_by_source_nfe": sampling_call_counts,
+            "wan_calls_total": sum(sampling_call_counts.values()),
+            "online_teacher_calls": 0,
+            "auxiliary_clean_available": int(tf_clean is not None),
+            "artifacts_collected": int(collect_artifacts),
+            "deployment_mode": int(deployment_mode),
+        }
+        if artifacts is not None:
             self._visualization_artifacts = artifacts
         return primary_pixels, ground_truth_pixels
+
+    @torch.no_grad()
+    def sample_future_deployable(
+        self,
+        history_rgb,
+        actions,
+        morphology_index=None,
+        *,
+        collect_artifacts: bool = False,
+        sample_ids: torch.Tensor | None = None,
+    ):
+        """Generate only the future frames from observable rollout inputs.
+
+        ``history_rgb`` contains exactly ``num_history_frames`` frames.  Clean
+        future RGB and clean V-JEPA features are neither accepted nor
+        constructed.  The returned tensor is ``[B,3,num_future_frames,H,W]``.
+        """
+        predicted, ground_truth = self._sample_future(
+            history_rgb,
+            actions,
+            morphology_index,
+            auxiliary_target=None,
+            collect_artifacts=collect_artifacts,
+            deployment_mode=True,
+            sample_ids=sample_ids,
+        )
+        if ground_truth is not None:
+            raise RuntimeError(
+                "deployable sampler unexpectedly constructed ground truth"
+            )
+        if predicted.shape[2] < self.num_future_frames:
+            raise RuntimeError(
+                "deployable decoder returned fewer frames than requested"
+            )
+        return predicted[:, :, -self.num_future_frames :]
+
+    @torch.no_grad()
+    def visualize(self, rgb, actions=None, mask=None, **kwargs):
+        """Visualize while forwarding an offline auxiliary target when present."""
+        del mask
+        predicted, ground_truth = self._sample_future(
+            rgb,
+            actions,
+            kwargs.get("morphology_index"),
+            auxiliary_target=kwargs.get("auxiliary_target"),
+            sample_ids=kwargs.get("clip_index"),
+        )
+        future_frames = min(self.num_future_frames, predicted.shape[2])
+        side_by_side = torch.cat(
+            [
+                ground_truth[:, :, -future_frames:],
+                predicted[:, :, -future_frames:],
+            ],
+            dim=-1,
+        )
+        side_by_side = side_by_side.permute(0, 2, 1, 3, 4)
+        return torch.clamp(side_by_side * 0.5 + 0.5, 0.0, 1.0)
 
     def pop_visualization_artifacts(self):
         artifacts = self._visualization_artifacts

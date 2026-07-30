@@ -122,6 +122,12 @@ class WanForwardModel(nn.Module):
         dual_config = dict(dual_diffusion or {})
         self.dual_diffusion_enabled = bool(dual_config.get("enabled", False))
         self.condition_on_tf = bool(dual_config.get("condition_on_tf", False))
+        self.condition_on_tf_clock = bool(
+            dual_config.get("condition_on_tf_clock", True)
+        )
+        self.tf_head_condition_on_clock = bool(
+            dual_config.get("head_condition_on_tf_clock", False)
+        )
         if self.dual_diffusion_enabled:
             if self.transformer.control_adapter is not None:
                 raise RuntimeError(
@@ -170,6 +176,7 @@ class WanForwardModel(nn.Module):
         conditioning_tf: torch.Tensor = None,
         tf_sigma: torch.Tensor = None,
         condition_on_tf: bool | None = None,
+        condition_on_tf_clock: bool | None = None,
     ) -> torch.Tensor | DualWanOutput:
         n, c, fp, h, w = noisy_latents.shape
         control = self.action_to_control(z_control, h, w).to(noisy_latents.dtype)
@@ -230,13 +237,25 @@ class WanForwardModel(nn.Module):
         # tokens.  Leaving an exactly-zero clock residual in FP32 under AMP
         # promotes ``patch_tokens + y_camera`` to FP32, so the nominal zero-gate
         # path is neither functionally nor memory-identical to pretrained Wan.
+        raw_clock = self.tf_clock_embedding.raw_embedding(tf_sigma).to(
+            dtype=condition_state_tokens.dtype
+        )
+        gated_clock = (
+            self.tf_clock_embedding.effective_gate()
+            .to(device=raw_clock.device, dtype=raw_clock.dtype)
+            * raw_clock
+        )
+        use_tf = self.condition_on_tf if condition_on_tf is None else bool(condition_on_tf)
+        use_tf_clock = (
+            getattr(self, "condition_on_tf_clock", True)
+            if condition_on_tf_clock is None
+            else bool(condition_on_tf_clock)
+        )
         clock_tokens = (
-            self.tf_clock_embedding(tf_sigma)
-            .to(dtype=condition_state_tokens.dtype)
+            gated_clock.mul(float(use_tf_clock))
             .unsqueeze(1)
             .expand(-1, seq_len, -1)
         )
-        use_tf = self.condition_on_tf if condition_on_tf is None else bool(condition_on_tf)
         state_residual = self.tf_token_adapter.residual_tokens(
             condition_state_tokens
         ) * float(use_tf)
@@ -292,9 +311,10 @@ class WanForwardModel(nn.Module):
             )
         # Both ablation arms give the TF head its own noisy state.  The causal
         # difference is only whether that state entered the shared video trunk.
-        tf_velocity = self.tf_velocity_head(
-            shared_tokens + noisy_state_tokens, grid
-        )
+        tf_head_tokens = shared_tokens + noisy_state_tokens
+        if getattr(self, "tf_head_condition_on_clock", False):
+            tf_head_tokens = tf_head_tokens + raw_clock.unsqueeze(1)
+        tf_velocity = self.tf_velocity_head(tf_head_tokens, grid)
         video_velocity = out[0] if isinstance(out, (list, tuple)) else out
 
         def rms(value):

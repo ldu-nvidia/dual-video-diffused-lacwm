@@ -492,6 +492,11 @@ def _analyze_record(
             tf_clean = handle.get_tensor("tf_clean")
             ground_truth = handle.get_tensor("ground_truth_future_uint8")
             history_tensor = handle.get_tensor("history_latent_frames")
+            auxiliary_history_tensor = (
+                handle.get_tensor("auxiliary_history_latent_frames")
+                if "auxiliary_history_latent_frames" in handle.keys()
+                else history_tensor
+            )
             initial_video = handle.get_tensor("video_initial_state")
             initial_tf = handle.get_tensor("tf_initial_state")
             initial_tf_noise = handle.get_tensor("tf_initial_noise")
@@ -542,11 +547,32 @@ def _analyze_record(
             if (
                 history_frames < 0
                 or history_frames >= video_clean.shape[2]
-                or history_frames >= tf_clean.shape[2]
             ):
                 raise ArtifactValidationError(
-                    "history_latent_frames must leave a non-empty future in "
-                    "both latents"
+                    "history_latent_frames must leave a non-empty video future"
+                )
+            if (
+                auxiliary_history_tensor.numel() != 1
+                or auxiliary_history_tensor.dtype
+                not in (
+                    torch.int8,
+                    torch.int16,
+                    torch.int32,
+                    torch.int64,
+                    torch.uint8,
+                )
+            ):
+                raise ArtifactValidationError(
+                    "auxiliary_history_latent_frames must be one integer scalar"
+                )
+            auxiliary_history_frames = int(auxiliary_history_tensor.item())
+            if (
+                auxiliary_history_frames < 0
+                or auxiliary_history_frames >= tf_clean.shape[2]
+            ):
+                raise ArtifactValidationError(
+                    "auxiliary_history_latent_frames must leave a non-empty "
+                    "auxiliary future"
                 )
             integer_dtypes = (
                 torch.int8,
@@ -633,15 +659,15 @@ def _analyze_record(
                     "condition_on_tf is inconsistent with condition_mode_code"
                 )
             if not torch.equal(
-                initial_tf[:, :, :history_frames],
-                tf_clean[:, :, :history_frames],
+                initial_tf[:, :, :auxiliary_history_frames],
+                tf_clean[:, :, :auxiliary_history_frames],
             ):
                 raise ArtifactValidationError(
                     "tf_initial_state does not preserve the exact clean history"
                 )
             if not torch.equal(
-                initial_tf[:, :, history_frames:],
-                initial_tf_noise[:, :, history_frames:],
+                initial_tf[:, :, auxiliary_history_frames:],
+                initial_tf_noise[:, :, auxiliary_history_frames:],
             ):
                 raise ArtifactValidationError(
                     "tf_initial_state future does not match tf_initial_noise"
@@ -689,7 +715,7 @@ def _analyze_record(
                         "tf_future_nmse": _future_nmse(
                             tf_final,
                             tf_clean,
-                            history_frames,
+                            auxiliary_history_frames,
                             tf_key,
                         ),
                         "decoded_mse_unit_range": decoded_mse,
@@ -722,6 +748,7 @@ def _analyze_record(
 
             identity = {
                 "history_latent_frames": history_frames,
+                "auxiliary_history_latent_frames": auxiliary_history_frames,
                 "video_clean_sha256": _hash_tensor(video_clean),
                 "tf_clean_sha256": _hash_tensor(tf_clean),
                 "ground_truth_future_uint8_sha256": _hash_tensor(ground_truth),

@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - /experiments_0908/vjepa_latent_forcing_common
+  - _self_
+
+name: vjepa-vpm-parameter-matched
+model:
+  dual_diffusion:
+    condition_on_tf: false
+    condition_on_tf_clock: false
+    condition_mode: "off"
+    tf_loss_weight: 0.0
+    parameter_matched_control: true
+wandb:
+  tags: [abc, vjepa2.1, latent-forcing, VPM, parameter-matched]

@@ -26,6 +26,10 @@ time_frequency_transform:
 dual_diffusion:
   enabled: true
   condition_on_tf: false
+  # Legacy RFFT targets are causal in their observed prefix. Bidirectional
+  # learned targets such as V-JEPA override this with ``diffuse_all`` so no
+  # clean full-clip feature is leaked into autonomous inference.
+  auxiliary_history_mode: clamp_clean
   # ``condition_mode`` is the causal experimental intervention. ``off`` keeps
   # the video trunk blind to TF, ``matched`` injects this sample's current TF
   # state, and ``shuffled`` injects another sample's hidden-future TF while
@@ -42,12 +46,26 @@ dual_diffusion:
   # Both gates are frozen at exact zero only in the true video-only control.
   clock_gate_init: 0.0
   clock_gate_trainable: true
+  # The shared video trunk and auxiliary velocity head have separate clock
+  # switches. This permits an auxiliary-supervision-only control whose head
+  # knows its noise level while the video generator cannot consume it.
+  # True preserves the historical RFFT dual-model behavior. JEPA study
+  # controls override this explicitly per arm.
+  condition_on_tf_clock: true
+  head_condition_on_tf_clock: false
   schedule_mode: tf_leads
   tf_lead_logit: 1.0
   tf_loss_weight: 1.0
   video_only_control: false
+  # Scientific no-op with the same trainable parameter schema as dual arms.
+  # It preserves the original video RNG/objective while retaining unused
+  # trainable auxiliary parameters for a parameter-matched comparison.
+  parameter_matched_control: false
   clock_embedding_dim: 128
   capture_latent_trajectories: true
+  # Trainer visualization keeps one evidence sample per rank. Dedicated paired
+  # evaluation overrides this to null and persists every item in its batch.
+  artifact_batch_limit: 1
   evaluation_nfe_steps: [8]
   evaluation_noise_seed: 20260726
   # Oracle sources are leakage-only diagnostics and remain disabled by

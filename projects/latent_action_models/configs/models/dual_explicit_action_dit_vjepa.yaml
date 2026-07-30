@@ -1,0 +1,29 @@
+defaults:
+  - dual_explicit_action_dit_model
+  - _self_
+
+# Clean V-JEPA features are read from the immutable offline cache. The teacher
+# is deliberately absent from model construction, checkpoints, and inference.
+time_frequency_transform: null
+dual_diffusion:
+  enabled: true
+  auxiliary_history_mode: diffuse_all
+  tf_channels: 64
+  head_condition_on_tf_clock: true
+  condition_on_tf_clock: false
+  condition_on_tf: false
+  condition_mode: "off"
+  schedule_mode: aligned
+  tf_lead_logit: 0.0
+  tf_loss_weight: 1.0
+  video_only_control: false
+  parameter_matched_control: false
+  state_gate_init: 0.0
+  state_gate_trainable: true
+  clock_gate_init: 0.0
+  clock_gate_trainable: true
+  evaluation_nfe_steps: [4]
+  evaluation_condition_sources:
+    - autonomous
+    - "off"
+    - autonomous_shuffled

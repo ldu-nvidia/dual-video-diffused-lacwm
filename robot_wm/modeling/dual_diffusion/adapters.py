@@ -167,7 +167,13 @@ class TFSigmaTokenEmbedding(nn.Module):
         """Return the bounded residual multiplier used by the clock embedding."""
         return torch.tanh(self.gate)
 
-    def forward(self, sigma: Tensor) -> Tensor:
+    def raw_embedding(self, sigma: Tensor) -> Tensor:
+        """Embed sigma without the trunk-injection gate.
+
+        The auxiliary velocity head can use this private clock while an
+        auxiliary-only control keeps the video trunk completely blind to the
+        second state.
+        """
         if sigma.ndim > 1:
             sigma = sigma.reshape(sigma.shape[0], -1)
             if sigma.shape[1] != 1:
@@ -177,5 +183,8 @@ class TFSigmaTokenEmbedding(nn.Module):
             raise ValueError("TF sigma must have shape [B]")
         angles = sigma.float().unsqueeze(-1) * self.frequencies.unsqueeze(0)
         embedding = torch.cat([torch.cos(angles), torch.sin(angles)], dim=-1)
-        tokens = self.net(embedding).to(dtype=sigma.dtype)
+        return self.net(embedding).to(dtype=sigma.dtype)
+
+    def forward(self, sigma: Tensor) -> Tensor:
+        tokens = self.raw_embedding(sigma)
         return self.effective_gate().to(dtype=tokens.dtype) * tokens

@@ -66,10 +66,11 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
     model = object.__new__(module.DualExplicitActionDiTModel)
     batch_size = 2
     video_clean = torch.zeros(batch_size, 16, 4, 1, 1)
-    tf_clean = torch.randn(batch_size, 12, 4, 1, 1)
 
     model.num_history_latent = 2
+    model.num_history_frames = 5
     model.num_future_frames = 2
+    model.auxiliary_history_mode = "diffuse_all"
     model.tf_condition_mode = "shuffled"
     model.condition_on_tf = True
     model.video_only_control = False
@@ -83,7 +84,13 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
     model.capture_latent_trajectories = False
     model._visualization_artifacts = None
     model._encode_clip = lambda _rgb: video_clean
-    model._tf_clean = lambda _rgb, _shape: tf_clean
+    model._history_reference = lambda _rgb, _shape: (
+        torch.zeros_like(video_clean),
+        2,
+    )
+    model._tf_clean = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("autonomous diffuse-all sampling invoked its teacher")
+    )
     model._latent_actions = (
         lambda _rgb, _actions, _morphology, _latent_frames, _history: (
             None,
@@ -151,12 +158,13 @@ def test_one_nfe_model_sampling_pairs_matched_and_shuffled_noise(monkeypatch):
 
     model.forward_model = forward_model
     model.forward_model.tf_token_adapter = types.SimpleNamespace(
+        tf_channels=12,
         effective_gate=lambda: torch.tensor(0.1)
     )
     model.forward_model.tf_clock_embedding = types.SimpleNamespace(
         effective_gate=lambda: torch.tensor(0.0)
     )
-    rgb = torch.zeros(batch_size, 3, 13, 2, 2)
+    rgb = torch.zeros(batch_size, 13, 3, 2, 2)
 
     model._sample_future(rgb)
 
@@ -205,7 +213,7 @@ def test_video_only_control_fails_closed_if_a_tf_path_can_open(monkeypatch):
         model._assert_video_only_control_contract()
 
 
-def test_video_only_training_tf_placeholder_preserves_rng_state(monkeypatch):
+def test_historical_training_tf_noise_retains_global_rng_behavior(monkeypatch):
     module = _load_model_module(monkeypatch)
     model = object.__new__(module.DualExplicitActionDiTModel)
     clean = torch.ones(2, 12, 4, 2, 2)
@@ -223,6 +231,80 @@ def test_video_only_training_tf_placeholder_preserves_rng_state(monkeypatch):
     sampled = model._training_tf_noise(clean)
     assert torch.count_nonzero(sampled) > 0
     assert not torch.equal(after, torch.random.get_rng_state())
+
+
+def test_cached_target_noise_is_stateless_and_rng_independent(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.video_only_control = False
+    model.parameter_matched_control = False
+    clean = torch.ones(2, 64, 4, 2, 2)
+    sample_ids = torch.tensor([17, 29])
+    timesteps = torch.tensor([300, 700])
+
+    torch.manual_seed(20260729)
+    before = torch.random.get_rng_state()
+    first = model._training_tf_noise(
+        clean, sample_ids=sample_ids, timesteps=timesteps
+    )
+    after = torch.random.get_rng_state()
+    second = model._training_tf_noise(
+        clean, sample_ids=sample_ids, timesteps=timesteps
+    )
+
+    assert torch.equal(before, after)
+    assert torch.equal(after, torch.random.get_rng_state())
+    assert torch.equal(first, second)
+    assert not torch.equal(first[0], first[1])
+
+
+def test_evaluation_noise_is_keyed_by_clip_not_batch_order(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    ids = torch.tensor([17, 29])
+    first = module.DualExplicitActionDiTModel._evaluation_noise(
+        (2, 3, 2),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        base_seed=20260729,
+        sample_ids=ids,
+        stream=1,
+        rank=0,
+    )
+    reversed_batch = module.DualExplicitActionDiTModel._evaluation_noise(
+        (2, 3, 2),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        base_seed=20260729,
+        sample_ids=ids.flip(0),
+        stream=1,
+        rank=7,
+    )
+
+    assert torch.equal(first[0], reversed_batch[1])
+    assert torch.equal(first[1], reversed_batch[0])
+    assert not torch.equal(first[0], first[1])
+
+
+def test_parameter_matched_control_preserves_rng_and_video_objective(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    model.video_only_control = False
+    model.parameter_matched_control = True
+    clean = torch.ones(2, 64, 4, 2, 2)
+
+    torch.manual_seed(20260729)
+    before = torch.random.get_rng_state()
+    placeholder = model._training_tf_noise(clean)
+    after = torch.random.get_rng_state()
+    assert torch.count_nonzero(placeholder) == 0
+    assert torch.equal(before, after)
+
+    video_loss = torch.tensor(2.0, requires_grad=True)
+    auxiliary_loss = torch.tensor(float("nan"), requires_grad=True)
+    objective = model._training_objective(video_loss, auxiliary_loss)
+    objective.backward()
+    assert objective is video_loss
+    assert auxiliary_loss.grad is None
 
 
 def test_video_only_objective_has_no_tf_graph_or_nan_path(monkeypatch):
@@ -255,6 +337,7 @@ def test_autonomous_shuffled_rolls_only_generated_future_residual(monkeypatch):
     )
 
     model.num_history_latent = 2
+    model.num_history_frames = 5
     model.num_future_frames = 2
     model.tf_condition_mode = "matched"
     model.condition_on_tf = True
@@ -272,6 +355,10 @@ def test_autonomous_shuffled_rolls_only_generated_future_residual(monkeypatch):
     model.capture_latent_trajectories = True
     model._visualization_artifacts = None
     model._encode_clip = lambda _rgb: video_clean
+    model._history_reference = lambda _rgb, _shape: (
+        torch.zeros_like(video_clean),
+        2,
+    )
     model._tf_clean = lambda _rgb, _shape: tf_clean
     model._latent_actions = (
         lambda _rgb, _actions, _morphology, _latent_frames, _history: (
@@ -352,12 +439,13 @@ def test_autonomous_shuffled_rolls_only_generated_future_residual(monkeypatch):
 
     model.forward_model = forward_model
     model.forward_model.tf_token_adapter = types.SimpleNamespace(
+        tf_channels=1,
         effective_gate=lambda: torch.tensor(0.1)
     )
     model.forward_model.tf_clock_embedding = types.SimpleNamespace(
         effective_gate=lambda: torch.tensor(0.0)
     )
-    rgb = torch.zeros(batch_size, 3, 13, 2, 2)
+    rgb = torch.zeros(batch_size, 13, 3, 2, 2)
 
     model._sample_future(rgb)
 
@@ -401,3 +489,173 @@ def test_autonomous_shuffled_rolls_only_generated_future_residual(monkeypatch):
     assert "video_final_autonomous_shuffled_nfe_2" in artifacts
     assert "tf_final_autonomous_shuffled_nfe_2" in artifacts
     assert "decoded_future_autonomous_shuffled_nfe_2" in artifacts
+    assert artifacts["online_teacher_call_count"].item() == 0
+    assert artifacts["wan_call_count_nfe_2"].item() == 2
+    assert (
+        artifacts["wan_call_count_autonomous_shuffled_nfe_2"].item() == 2
+    )
+
+
+def test_deployable_sampler_uses_history_only_and_matches_paired_path(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    model = object.__new__(module.DualExplicitActionDiTModel)
+    batch_size = 1
+    history_latents = torch.full((batch_size, 16, 2, 1, 1), 0.25)
+    full_latents = torch.cat(
+        [history_latents, torch.full((batch_size, 16, 2, 1, 1), 0.75)],
+        dim=2,
+    )
+
+    model.num_history_frames = 5
+    model.num_future_frames = 8
+    model.num_history_latent = 2
+    model.auxiliary_history_mode = "diffuse_all"
+    model.tf_condition_mode = "matched"
+    model.condition_on_tf = True
+    model.condition_on_tf_clock = True
+    model.video_only_control = False
+    model.parameter_matched_control = False
+    model.tf_loss_weight = 1.0
+    model.tf_schedule_mode = "aligned"
+    model.tf_lead_logit = 0.0
+    model.evaluation_noise_seed = 99
+    model.evaluation_condition_sources = ("autonomous",)
+    model.evaluation_nfe_steps = (1,)
+    model.viz_num_steps = 1
+    model.capture_latent_trajectories = False
+    model._visualization_artifacts = None
+    model._video_only_runtime_validated = True
+
+    encoded_frame_counts = []
+
+    def encode(rgb):
+        encoded_frame_counts.append(int(rgb.shape[1]))
+        return history_latents if rgb.shape[1] == 5 else full_latents
+
+    model._encode_clip = encode
+    model._latent_actions = (
+        lambda rgb, _actions, _morphology, latent_frames, history_frames: (
+            None,
+            torch.zeros(rgb.shape[0], latent_frames, 1),
+            None,
+        )
+    )
+    model._build_context = (
+        lambda _batch_size, _device, _dtype: torch.empty(0)
+    )
+    model._build_clip = (
+        lambda _batch_size, _device, _dtype: torch.empty(0)
+    )
+
+    class Tokenizer:
+        temporal_ratio = 4
+
+        @staticmethod
+        def latent_temporal_len(frames):
+            return (frames - 1) // 4 + 1
+
+        @staticmethod
+        def decode_temporal(latent, out_hw):
+            # Wan's 4 latent positions decode to 13 frames with temporal
+            # multiplicities [1,4,4,4].
+            decoded = torch.repeat_interleave(
+                latent[:, :1],
+                torch.tensor([1, 4, 4, 4]),
+                dim=2,
+            )
+            return decoded.expand(-1, 3, -1, *out_hw)
+
+    class Scheduler:
+        timesteps = torch.tensor([1.0])
+        sigmas = torch.tensor([1.0, 0.0])
+
+        def set_timesteps(self, num_steps, device):
+            assert num_steps == 1
+            self.timesteps = torch.tensor([1.0], device=device)
+            self.sigmas = torch.tensor([1.0, 0.0], device=device)
+
+        @staticmethod
+        def step(_velocity, _timestep, state):
+            return types.SimpleNamespace(prev_sample=state)
+
+    def forward_model(
+        video_state,
+        _timesteps,
+        _z_control,
+        _reference,
+        _context,
+        _clip_fea,
+        *,
+        noisy_tf,
+        conditioning_tf,
+        tf_sigma,
+        condition_on_tf,
+        condition_on_tf_clock,
+    ):
+        del conditioning_tf, tf_sigma, condition_on_tf, condition_on_tf_clock
+        return module.DualWanOutput(
+            video_velocity=torch.zeros_like(video_state),
+            tf_velocity=torch.zeros_like(noisy_tf),
+        )
+
+    model.rgb_tokenizer = Tokenizer()
+    model.sample_scheduler = Scheduler()
+    model.forward_model = forward_model
+    model.forward_model.tf_token_adapter = types.SimpleNamespace(
+        tf_channels=1,
+        effective_gate=lambda: torch.tensor(0.0),
+    )
+    model.forward_model.tf_clock_embedding = types.SimpleNamespace(
+        effective_gate=lambda: torch.tensor(0.0),
+    )
+
+    full_rgb = torch.zeros(batch_size, 13, 3, 2, 2)
+    history_rgb = full_rgb[:, :5]
+    actions = torch.zeros(batch_size, 13, 5, 23)
+
+    paired, ground_truth = model._sample_future(
+        full_rgb,
+        actions,
+        collect_artifacts=False,
+    )
+    deployable = model.sample_future_deployable(
+        history_rgb,
+        actions,
+        collect_artifacts=True,
+    )
+
+    assert ground_truth is not None
+    torch.testing.assert_close(
+        deployable,
+        paired[:, :, -model.num_future_frames :],
+        rtol=0,
+        atol=0,
+    )
+    assert encoded_frame_counts == [13, 5, 5]
+    counters = model._last_sampling_counters
+    assert counters["deployment_mode"] == 1
+    assert counters["auxiliary_clean_available"] == 0
+    artifacts = model.pop_visualization_artifacts()
+    assert artifacts["deployment_mode"].item() == 1
+    assert "video_trajectory" not in artifacts
+    assert "tf_trajectory" not in artifacts
+    assert "video_clean" not in artifacts
+    assert "ground_truth_future_uint8" not in artifacts
+    assert "tf_clean" not in artifacts
+    # The observed prefix reaches the clean reference at sigma=0.
+    torch.testing.assert_close(
+        artifacts["video_final_nfe_1"][:, :, :2],
+        history_latents.to(torch.float16),
+        rtol=0,
+        atol=0,
+    )
+
+    with pytest.raises(ValueError, match="exactly the observed history"):
+        model.sample_future_deployable(full_rgb, actions)
+    with pytest.raises(ValueError, match="clean auxiliary target"):
+        model._sample_future(
+            history_rgb,
+            actions,
+            auxiliary_target=torch.zeros(1, 1, 4, 1, 1),
+            deployment_mode=True,
+        )

@@ -1,0 +1,28 @@
+_target_: robot_wm.datasets.multi_dataset.MultiDataset
+padding_dim: 157
+seed: ${seed}
+infinite: true
+img_augment: false
+emit_crop_rgb: false
+transform:
+  sample_size: 13
+  chunk_size: 5
+future_validity:
+  enabled: true
+  history_frames: 5
+  future_frames: 8
+  temporal_ratio: 4
+  num_views: 3
+  view_std_threshold: 0.001
+  max_retries: 8
+datasets:
+  ABC:
+    _target_: robot_wm.datasets.abc.fixed_clip_dataset.ABCFixedClipDataset
+    clip_manifest: ${oc.env:VJEPA_CLIP_MANIFEST}
+    cache_metadata: ${oc.env:VJEPA_CACHE_METADATA}
+    seed: ${seed}
+    infinite: ${dataset.infinite}
+    # RGB/actions are immutable arrays produced by the offline extractor from
+    # this exact clip schema; a live transform would reintroduce mutable MP4
+    # and states.npz dependencies.
+    transform: null
