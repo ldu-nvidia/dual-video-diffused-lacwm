@@ -146,14 +146,17 @@ done
   --expected-commit "$EXPECTED_COMMIT" \
   --repo-root "$REPO_ROOT"
 
-IFS=$'\t' read -r \
+# Bash collapses adjacent tab characters because tab is IFS whitespace. V0 has
+# three intentionally empty nullable fields, so use a non-whitespace delimiter
+# and preserve their exact column positions.
+IFS='|' read -r \
   ARM_CODE ARM_NAME SELECTOR_KIND DUAL_ENABLED CONDITION_MODE \
   CONDITION_ON_STATE CONDITION_ON_CLOCK SCHEDULE_MODE AUXILIARY_LEAD_LOGIT \
   AUXILIARY_LOSS_WEIGHT PARAMETER_MATCHED_CONTROL \
   < <(
     "$PYTHON_BIN" "$HELPER" arm-contract \
       --array-task-id "$SLURM_ARRAY_TASK_ID" \
-      --format tsv
+      --format pipe
   )
 [[ -n "$ARM_CODE" && -n "$ARM_NAME" && -n "$SELECTOR_KIND" ]] || \
   die "arm helper returned an incomplete contract"

@@ -2464,9 +2464,13 @@ def command_arm_contract(args: argparse.Namespace) -> int:
             f"{arm['auxiliary_loss_weight']:.2f}",
             str(arm["parameter_matched_control"]).lower(),
         ]
-        if any("\t" in value or "\n" in value for value in fields):
+        delimiter = "\t" if args.format == "tsv" else "|"
+        if any(
+            delimiter in value or "\n" in value or "\r" in value
+            for value in fields
+        ):
             raise ContractError("arm contract contains a shell delimiter")
-        print("\t".join(fields))
+        print(delimiter.join(fields))
     return 0
 
 
@@ -3124,7 +3128,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     arm = subparsers.add_parser("arm-contract")
     arm.add_argument("--array-task-id", type=int, required=True)
-    arm.add_argument("--format", choices=("json", "tsv"), default="json")
+    arm.add_argument(
+        "--format",
+        choices=("json", "tsv", "pipe"),
+        default="json",
+    )
     arm.set_defaults(handler=command_arm_contract)
 
     preflight = subparsers.add_parser("preflight")

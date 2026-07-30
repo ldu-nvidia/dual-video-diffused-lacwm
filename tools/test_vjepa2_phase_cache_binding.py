@@ -1197,7 +1197,7 @@ class StaticEntrypointContractTest(unittest.TestCase):
         source = STAGE_SBATCH.read_text(encoding="utf-8")
         call = '"$PYTHON_BIN" "$HELPER" validate-study-inputs \\\n'
         self.assertEqual(source.count(call), 1)
-        self.assertLess(source.index(call), source.index("IFS=$'\\t' read -r"))
+        self.assertLess(source.index(call), source.index("IFS='|' read -r"))
         self.assertLess(source.index(call), source.index('mkdir "$RUN_DIR"'))
 
     def test_paired_job_revalidates_before_output_or_benchmark(self) -> None:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 import benchmark_vjepa2_inference as benchmark
 import benchmark_vjepa2_paired_latency as paired_benchmark
@@ -124,6 +127,36 @@ class VJEPA2StudyHarnessTest(unittest.TestCase):
         self.assertIn('source "$ACTIVATE"', source)
         self.assertIn('ROBOT_WM_ORIGIN="$(', source)
         self.assertIn('"$REPO_ROOT"/robot_wm/*', source)
+
+    def test_v0_shell_contract_preserves_nullable_field_positions(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = study.command_arm_contract(
+                SimpleNamespace(array_task_id=0, format="pipe")
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            output.getvalue().rstrip("\n").split("|"),
+            [
+                "V0",
+                "v0_original_explicit_action",
+                "baseline",
+                "false",
+                "",
+                "false",
+                "false",
+                "",
+                "",
+                "0.00",
+                "false",
+            ],
+        )
+
+    def test_stage_launcher_uses_non_whitespace_arm_delimiter(self):
+        source = SBATCH.read_text(encoding="utf-8")
+        self.assertIn("IFS='|' read -r", source)
+        self.assertIn("--format pipe", source)
+        self.assertNotIn("IFS=$'\\t' read -r", source)
 
     def test_submit_adds_dependent_one_gpu_paired_job(self):
         source = SUBMIT.read_text(encoding="utf-8")
