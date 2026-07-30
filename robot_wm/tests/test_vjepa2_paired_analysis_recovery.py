@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ LAUNCHER = (
     ROOT / "tools/slurm/submit_vjepa2_paired_analysis_recovery.sh"
 )
 WORKER = ROOT / "tools/slurm/vjepa2_paired_analysis_recovery.sbatch"
+HELPER = ROOT / "tools/vjepa2_paired_analysis_recovery.py"
 
 
 def _protocol(tmp_path: Path) -> dict:
@@ -198,6 +201,21 @@ def test_analyzer_recovery_submission_and_job_are_all_or_none(tmp_path):
             paired_analysis_recovery_submission=tmp_path
             / "submission.json",
         )
+
+
+def test_direct_helper_cli_bootstraps_repo_without_pythonpath():
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [sys.executable, str(HELPER), "--help"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Fail-closed analyzer-only recovery" in completed.stdout
 
 
 def test_analyzer_only_shell_is_held_fail_closed_and_has_no_benchmark():
