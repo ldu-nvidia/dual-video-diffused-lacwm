@@ -12,6 +12,17 @@ finalization remain `afterok` descendants. Run the launcher from a clean
 evaluator clone/worktree distinct from the immutable training checkout
 recorded in the study.
 
+The frontier launcher also supports the exact cache-only partial-submission
+case with `--adopt-cache-job-id ID`. This is not a general resume flag. It
+requires an empty pending-job log directory, no frontier outputs or submission
+record, and an exact still-pending Slurm cache allocation whose complete
+`SubmitLine`, resources, account/QOS, dependency, immutable inputs, and original
+clean evaluator worktree reproduce. Recovery uses a separate controller
+worktree but keeps all scientific evaluation on the cache producer's original
+evaluator commit. All `batch` control submissions explicitly request one GPU.
+See `docs/experiments/VJEPA2_NFE_FRONTIER_PROTOCOL.md` for the fail-closed
+contract.
+
 These scripts run on one to 32 nodes with eight B200s per node. The latent default
 is a physical batch of 4 per GPU with four-way gradient accumulation. Node count,
 GPUs per node, world size, batching, and the minimum-memory B200 profile are bound

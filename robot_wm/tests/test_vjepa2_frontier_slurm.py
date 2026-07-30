@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -279,6 +280,375 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
         self.assertIn("--format=JobID%64,State%32,ExitCode", command)
         self.assertNotIn("JobIDRaw", " ".join(command))
 
+    def _adopted_cache_fixture(
+        self,
+    ) -> tuple[argparse.Namespace, str, str]:
+        producer = self.root / "producer"
+        current = self.root / "current"
+        log_dir = self.root / "study" / "_frontier_slurm" / "logs"
+        producer.mkdir()
+        current.mkdir()
+        log_dir.mkdir(parents=True)
+        args = argparse.Namespace(
+            job_id="481556",
+            study_root=str(self.root / "study"),
+            training_commit="9" * 40,
+            current_repo_root=str(current),
+            current_evaluator_commit="b" * 40,
+            final_job_id="481132",
+            python="/env/lacwm/bin/python",
+            extractor_python="/env/vjepa/bin/python3.11",
+            vjepa_source="/assets/vjepa/source",
+            vjepa_checkpoint="/assets/vjepa/checkpoint.pt",
+            vjepa_checkpoint_sha256="1" * 64,
+            pca="/cache/pca.pt",
+            pca_sha256="2" * 64,
+            train_manifest="/cache/train.jsonl",
+            partition="batch",
+            account="coreai_chef_posttrain",
+            qos="normal",
+            cache_time="01:00:00",
+            cache_cpus="32",
+            cache_memory="256G",
+            log_dir=str(log_dir),
+        )
+        producer_commit = "a" * 40
+        expected_user = workflow.pwd.getpwuid(os.getuid()).pw_name
+        tokens = [
+            "sbatch",
+            "--parsable",
+            "--nodes=1",
+            "--ntasks=1",
+            "--ntasks-per-node=1",
+            "--gpus-per-node=1",
+            "--cpus-per-task=32",
+            "--mem=256G",
+            "--time=01:00:00",
+            "--partition=batch",
+            "--dependency=afterok:481132",
+            "--no-requeue",
+            "--open-mode=append",
+            "--export=ALL",
+            "--job-name=vjepa2-frontier-cache",
+            f"--output={log_dir}/%x-%j.out",
+            f"--error={log_dir}/%x-%j.err",
+            "--account=coreai_chef_posttrain",
+            "--qos=normal",
+            str(producer / "tools/slurm/vjepa2_frontier_cache.sbatch"),
+            "--repo-root",
+            str(producer),
+            "--study-root",
+            str(self.root / "study"),
+            "--training-commit",
+            "9" * 40,
+            "--evaluator-commit",
+            producer_commit,
+            "--python",
+            "/env/lacwm/bin/python",
+            "--extractor-python",
+            "/env/vjepa/bin/python3.11",
+            "--vjepa-source",
+            "/assets/vjepa/source",
+            "--vjepa-checkpoint",
+            "/assets/vjepa/checkpoint.pt",
+            "--vjepa-checkpoint-sha256",
+            "1" * 64,
+            "--pca",
+            "/cache/pca.pt",
+            "--pca-sha256",
+            "2" * 64,
+            "--train-manifest",
+            "/cache/train.jsonl",
+        ]
+        row = "|".join(
+            [
+                "481556",
+                "vjepa2-frontier-cache",
+                expected_user,
+                "PENDING",
+                "0:0",
+                "coreai_chef_posttrain",
+                "normal",
+                "batch",
+                "billing=32,cpu=32,gres/gpu=1,mem=256G,node=1",
+                "32",
+                "256Gn",
+                "01:00:00",
+                shlex.join(tokens),
+            ]
+        )
+        control = " ".join(
+            [
+                "JobId=481556",
+                "JobName=vjepa2-frontier-cache",
+                f"UserId={expected_user}({os.getuid()})",
+                "Account=coreai_chef_posttrain",
+                "QOS=normal",
+                "JobState=PENDING",
+                "Reason=Dependency",
+                "Dependency=afterok:481132_*(unfulfilled)",
+                "Requeue=0",
+                "Restarts=0",
+                "BatchFlag=1",
+                "ExitCode=0:0",
+                "TimeLimit=01:00:00",
+                "Partition=batch",
+                "NumNodes=1-1",
+                "NumCPUs=32",
+                "NumTasks=1",
+                "CPUs/Task=32",
+                "NodeList=",
+                "ReqTRES=cpu=32,mem=256G,node=1,billing=8,gres/gpu=1",
+                "AllocTRES=(null)",
+                (
+                    "Command="
+                    f"{producer}/tools/slurm/vjepa2_frontier_cache.sbatch"
+                ),
+                f"WorkDir={workflow.pwd.getpwuid(os.getuid()).pw_dir}",
+                (
+                    "StdErr="
+                    f"{log_dir}/vjepa2-frontier-cache-481556.err"
+                ),
+                "StdIn=/dev/null",
+                (
+                    "StdOut="
+                    f"{log_dir}/vjepa2-frontier-cache-481556.out"
+                ),
+                "MemPerTres=gpu:474112",
+                "TresPerNode=gres/gpu:1",
+                "TresPerTask=cpu=32",
+            ]
+        )
+        return args, row + "|", control
+
+    def test_pending_cache_adoption_binds_exact_command_and_old_evaluator(
+        self,
+    ) -> None:
+        args, row, control = self._adopted_cache_fixture()
+        with mock.patch.object(
+            workflow,
+            "_validate_adopted_cache_repositories",
+            return_value={"scientific_code_objects_unchanged": True},
+        ) as repository_validator:
+            evidence = workflow.validate_adopted_cache_row(args, row, control)
+        self.assertEqual(evidence["job_id"], "481556")
+        self.assertEqual(evidence["state"], "PENDING")
+        self.assertEqual(evidence["producer_evaluator_commit"], "a" * 40)
+        self.assertEqual(
+            evidence["producer_repo_root"], str(self.root / "producer")
+        )
+        repository_validator.assert_called_once_with(
+            producer_repo=self.root / "producer",
+            producer_commit="a" * 40,
+            current_repo=self.root / "current",
+            current_commit="b" * 40,
+            training_commit="9" * 40,
+        )
+
+    def test_cache_adoption_rejects_state_resource_and_submitline_drift(
+        self,
+    ) -> None:
+        args, row, control = self._adopted_cache_fixture()
+        with self.assertRaisesRegex(workflow.WorkflowError, "must still be PENDING"):
+            workflow.validate_adopted_cache_row(
+                args, row.replace("|PENDING|", "|RUNNING|", 1), control
+            )
+        with self.assertRaisesRegex(workflow.WorkflowError, "requested TRES differ"):
+            workflow.validate_adopted_cache_row(
+                args, row.replace("gres/gpu=1", "gres/gpu=2", 1), control
+            )
+        with self.assertRaisesRegex(workflow.WorkflowError, "SubmitLine differs"):
+            workflow.validate_adopted_cache_row(
+                args, row.replace("--no-requeue", "--requeue", 1), control
+            )
+        with self.assertRaisesRegex(
+            workflow.WorkflowError, "scontrol dependency differs"
+        ):
+            workflow.validate_adopted_cache_row(
+                args,
+                row,
+                control.replace(
+                    "Dependency=afterok:481132_*(unfulfilled)",
+                    "Dependency=afterok:999999_*(unfulfilled)",
+                ),
+            )
+
+    def test_adopted_cache_query_rejects_duplicate_accounting_rows(self) -> None:
+        args, row, _ = self._adopted_cache_fixture()
+        completed = subprocess.CompletedProcess(
+            args=(),
+            returncode=0,
+            stdout=row + "\n" + row + "\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            workflow.subprocess, "run", return_value=completed
+        ) as runner:
+            with self.assertRaisesRegex(workflow.WorkflowError, "exactly one row"):
+                workflow.command_validate_adopted_cache(args)
+        command = runner.call_args.args[0]
+        self.assertIn("--duplicates", command)
+        self.assertIn("SubmitLine%4096", " ".join(command))
+
+    def test_adopted_cache_query_uses_scontrol_for_live_dependency(self) -> None:
+        args, row, control = self._adopted_cache_fixture()
+        completed = [
+            subprocess.CompletedProcess(
+                args=(), returncode=0, stdout=row + "\n", stderr=""
+            ),
+            subprocess.CompletedProcess(
+                args=(), returncode=0, stdout=control + "\n", stderr=""
+            ),
+        ]
+        with (
+            mock.patch.object(
+                workflow.subprocess, "run", side_effect=completed
+            ) as runner,
+            mock.patch.object(
+                workflow,
+                "_validate_adopted_cache_repositories",
+                return_value={"scientific_code_objects_unchanged": True},
+            ),
+        ):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = workflow.command_validate_adopted_cache(args)
+        self.assertEqual(status, 0)
+        self.assertEqual(len(output.getvalue().splitlines()), 3)
+        accounting_command = runner.call_args_list[0].args[0]
+        self.assertNotIn("Dependency", " ".join(accounting_command))
+        self.assertIn("SubmitLine%4096", " ".join(accounting_command))
+        self.assertEqual(
+            runner.call_args_list[1].args[0],
+            ["scontrol", "show", "job", "--oneliner", "481556"],
+        )
+
+    def test_adopted_cache_repository_diff_is_orchestration_only(self) -> None:
+        current = self.root / "current"
+        producer = self.root / "producer"
+        current.mkdir()
+        subprocess.run(["git", "init", "-q", str(current)], check=True)
+        subprocess.run(
+            ["git", "-C", str(current), "config", "user.name", "Test"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(current),
+                "config",
+                "user.email",
+                "test@example.invalid",
+            ],
+            check=True,
+        )
+        directory_paths = {
+            "projects/latent_action_models/lam",
+            "robot_wm/datasets",
+            "robot_wm/modeling",
+            "tools/env/videox_shim",
+        }
+        file_paths = set(workflow.ADOPTED_CACHE_CODE_PATHS) - directory_paths
+        file_paths.add("tools/slurm/vjepa2_frontier_workflow.py")
+        for relative in directory_paths:
+            marker = current / relative / "marker.txt"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("immutable\n", encoding="utf-8")
+        for relative in file_paths:
+            path = current / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("immutable\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(current), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(current), "commit", "-qm", "training"],
+            check=True,
+        )
+        training_commit = subprocess.run(
+            ["git", "-C", str(current), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        readme = current / "tools/slurm/README.md"
+        readme.write_text("producer\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(current), "add", str(readme)], check=True)
+        subprocess.run(
+            ["git", "-C", str(current), "commit", "-qm", "producer"],
+            check=True,
+        )
+        producer_commit = subprocess.run(
+            ["git", "-C", str(current), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(current),
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                str(producer),
+                producer_commit,
+            ],
+            check=True,
+        )
+        helper = current / "tools/slurm/vjepa2_frontier_workflow.py"
+        helper.write_text("recovery controller\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(current), "add", str(helper)], check=True)
+        subprocess.run(
+            ["git", "-C", str(current), "commit", "-qm", "recovery"],
+            check=True,
+        )
+        current_commit = subprocess.run(
+            ["git", "-C", str(current), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        evidence = workflow._validate_adopted_cache_repositories(
+            producer_repo=producer,
+            producer_commit=producer_commit,
+            current_repo=current,
+            current_commit=current_commit,
+            training_commit=training_commit,
+        )
+        self.assertTrue(evidence["changes_are_recovery_allowlisted"])
+        self.assertEqual(
+            evidence["recovery_changed_paths"],
+            ["tools/slurm/vjepa2_frontier_workflow.py"],
+        )
+
+        scientific = current / "tools/vjepa2_nfe_frontier.py"
+        scientific.write_text("changed science\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(current), "add", str(scientific)], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(current), "commit", "-qm", "bad science"],
+            check=True,
+        )
+        bad_commit = subprocess.run(
+            ["git", "-C", str(current), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with self.assertRaisesRegex(
+            workflow.WorkflowError, "non-orchestration paths"
+        ):
+            workflow._validate_adopted_cache_repositories(
+                producer_repo=producer,
+                producer_commit=producer_commit,
+                current_repo=current,
+                current_commit=bad_commit,
+                training_commit=training_commit,
+            )
+
 
 class FrontierSlurmContractTest(unittest.TestCase):
     def test_all_shell_entrypoints_parse(self) -> None:
@@ -342,6 +712,8 @@ class FrontierSlurmContractTest(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "if [[ \"$*\" == *\"rev-parse HEAD\"* ]]; then "
                 "echo eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee; fi\n"
+                f"if [[ \"$*\" == *\"rev-parse --show-toplevel\"* ]]; then "
+                f"echo {str(repo)!r}; fi\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -424,6 +796,16 @@ class FrontierSlurmContractTest(unittest.TestCase):
         self.assertIn("terminal_success)", source)
         self.assertIn('"${FINAL_JOB_DEPENDENCY_ARGS[@]}"', source)
         self.assertNotIn("frontier-lockbox", source)
+        final_gate = source[source.index('FINAL_GATE_JOB_ID="$(') :]
+        final_gate = final_gate[: final_gate.index("QUALITY_JOB_ARGS=(")]
+        self.assertIn("--gpus-per-node=1", final_gate)
+        selection = source[source.index('SELECT_JOB_ID="$(') :]
+        selection = selection[: selection.index('"$PYTHON_BIN" -')]
+        self.assertIn("--gpus-per-node=1", selection)
+        continuation = SELECTION_GATE.read_text(encoding="utf-8")
+        confirmation = continuation[continuation.index('CONFIRM_JOB_ID="$(') :]
+        confirmation = confirmation[: confirmation.index('TIMING_JOB_ID="$(')]
+        self.assertIn("--gpus-per-node=1", confirmation)
 
     def test_cache_is_one_b200_fresh_and_never_overwrites(self) -> None:
         source = CACHE.read_text(encoding="utf-8")
@@ -460,6 +842,20 @@ class FrontierSlurmContractTest(unittest.TestCase):
         self.assertIn('PARTITION="batch"', source)
         self.assertIn('ACCOUNT="coreai_chef_posttrain"', source)
         self.assertIn('QOS="normal"', source)
+        self.assertIn("--adopt-cache-job-id", source)
+        self.assertIn(
+            'SCIENTIFIC_EVALUATOR_COMMIT="${ADOPTION_VALUES[1]}"', source
+        )
+        self.assertIn(
+            '--repo-root "$SCIENTIFIC_REPO_ROOT"', source
+        )
+        self.assertIn(
+            '--evaluator-commit "$SCIENTIFIC_EVALUATOR_COMMIT"', source
+        )
+        self.assertIn('"cache_job_adopted": adoption_evidence is not None', source)
+        self.assertIn('"cache_adoption_evidence": adoption_evidence', source)
+        self.assertIn('"controller_repo_root": controller_repo_root', source)
+        self.assertIn('"controller_git_commit": controller_commit', source)
         self.assertIn(
             '[[ "$TRAINING_REPO_ROOT" != "$REPO_ROOT" ]]', source
         )

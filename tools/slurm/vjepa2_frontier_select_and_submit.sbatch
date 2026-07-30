@@ -2,6 +2,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=01:00:00
@@ -26,6 +27,8 @@ REPO_ROOT=""
 STUDY_ROOT=""
 TRAINING_COMMIT=""
 EVALUATOR_COMMIT=""
+SCIENTIFIC_REPO_ROOT=""
+SCIENTIFIC_EVALUATOR_COMMIT=""
 PYTHON_BIN=""
 WAN_DIR_VALUE=""
 VIDEOX_HOME_VALUE=""
@@ -49,6 +52,8 @@ while (($#)); do
     --study-root) STUDY_ROOT="${2:?}"; shift 2 ;;
     --training-commit) TRAINING_COMMIT="${2:?}"; shift 2 ;;
     --evaluator-commit) EVALUATOR_COMMIT="${2:?}"; shift 2 ;;
+    --scientific-repo-root) SCIENTIFIC_REPO_ROOT="${2:?}"; shift 2 ;;
+    --scientific-evaluator-commit) SCIENTIFIC_EVALUATOR_COMMIT="${2:?}"; shift 2 ;;
     --python) PYTHON_BIN="${2:?}"; shift 2 ;;
     --wan-dir) WAN_DIR_VALUE="${2:?}"; shift 2 ;;
     --videox-home) VIDEOX_HOME_VALUE="${2:?}"; shift 2 ;;
@@ -69,6 +74,12 @@ while (($#)); do
   esac
 done
 
+if [[ -z "$SCIENTIFIC_REPO_ROOT" ]]; then
+  SCIENTIFIC_REPO_ROOT="$REPO_ROOT"
+fi
+if [[ -z "$SCIENTIFIC_EVALUATOR_COMMIT" ]]; then
+  SCIENTIFIC_EVALUATOR_COMMIT="$EVALUATOR_COMMIT"
+fi
 [[ -n "${SLURM_JOB_ID:-}" && -z "${SLURM_ARRAY_TASK_ID:-}" ]] || \
   die "selection gate requires a non-array Slurm allocation"
 [[ "${SLURM_RESTART_COUNT:-0}" == "0" ]] || die "selection gate is non-requeueable"
@@ -78,6 +89,28 @@ done
   die "repository is not at the frozen evaluator commit"
 [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] || \
   die "repository must be clean"
+[[ -d "$SCIENTIFIC_REPO_ROOT" && ! -L "$SCIENTIFIC_REPO_ROOT" ]] || \
+  die "scientific evaluator repository is invalid"
+[[ "$(cd "$SCIENTIFIC_REPO_ROOT" && pwd -P)" == "$SCIENTIFIC_REPO_ROOT" ]] || \
+  die "scientific evaluator repository is not canonical"
+[[ "$(git -C "$SCIENTIFIC_REPO_ROOT" rev-parse --show-toplevel)" == \
+  "$SCIENTIFIC_REPO_ROOT" ]] || die "scientific evaluator is not a worktree root"
+[[ "$(git -C "$SCIENTIFIC_REPO_ROOT" rev-parse HEAD)" == \
+  "$SCIENTIFIC_EVALUATOR_COMMIT" ]] || \
+  die "scientific evaluator worktree HEAD changed"
+[[ -z "$(git -C "$SCIENTIFIC_REPO_ROOT" status \
+  --porcelain --untracked-files=all)" ]] || \
+  die "scientific evaluator worktree is dirty"
+git -C "$SCIENTIFIC_REPO_ROOT" merge-base --is-ancestor \
+  "$TRAINING_COMMIT" "$SCIENTIFIC_EVALUATOR_COMMIT" || \
+  die "scientific evaluator is not a training-commit descendant"
+git -C "$REPO_ROOT" merge-base --is-ancestor \
+  "$SCIENTIFIC_EVALUATOR_COMMIT" "$EVALUATOR_COMMIT" || \
+  die "controller does not descend from the scientific evaluator"
+git -C "$REPO_ROOT" diff --quiet \
+  "$SCIENTIFIC_EVALUATOR_COMMIT" "$EVALUATOR_COMMIT" -- \
+  tools/vjepa2_nfe_frontier.py || \
+  die "selection implementation differs between scientific and controller commits"
 for scalar in \
   "$PARTITION" "$QUALITY_MEMORY" "$CONTROL_MEMORY" "$TIMING_MEMORY" \
   "$ACCOUNT" "$QOS"; do
@@ -108,7 +141,7 @@ shopt -u nullglob
 [[ "${#VPM_ROWS[@]}" == "8" && "${#J1_ROWS[@]}" == "8" ]] || \
   die "validation must contain exactly eight rank files per arm"
 
-"$PYTHON_BIN" "$REPO_ROOT/tools/vjepa2_nfe_frontier.py" select \
+"$PYTHON_BIN" "$SCIENTIFIC_REPO_ROOT/tools/vjepa2_nfe_frontier.py" select \
   --j1-rows "${J1_ROWS[@]}" \
   --vpm-rows "${VPM_ROWS[@]}" \
   --split validation \
@@ -120,7 +153,7 @@ shopt -u nullglob
   --output "$SELECTION"
 
 set +e
-"$PYTHON_BIN" "$REPO_ROOT/tools/slurm/vjepa2_frontier_workflow.py" \
+"$PYTHON_BIN" "$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_workflow.py" \
   require-selection --selection "$SELECTION"
 ELIGIBILITY_STATUS=$?
 set -e
@@ -133,9 +166,9 @@ case "$ELIGIBILITY_STATUS" in
   *) die "selection failed confirmatory reproduction" ;;
 esac
 
-QUALITY_SBATCH="$REPO_ROOT/tools/slurm/vjepa2_frontier_quality.sbatch"
-CONFIRM_SBATCH="$REPO_ROOT/tools/slurm/vjepa2_frontier_confirm.sbatch"
-TIMING_SBATCH="$REPO_ROOT/tools/slurm/vjepa2_frontier_latency.sbatch"
+QUALITY_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_quality.sbatch"
+CONFIRM_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_confirm.sbatch"
+TIMING_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_latency.sbatch"
 for path in "$QUALITY_SBATCH" "$CONFIRM_SBATCH" "$TIMING_SBATCH"; do
   [[ -x "$path" ]] || die "workflow entrypoint is not executable: $path"
 done
@@ -151,10 +184,10 @@ SCHEDULER_OPTIONAL=()
 [[ -n "$ACCOUNT" ]] && SCHEDULER_OPTIONAL+=(--account="$ACCOUNT")
 [[ -n "$QOS" ]] && SCHEDULER_OPTIONAL+=(--qos="$QOS")
 COMMON_JOB_ARGS=(
-  --repo-root "$REPO_ROOT"
+  --repo-root "$SCIENTIFIC_REPO_ROOT"
   --study-root "$STUDY_ROOT"
   --training-commit "$TRAINING_COMMIT"
-  --evaluator-commit "$EVALUATOR_COMMIT"
+  --evaluator-commit "$SCIENTIFIC_EVALUATOR_COMMIT"
   --python "$PYTHON_BIN"
   --wan-dir "$WAN_DIR_VALUE"
   --videox-home "$VIDEOX_HOME_VALUE"
@@ -196,6 +229,7 @@ CONFIRM_JOB_ID="$(
     --nodes=1 \
     --ntasks=1 \
     --ntasks-per-node=1 \
+    --gpus-per-node=1 \
     --cpus-per-task="$CONTROL_CPUS" \
     --mem="$CONTROL_MEMORY" \
     --time="$CONTROL_TIME" \
@@ -209,9 +243,9 @@ CONFIRM_JOB_ID="$(
     --error="$LOG_DIR/%x-%j.err" \
     "${SCHEDULER_OPTIONAL[@]}" \
     "$CONFIRM_SBATCH" \
-    --repo-root "$REPO_ROOT" \
+    --repo-root "$SCIENTIFIC_REPO_ROOT" \
     --study-root "$STUDY_ROOT" \
-    --evaluator-commit "$EVALUATOR_COMMIT" \
+    --evaluator-commit "$SCIENTIFIC_EVALUATOR_COMMIT" \
     --python "$PYTHON_BIN"
 )" || die "Slurm rejected lockbox confirmation job"
 CONFIRM_DEPENDENCY="$(normalize_job_id "$CONFIRM_JOB_ID")"
@@ -242,7 +276,9 @@ normalize_job_id "$TIMING_JOB_ID" >/dev/null
 
 "$PYTHON_BIN" - \
   "$CONTINUATION" "$SELECTION" "$SLURM_JOB_ID" \
-  "$LOCKBOX_JOB_ID" "$CONFIRM_JOB_ID" "$TIMING_JOB_ID" <<'PY'
+  "$LOCKBOX_JOB_ID" "$CONFIRM_JOB_ID" "$TIMING_JOB_ID" \
+  "$REPO_ROOT" "$EVALUATOR_COMMIT" "$SCIENTIFIC_REPO_ROOT" \
+  "$SCIENTIFIC_EVALUATOR_COMMIT" <<'PY'
 import datetime
 import hashlib
 import json
@@ -256,6 +292,10 @@ from pathlib import Path
     lockbox_job,
     confirmation_job,
     timing_job,
+    controller_repo_root,
+    controller_commit,
+    scientific_repo_root,
+    scientific_evaluator_commit,
 ) = sys.argv[1:]
 selection_bytes = Path(selection_path).read_bytes()
 selection = json.loads(selection_bytes)
@@ -270,6 +310,10 @@ payload = {
         "confirmatory_eligible": selection["confirmatory_eligible"],
     },
     "selection_gate_job_id": selection_job,
+    "controller_repo_root": controller_repo_root,
+    "controller_git_commit": controller_commit,
+    "scientific_evaluator_repo_root": scientific_repo_root,
+    "scientific_evaluator_git_commit": scientific_evaluator_commit,
     "lockbox_quality_array_job_id": lockbox_job,
     "lockbox_quality_dependency": f"afterok:{selection_job}",
     "confirmation_job_id": confirmation_job,

@@ -10,8 +10,12 @@ evaluators.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import pwd
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -30,6 +34,33 @@ from tools import vjepa2_nfe_frontier as frontier  # noqa: E402
 
 WELL_FORMED_INELIGIBLE = 3
 FINAL_ARRAY_TASK_IDS = frozenset(range(5))
+ADOPTED_CACHE_CODE_PATHS = (
+    "projects/latent_action_models/lam",
+    "robot_wm/datasets",
+    "robot_wm/modeling",
+    "tools/build_vjepa2_clip_manifests.py",
+    "tools/extract_vjepa2_targets.py",
+    "tools/vjepa2_frontier_lockbox.py",
+    "tools/vjepa2_nfe_frontier.py",
+    "tools/evaluate_vjepa2_quality.py",
+    "tools/benchmark_vjepa2_inference.py",
+    "tools/benchmark_vjepa2_frontier_latency.py",
+    "tools/slurm/vjepa2_frontier_cache.sbatch",
+    "tools/slurm/vjepa2_frontier_quality.sbatch",
+    "tools/slurm/vjepa2_frontier_latency.sbatch",
+)
+ADOPTED_RECOVERY_ALLOWED_PATHS = frozenset(
+    {
+        "docs/experiments/VJEPA2_NFE_FRONTIER_PROTOCOL.md",
+        "robot_wm/tests/test_vjepa2_frontier_slurm.py",
+        "tools/slurm/README.md",
+        "tools/slurm/submit_vjepa2_frontier_workflow.sh",
+        "tools/slurm/vjepa2_frontier_confirm.sbatch",
+        "tools/slurm/vjepa2_frontier_final_gate.sbatch",
+        "tools/slurm/vjepa2_frontier_select_and_submit.sbatch",
+        "tools/slurm/vjepa2_frontier_workflow.py",
+    }
+)
 ACTIVE_SLURM_STATES = {
     "CONFIGURING",
     "COMPLETING",
@@ -400,6 +431,476 @@ def command_classify_final_job(args: argparse.Namespace) -> int:
     return 0
 
 
+def _git(repo: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise WorkflowError(
+            f"git {' '.join(arguments)} failed for {repo}: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    return completed.stdout.strip()
+
+
+def _validate_adopted_cache_repositories(
+    *,
+    producer_repo: Path,
+    producer_commit: str,
+    current_repo: Path,
+    current_commit: str,
+    training_commit: str,
+) -> dict[str, Any]:
+    if producer_repo == current_repo:
+        raise WorkflowError(
+            "adopted cache producer and recovery controller need distinct worktrees"
+        )
+    if re.fullmatch(r"[0-9a-f]{40}", producer_commit) is None:
+        raise WorkflowError("adopted cache evaluator commit is invalid")
+    if re.fullmatch(r"[0-9a-f]{40}", current_commit) is None:
+        raise WorkflowError("recovery evaluator commit is invalid")
+    for repo, commit, label in (
+        (producer_repo, producer_commit, "adopted cache producer"),
+        (current_repo, current_commit, "recovery controller"),
+    ):
+        if _git(repo, "rev-parse", "--show-toplevel") != str(repo):
+            raise WorkflowError(f"{label} path is not a Git worktree root")
+        if _git(repo, "rev-parse", "HEAD") != commit:
+            raise WorkflowError(f"{label} worktree HEAD changed")
+        if _git(repo, "status", "--porcelain", "--untracked-files=all"):
+            raise WorkflowError(f"{label} worktree is dirty")
+    compatibility = frontier.git_inference_compatibility(
+        producer_repo,
+        training_commit=training_commit,
+        tool_commit=producer_commit,
+    )
+    descendant = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(current_repo),
+            "merge-base",
+            "--is-ancestor",
+            producer_commit,
+            current_commit,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if descendant.returncode:
+        raise WorkflowError(
+            "recovery evaluator is not a descendant of the adopted cache evaluator"
+        )
+    changed_paths = {
+        value
+        for value in _git(
+            current_repo,
+            "diff",
+            "--name-only",
+            producer_commit,
+            current_commit,
+            "--",
+        ).splitlines()
+        if value
+    }
+    unexpected_changes = sorted(changed_paths - ADOPTED_RECOVERY_ALLOWED_PATHS)
+    if unexpected_changes:
+        raise WorkflowError(
+            "recovery commit changes non-orchestration paths: "
+            f"{unexpected_changes}"
+        )
+    code_objects: dict[str, str] = {}
+    for path in ADOPTED_CACHE_CODE_PATHS:
+        producer_object = _git(
+            current_repo, "rev-parse", f"{producer_commit}:{path}"
+        )
+        current_object = _git(
+            current_repo, "rev-parse", f"{current_commit}:{path}"
+        )
+        if producer_object != current_object:
+            raise WorkflowError(
+                f"adopted cache/scientific code changed in recovery commit: {path}"
+            )
+        code_objects[path] = producer_object
+    return {
+        "producer_commit_is_compatible_with_training": True,
+        "recovery_commit_descends_from_producer": True,
+        "scientific_code_objects_unchanged": True,
+        "recovery_changed_paths": sorted(changed_paths),
+        "changes_are_recovery_allowlisted": True,
+        "inference_code_compatibility": compatibility,
+        "code_objects": code_objects,
+    }
+
+
+def _requested_tres(value: str) -> dict[str, str]:
+    records: dict[str, str] = {}
+    for component in value.split(","):
+        key, separator, item = component.strip().partition("=")
+        if not separator or not key or not item or key in records:
+            raise WorkflowError("adopted cache ReqTRES is malformed")
+        records[key] = item
+    return records
+
+
+def _memory_value(value: str) -> str:
+    normalized = value.strip()
+    if normalized.endswith(("c", "n")):
+        normalized = normalized[:-1]
+    if re.fullmatch(r"[1-9][0-9]*[KMGTPE]?", normalized, re.IGNORECASE) is None:
+        raise WorkflowError(f"adopted cache memory value is malformed: {value}")
+    return normalized.upper()
+
+
+def _submit_line_tokens(value: str) -> list[str]:
+    try:
+        tokens = shlex.split(value)
+    except ValueError as exc:
+        raise WorkflowError("adopted cache SubmitLine is not valid shell syntax") from exc
+    if not tokens or Path(tokens[0]).name != "sbatch":
+        raise WorkflowError("adopted cache SubmitLine is not an sbatch command")
+    return tokens
+
+
+def _scontrol_fields(value: str) -> dict[str, str]:
+    records: dict[str, str] = {}
+    for component in value.strip().split():
+        key, separator, item = component.partition("=")
+        if not separator or not key or key in records:
+            raise WorkflowError("adopted cache scontrol record is malformed")
+        records[key] = item
+    return records
+
+
+def _validate_adopted_cache_scontrol(
+    args: argparse.Namespace,
+    row: str,
+    *,
+    expected_script: Path,
+    expected_user: str,
+) -> dict[str, str]:
+    fields = _scontrol_fields(row)
+    expected_dependency = f"afterok:{args.final_job_id}"
+    exact = {
+        "JobId": str(args.job_id),
+        "JobName": "vjepa2-frontier-cache",
+        "UserId": f"{expected_user}({os.getuid()})",
+        "Account": args.account,
+        "QOS": args.qos,
+        "JobState": "PENDING",
+        "Reason": "Dependency",
+        "Requeue": "0",
+        "Restarts": "0",
+        "BatchFlag": "1",
+        "ExitCode": "0:0",
+        "TimeLimit": args.cache_time,
+        "Partition": args.partition,
+        "NumNodes": "1-1",
+        "NumCPUs": str(args.cache_cpus),
+        "NumTasks": "1",
+        "CPUs/Task": str(args.cache_cpus),
+        "AllocTRES": "(null)",
+        "Command": str(expected_script),
+        "WorkDir": pwd.getpwuid(os.getuid()).pw_dir,
+        "StdErr": (
+            f"{args.log_dir}/vjepa2-frontier-cache-{args.job_id}.err"
+        ),
+        "StdOut": (
+            f"{args.log_dir}/vjepa2-frontier-cache-{args.job_id}.out"
+        ),
+        "TresPerNode": "gres/gpu:1",
+        "TresPerTask": f"cpu={args.cache_cpus}",
+    }
+    for key, expected in exact.items():
+        if fields.get(key) != expected:
+            raise WorkflowError(
+                f"adopted cache scontrol {key} differs: "
+                f"{fields.get(key)!r} != {expected!r}"
+            )
+    if re.fullmatch(
+        rf"{re.escape(expected_dependency)}(?:_\*)?\(unfulfilled\)",
+        fields.get("Dependency", ""),
+    ) is None:
+        raise WorkflowError("adopted cache scontrol dependency differs")
+    tres = _requested_tres(fields.get("ReqTRES", ""))
+    gpu_values = [
+        item
+        for key, item in tres.items()
+        if key == "gres/gpu" or key.startswith("gres/gpu:")
+    ]
+    if (
+        tres.get("node") != "1"
+        or tres.get("cpu") != str(args.cache_cpus)
+        or _memory_value(tres.get("mem", "")) != _memory_value(args.cache_memory)
+        or gpu_values != ["1"]
+    ):
+        raise WorkflowError("adopted cache scontrol ReqTRES differs")
+    return {
+        key: fields[key]
+        for key in (
+            "JobId",
+            "UserId",
+            "JobState",
+            "Reason",
+            "Dependency",
+            "Requeue",
+            "Restarts",
+            "BatchFlag",
+            "ExitCode",
+            "ReqTRES",
+            "Command",
+            "StdErr",
+            "StdOut",
+        )
+    }
+
+
+def validate_adopted_cache_row(
+    args: argparse.Namespace,
+    row: str,
+    scontrol_row: str,
+) -> dict[str, Any]:
+    fields = row.rstrip("\n").split("|")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) != 13:
+        raise WorkflowError("adopted cache accounting row has the wrong schema")
+    (
+        job_id,
+        job_name,
+        user,
+        raw_state,
+        exit_code,
+        account,
+        qos,
+        partition,
+        req_tres,
+        req_cpus,
+        req_mem,
+        time_limit,
+        submit_line,
+    ) = (value.strip() for value in fields)
+    expected_job_id = str(args.job_id)
+    if job_id != expected_job_id or re.fullmatch(r"[1-9][0-9]*", job_id) is None:
+        raise WorkflowError("adopted cache accounting JobID differs")
+    state = raw_state.split("+", 1)[0].split(maxsplit=1)[0].upper()
+    if state != "PENDING" or exit_code != "0:0":
+        raise WorkflowError(
+            "adopted cache job must still be PENDING with ExitCode 0:0"
+        )
+    expected_user = pwd.getpwuid(os.getuid()).pw_name
+    if user != expected_user:
+        raise WorkflowError(
+            f"adopted cache owner differs: {user!r} != {expected_user!r}"
+        )
+    expected_scalars = {
+        "JobName": (job_name, "vjepa2-frontier-cache"),
+        "Account": (account, args.account),
+        "QOS": (qos, args.qos),
+        "Partition": (partition, args.partition),
+        "ReqCPUS": (req_cpus, str(args.cache_cpus)),
+        "Timelimit": (time_limit, args.cache_time),
+    }
+    for label, (observed, expected) in expected_scalars.items():
+        if observed != expected:
+            raise WorkflowError(
+                f"adopted cache {label} differs: {observed!r} != {expected!r}"
+            )
+    if _memory_value(req_mem) != _memory_value(args.cache_memory):
+        raise WorkflowError("adopted cache ReqMem differs")
+    tres = _requested_tres(req_tres)
+    gpu_values = [
+        value
+        for key, value in tres.items()
+        if key == "gres/gpu" or key.startswith("gres/gpu:")
+    ]
+    if any(re.fullmatch(r"[1-9][0-9]*", value) is None for value in gpu_values):
+        raise WorkflowError("adopted cache GPU TRES is malformed")
+    gpu_count = sum(
+        int(value)
+        for value in gpu_values
+    )
+    if (
+        tres.get("node") != "1"
+        or tres.get("cpu") != str(args.cache_cpus)
+        or _memory_value(tres.get("mem", "")) != _memory_value(args.cache_memory)
+        or gpu_count != 1
+    ):
+        raise WorkflowError("adopted cache requested TRES differ")
+    expected_dependency = f"afterok:{args.final_job_id}"
+
+    tokens = _submit_line_tokens(submit_line)
+    try:
+        script_index = next(
+            index
+            for index, token in enumerate(tokens[1:], start=1)
+            if not token.startswith("-")
+        )
+    except StopIteration as exc:
+        raise WorkflowError("adopted cache SubmitLine lacks a batch script") from exc
+    script_arguments = tokens[script_index + 1 :]
+    if len(script_arguments) % 2:
+        raise WorkflowError("adopted cache script arguments are not name/value pairs")
+    argument_names = script_arguments[::2]
+    if any(not name.startswith("--") for name in argument_names) or len(
+        argument_names
+    ) != len(set(argument_names)):
+        raise WorkflowError("adopted cache script arguments are malformed")
+    submitted = dict(zip(argument_names, script_arguments[1::2]))
+    producer_repo_value = submitted.get("--repo-root", "")
+    producer_commit = submitted.get("--evaluator-commit", "")
+    producer_repo = _canonical_directory(
+        producer_repo_value, "adopted cache producer repository"
+    )
+    current_repo = _canonical_directory(
+        args.current_repo_root, "recovery controller repository"
+    )
+    expected_script = producer_repo / "tools/slurm/vjepa2_frontier_cache.sbatch"
+    expected_tokens = [
+        "--parsable",
+        "--nodes=1",
+        "--ntasks=1",
+        "--ntasks-per-node=1",
+        "--gpus-per-node=1",
+        f"--cpus-per-task={args.cache_cpus}",
+        f"--mem={args.cache_memory}",
+        f"--time={args.cache_time}",
+        f"--partition={args.partition}",
+        f"--dependency={expected_dependency}",
+        "--no-requeue",
+        "--open-mode=append",
+        "--export=ALL",
+        "--job-name=vjepa2-frontier-cache",
+        f"--output={args.log_dir}/%x-%j.out",
+        f"--error={args.log_dir}/%x-%j.err",
+        f"--account={args.account}",
+        f"--qos={args.qos}",
+        str(expected_script),
+        "--repo-root",
+        str(producer_repo),
+        "--study-root",
+        args.study_root,
+        "--training-commit",
+        args.training_commit,
+        "--evaluator-commit",
+        producer_commit,
+        "--python",
+        args.python,
+        "--extractor-python",
+        args.extractor_python,
+        "--vjepa-source",
+        args.vjepa_source,
+        "--vjepa-checkpoint",
+        args.vjepa_checkpoint,
+        "--vjepa-checkpoint-sha256",
+        args.vjepa_checkpoint_sha256,
+        "--pca",
+        args.pca,
+        "--pca-sha256",
+        args.pca_sha256,
+        "--train-manifest",
+        args.train_manifest,
+    ]
+    if tokens[1:] != expected_tokens:
+        raise WorkflowError(
+            "adopted cache SubmitLine differs from the exact expected cache command"
+        )
+    scontrol_evidence = _validate_adopted_cache_scontrol(
+        args,
+        scontrol_row,
+        expected_script=expected_script,
+        expected_user=expected_user,
+    )
+    repository_evidence = _validate_adopted_cache_repositories(
+        producer_repo=producer_repo,
+        producer_commit=producer_commit,
+        current_repo=current_repo,
+        current_commit=args.current_evaluator_commit,
+        training_commit=args.training_commit,
+    )
+    return {
+        "status": "pending_cache_job_adopted",
+        "job_id": job_id,
+        "user": user,
+        "state": state,
+        "exit_code": exit_code,
+        "account": account,
+        "qos": qos,
+        "partition": partition,
+        "requested_tres": tres,
+        "dependency": expected_dependency,
+        "scontrol": scontrol_evidence,
+        "submit_line_exact_match": True,
+        "submit_line_sha256": hashlib.sha256(
+            submit_line.encode("utf-8")
+        ).hexdigest(),
+        "producer_repo_root": str(producer_repo),
+        "producer_evaluator_commit": producer_commit,
+        "recovery_repo_root": str(current_repo),
+        "recovery_evaluator_commit": args.current_evaluator_commit,
+        "repository_evidence": repository_evidence,
+    }
+
+
+def command_validate_adopted_cache(args: argparse.Namespace) -> int:
+    completed = subprocess.run(
+        [
+            "sacct",
+            "--noheader",
+            "--parsable2",
+            "--allocations",
+            "--duplicates",
+            "--jobs",
+            str(args.job_id),
+            "--format="
+            "JobID%64,JobName%64,User%64,State%32,ExitCode,Account%64,QOS%64,"
+            "Partition%64,ReqTRES%512,ReqCPUS,ReqMem,Timelimit,"
+            "SubmitLine%4096",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise WorkflowError(
+            "could not query adopted cache Slurm accounting: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    rows = [line for line in completed.stdout.splitlines() if line.strip()]
+    if len(rows) != 1:
+        raise WorkflowError(
+            f"adopted cache accounting must contain exactly one row, found {len(rows)}"
+        )
+    control = subprocess.run(
+        ["scontrol", "show", "job", "--oneliner", str(args.job_id)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if control.returncode:
+        raise WorkflowError(
+            "could not query adopted cache live Slurm state: "
+            f"{control.stderr.strip() or control.stdout.strip()}"
+        )
+    control_rows = [
+        line for line in control.stdout.splitlines() if line.strip()
+    ]
+    if len(control_rows) != 1:
+        raise WorkflowError(
+            "adopted cache scontrol query must contain exactly one row, "
+            f"found {len(control_rows)}"
+        )
+    evidence = validate_adopted_cache_row(args, rows[0], control_rows[0])
+    print(evidence["producer_repo_root"])
+    print(evidence["producer_evaluator_commit"])
+    print(json.dumps(evidence, sort_keys=True))
+    return 0
+
+
 def command_require_selection(args: argparse.Namespace) -> int:
     """Return 0 only for a reproducible confirmatory validation winner.
 
@@ -481,6 +982,30 @@ def build_parser() -> argparse.ArgumentParser:
     classify = commands.add_parser("classify-final-job")
     classify.add_argument("--final-job-id", required=True)
     classify.set_defaults(handler=command_classify_final_job)
+
+    adoption = commands.add_parser("validate-adopted-cache")
+    adoption.add_argument("--job-id", required=True)
+    adoption.add_argument("--study-root", required=True)
+    adoption.add_argument("--training-commit", required=True)
+    adoption.add_argument("--current-repo-root", required=True)
+    adoption.add_argument("--current-evaluator-commit", required=True)
+    adoption.add_argument("--final-job-id", required=True)
+    adoption.add_argument("--python", required=True)
+    adoption.add_argument("--extractor-python", required=True)
+    adoption.add_argument("--vjepa-source", required=True)
+    adoption.add_argument("--vjepa-checkpoint", required=True)
+    adoption.add_argument("--vjepa-checkpoint-sha256", required=True)
+    adoption.add_argument("--pca", required=True)
+    adoption.add_argument("--pca-sha256", required=True)
+    adoption.add_argument("--train-manifest", required=True)
+    adoption.add_argument("--partition", required=True)
+    adoption.add_argument("--account", required=True)
+    adoption.add_argument("--qos", required=True)
+    adoption.add_argument("--cache-time", required=True)
+    adoption.add_argument("--cache-cpus", required=True)
+    adoption.add_argument("--cache-memory", required=True)
+    adoption.add_argument("--log-dir", required=True)
+    adoption.set_defaults(handler=command_validate_adopted_cache)
 
     selection = commands.add_parser("require-selection")
     selection.add_argument("--selection", required=True)

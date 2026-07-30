@@ -58,6 +58,56 @@ Failed, missing, duplicate, extra, or ambiguous accounting aborts submission.
 The unrelated original paired job `481133` may finish independently against
 the untouched training checkout.
 
+All `batch` control allocations request one B200, including the final-artifact
+gate, validation-selection gate, and lockbox-confirmation job. The GPU is a
+cluster scheduling requirement for this partition; those control steps do not
+add teacher calls or change the scientific comparison.
+
+### Exact cache-only recovery
+
+If submission stops after Slurm accepts the cache job but before it accepts the
+final-artifact gate, do not cancel, requeue, or duplicate that cache. The
+launcher has one narrow recovery mode:
+
+```bash
+"$EVALUATOR_REPO/tools/slurm/submit_vjepa2_frontier_workflow.sh" \
+  --evaluator-commit "$EVALUATOR_COMMIT" \
+  --adopt-cache-job-id 481556
+
+# After reviewing the read-only recovery preflight:
+"$EVALUATOR_REPO/tools/slurm/submit_vjepa2_frontier_workflow.sh" \
+  --evaluator-commit "$EVALUATOR_COMMIT" \
+  --adopt-cache-job-id 481556 \
+  --execute
+```
+
+The recovery preflight requires an otherwise empty
+`_frontier_slurm/logs` tree, no submission record, and no scientific frontier
+output. It queries Slurm accounting with duplicate-ID visibility and accepts
+exactly one still-pending, non-array cache allocation. Account, QOS, partition,
+CPU/GPU/memory/time resources, dependency, and the complete tokenized
+`SubmitLine` must reproduce the expected cache command and every immutable
+path, digest, and interpreter argument. Because this cluster does not expose
+`Dependency` through `sacct`, the launcher cross-checks the live dependency,
+pending reason/state, ownership, restart flags, expanded log paths, command,
+and resources through read-only `scontrol show job --oneliner`. The combined
+check is repeated under an exclusive workflow lock immediately before any new
+submission.
+
+The adopted cache remains bound to its original clean evaluator worktree and
+commit. Keep that worktree unchanged while the job is pending or running.
+Recovery runs from a second clean descendant controller worktree and accepts
+only an allowlisted orchestration-only diff. Validation, conditional lockbox
+scoring, confirmation, and timing continue to use the original scientific
+evaluator commit, so the lockbox registration and every quality/latency record
+retain one evaluator identity. The final submission record stores both roles
+and the full validated cache-adoption evidence.
+
+Any running/completed/failed cache state, changed command or resource, reused
+job ID, nonempty log/output tree, dirty worktree, changed scientific code, or
+pre-existing submission record aborts this recovery path. It never calls
+`scancel`, a mutating `scontrol` command, or a second cache `sbatch`.
+
 Every scientific output is fresh-only. The launcher refuses any pre-existing
 frontier output tree, freezes one clean evaluator commit that is an
 inference-tree-identical descendant of the training commit, and verifies that

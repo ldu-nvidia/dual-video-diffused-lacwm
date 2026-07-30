@@ -9,6 +9,7 @@ STUDY_ROOT="${VJEPA_FRONTIER_STUDY_ROOT:-$LACWM_BASE/runs/dual_video_diffusion/v
 TRAINING_COMMIT="${VJEPA_FRONTIER_TRAINING_COMMIT:-9cf8e6922f35a5d6645e3128545953723bf54da2}"
 EVALUATOR_COMMIT=""
 FINAL_JOB_ID="${VJEPA_FINAL_U1000_JOB_ID:-481132}"
+ADOPT_CACHE_JOB_ID=""
 
 PYTHON_BIN="${LACWM_PYTHON:-$LACWM_BASE/envs/lacwm-b200-py310/bin/python}"
 EXTRACTOR_PYTHON="${VJEPA_EXTRACTOR_PYTHON:-$LACWM_BASE/envs/vjepa2-extractor-py311/bin/python3.11}"
@@ -77,6 +78,7 @@ Path/provenance options:
   --training-commit SHA
   --evaluator-commit SHA       Clean descendant; defaults to current HEAD
   --final-u1000-job-id ID      Default: 481132
+  --adopt-cache-job-id ID      Recover one exact pending cache-only submission
   --python PATH                LACWM runtime interpreter
   --extractor-python PATH      Official V-JEPA extraction interpreter
   --wan-dir PATH
@@ -111,6 +113,7 @@ while (($#)); do
     --training-commit) TRAINING_COMMIT="${2:?}"; shift 2 ;;
     --evaluator-commit) EVALUATOR_COMMIT="${2:?}"; shift 2 ;;
     --final-u1000-job-id) FINAL_JOB_ID="${2:?}"; shift 2 ;;
+    --adopt-cache-job-id) ADOPT_CACHE_JOB_ID="${2:?}"; shift 2 ;;
     --python) PYTHON_BIN="${2:?}"; shift 2 ;;
     --extractor-python) EXTRACTOR_PYTHON="${2:?}"; shift 2 ;;
     --wan-dir) WAN_DIR_VALUE="${2:?}"; shift 2 ;;
@@ -136,6 +139,8 @@ done
 
 [[ "$TRAINING_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "invalid training commit"
 [[ "$FINAL_JOB_ID" =~ ^[1-9][0-9]*$ ]] || die "invalid final update-1000 job ID"
+[[ -z "$ADOPT_CACHE_JOB_ID" || "$ADOPT_CACHE_JOB_ID" =~ ^[1-9][0-9]*$ ]] || \
+  die "invalid adopted cache job ID"
 [[ "$VJEPA_CHECKPOINT_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
   die "invalid checkpoint SHA-256"
 [[ "$PCA_STATS_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "invalid PCA SHA-256"
@@ -251,7 +256,7 @@ TRAINING_REPO_ROOT="${STUDY_VALUES[2]}"
   --training-commit "$TRAINING_COMMIT" \
   --final-job-id "$FINAL_JOB_ID"
 
-FRONTIER_PATHS=(
+SCIENTIFIC_FRONTIER_PATHS=(
   "$STUDY_ROOT/frontier_lockbox"
   "$STUDY_ROOT/vpm_parameter_matched_video/frontier_quality"
   "$STUDY_ROOT/j1_joint_auxiliary_leads/frontier_quality"
@@ -260,11 +265,80 @@ FRONTIER_PATHS=(
   "$STUDY_ROOT/frontier_lockbox_confirmation.json"
   "$STUDY_ROOT/frontier_latency"
   "$STUDY_ROOT/frontier_final_report.json"
-  "$STUDY_ROOT/_frontier_slurm"
 )
-for path in "${FRONTIER_PATHS[@]}"; do
+for path in "${SCIENTIFIC_FRONTIER_PATHS[@]}"; do
   [[ ! -e "$path" ]] || die "fresh frontier path already exists: $path"
 done
+
+WORKFLOW_ROOT="$STUDY_ROOT/_frontier_slurm"
+LOG_DIR="$WORKFLOW_ROOT/logs"
+SUBMISSION_RECORD="$WORKFLOW_ROOT/submission.json"
+SCIENTIFIC_REPO_ROOT="$REPO_ROOT"
+SCIENTIFIC_EVALUATOR_COMMIT="$EVALUATOR_COMMIT"
+ADOPTION_EVIDENCE_JSON="null"
+if [[ -n "$ADOPT_CACHE_JOB_ID" ]]; then
+  [[ -d "$WORKFLOW_ROOT" && ! -L "$WORKFLOW_ROOT" ]] || \
+    die "cache adoption requires the existing non-symlink workflow directory"
+  [[ "$(cd "$WORKFLOW_ROOT" && pwd -P)" == "$WORKFLOW_ROOT" ]] || \
+    die "cache adoption workflow directory is not canonical"
+  [[ -d "$LOG_DIR" && ! -L "$LOG_DIR" ]] || \
+    die "cache adoption requires the existing non-symlink log directory"
+  [[ ! -e "$SUBMISSION_RECORD" ]] || \
+    die "cache adoption refuses an existing submission record"
+  [[ -z "$(find "$WORKFLOW_ROOT" -mindepth 1 -maxdepth 1 \
+    ! -name logs -print -quit)" ]] || \
+    die "cache adoption found unexpected workflow state"
+  [[ -z "$(find "$LOG_DIR" -mindepth 1 -print -quit)" ]] || \
+    die "cache adoption requires an empty pending-job log directory"
+  command -v sacct >/dev/null 2>&1 || die "sacct is unavailable"
+  command -v scontrol >/dev/null 2>&1 || die "scontrol is unavailable"
+  ADOPTION_CHECK_ARGS=(
+    validate-adopted-cache
+    --job-id "$ADOPT_CACHE_JOB_ID"
+    --study-root "$STUDY_ROOT"
+    --training-commit "$TRAINING_COMMIT"
+    --current-repo-root "$REPO_ROOT"
+    --current-evaluator-commit "$EVALUATOR_COMMIT"
+    --final-job-id "$FINAL_JOB_ID"
+    --python "$PYTHON_BIN"
+    --extractor-python "$EXTRACTOR_PYTHON"
+    --vjepa-source "$VJEPA_SOURCE"
+    --vjepa-checkpoint "$VJEPA_CHECKPOINT"
+    --vjepa-checkpoint-sha256 "$VJEPA_CHECKPOINT_SHA256"
+    --pca "$PCA_STATS"
+    --pca-sha256 "$PCA_STATS_SHA256"
+    --train-manifest "$TRAIN_MANIFEST"
+    --partition "$PARTITION"
+    --account "$ACCOUNT"
+    --qos "$QOS"
+    --cache-time "$CACHE_TIME"
+    --cache-cpus "$CACHE_CPUS"
+    --cache-memory "$CACHE_MEMORY"
+    --log-dir "$LOG_DIR"
+  )
+  ADOPTION_OUTPUT="$(
+    "$PYTHON_BIN" "$WORKFLOW_HELPER" "${ADOPTION_CHECK_ARGS[@]}"
+  )" || die "pending cache job failed fail-closed adoption validation"
+  mapfile -t ADOPTION_VALUES <<<"$ADOPTION_OUTPUT"
+  [[ "${#ADOPTION_VALUES[@]}" == "3" ]] || \
+    die "cache adoption evidence is incomplete"
+  SCIENTIFIC_REPO_ROOT="${ADOPTION_VALUES[0]}"
+  SCIENTIFIC_EVALUATOR_COMMIT="${ADOPTION_VALUES[1]}"
+  ADOPTION_EVIDENCE_JSON="${ADOPTION_VALUES[2]}"
+  [[ "$SCIENTIFIC_REPO_ROOT" != "$TRAINING_REPO_ROOT" ]] || \
+    die "adopted scientific evaluator cannot be the training checkout"
+  for path in \
+    "$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_workflow.py" \
+    "$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_quality.sbatch" \
+    "$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_confirm.sbatch" \
+    "$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_latency.sbatch"; do
+    [[ -x "$path" ]] || \
+      die "adopted scientific evaluator entrypoint is unavailable: $path"
+  done
+else
+  [[ ! -e "$WORKFLOW_ROOT" ]] || \
+    die "fresh frontier path already exists: $WORKFLOW_ROOT"
+fi
 
 echo "V-JEPA NFE-frontier workflow preflight passed."
 echo "Study: $STUDY_ID"
@@ -272,6 +346,10 @@ echo "Isolated evaluator checkout: $REPO_ROOT"
 echo "Untouched training checkout: $TRAINING_REPO_ROOT"
 echo "Training commit: $TRAINING_COMMIT"
 echo "Frozen evaluator commit: $EVALUATOR_COMMIT (clean compatible descendant)"
+if [[ -n "$ADOPT_CACHE_JOB_ID" ]]; then
+  echo "Adopted pending cache: $ADOPT_CACHE_JOB_ID"
+  echo "Scientific evaluator: $SCIENTIFIC_EVALUATOR_COMMIT at $SCIENTIFIC_REPO_ROOT"
+fi
 echo "Final update-1000 job: $FINAL_JOB_ID (active/terminal mode resolved at execute)"
 echo "Cache: one B200, fresh 128-clip lockbox, approximately 1.92 GB"
 echo "Validation: separate VPM and J1 one-node/eight-B200 jobs"
@@ -285,6 +363,7 @@ fi
 
 command -v sbatch >/dev/null 2>&1 || die "sbatch is unavailable"
 command -v sacct >/dev/null 2>&1 || die "sacct is unavailable"
+command -v flock >/dev/null 2>&1 || die "flock is unavailable"
 FINAL_JOB_MODE="$(
   "$PYTHON_BIN" "$WORKFLOW_HELPER" classify-final-job \
     --final-job-id "$FINAL_JOB_ID"
@@ -302,11 +381,23 @@ case "$FINAL_JOB_MODE" in
     ;;
   *) die "unknown final-job scheduling mode: $FINAL_JOB_MODE" ;;
 esac
+if [[ -n "$ADOPT_CACHE_JOB_ID" ]]; then
+  exec 9>"$WORKFLOW_ROOT/workflow.lock"
+  flock -n 9 || die "another frontier recovery owns the workflow lock"
+  ADOPTION_RECHECK="$(
+    "$PYTHON_BIN" "$WORKFLOW_HELPER" "${ADOPTION_CHECK_ARGS[@]}"
+  )" || die "adopted cache changed before recovery submission"
+  [[ "$ADOPTION_RECHECK" == "$ADOPTION_OUTPUT" ]] || \
+    die "adopted cache evidence changed before recovery submission"
+fi
 WORKFLOW_ROOT="$STUDY_ROOT/_frontier_slurm"
 LOG_DIR="$WORKFLOW_ROOT/logs"
-mkdir "$WORKFLOW_ROOT"
-mkdir "$LOG_DIR"
-SUBMISSION_RECORD="$WORKFLOW_ROOT/submission.json"
+if [[ -z "$ADOPT_CACHE_JOB_ID" ]]; then
+  mkdir "$WORKFLOW_ROOT"
+  mkdir "$LOG_DIR"
+  exec 9>"$WORKFLOW_ROOT/workflow.lock"
+  flock -n 9 || die "another frontier submission owns the workflow lock"
+fi
 
 SCHEDULER_OPTIONAL=()
 [[ -n "$ACCOUNT" ]] && SCHEDULER_OPTIONAL+=(--account="$ACCOUNT")
@@ -318,39 +409,45 @@ normalize_job_id() {
   printf '%s\n' "${value%%[_;]*}"
 }
 
-CACHE_JOB_ID="$(
-  sbatch \
-    --parsable \
-    --nodes=1 \
-    --ntasks=1 \
-    --ntasks-per-node=1 \
-    --gpus-per-node=1 \
-    --cpus-per-task="$CACHE_CPUS" \
-    --mem="$CACHE_MEMORY" \
-    --time="$CACHE_TIME" \
-    --partition="$PARTITION" \
-    "${FINAL_JOB_DEPENDENCY_ARGS[@]}" \
-    --no-requeue \
-    --open-mode=append \
-    --export=ALL \
-    --job-name="vjepa2-frontier-cache" \
-    --output="$LOG_DIR/%x-%j.out" \
-    --error="$LOG_DIR/%x-%j.err" \
-    "${SCHEDULER_OPTIONAL[@]}" \
-    "$CACHE_SBATCH" \
-    --repo-root "$REPO_ROOT" \
-    --study-root "$STUDY_ROOT" \
-    --training-commit "$TRAINING_COMMIT" \
-    --evaluator-commit "$EVALUATOR_COMMIT" \
-    --python "$PYTHON_BIN" \
-    --extractor-python "$EXTRACTOR_PYTHON" \
-    --vjepa-source "$VJEPA_SOURCE" \
-    --vjepa-checkpoint "$VJEPA_CHECKPOINT" \
-    --vjepa-checkpoint-sha256 "$VJEPA_CHECKPOINT_SHA256" \
-    --pca "$PCA_STATS" \
-    --pca-sha256 "$PCA_STATS_SHA256" \
-    --train-manifest "$TRAIN_MANIFEST"
-)" || die "Slurm rejected lockbox cache job"
+if [[ -n "$ADOPT_CACHE_JOB_ID" ]]; then
+  CACHE_JOB_ID="$ADOPT_CACHE_JOB_ID"
+  CACHE_DEPENDENCY_RECORD="afterok:$FINAL_JOB_ID (adopted pending cache)"
+else
+  CACHE_JOB_ID="$(
+    sbatch \
+      --parsable \
+      --nodes=1 \
+      --ntasks=1 \
+      --ntasks-per-node=1 \
+      --gpus-per-node=1 \
+      --cpus-per-task="$CACHE_CPUS" \
+      --mem="$CACHE_MEMORY" \
+      --time="$CACHE_TIME" \
+      --partition="$PARTITION" \
+      "${FINAL_JOB_DEPENDENCY_ARGS[@]}" \
+      --no-requeue \
+      --open-mode=append \
+      --export=ALL \
+      --job-name="vjepa2-frontier-cache" \
+      --output="$LOG_DIR/%x-%j.out" \
+      --error="$LOG_DIR/%x-%j.err" \
+      "${SCHEDULER_OPTIONAL[@]}" \
+      "$CACHE_SBATCH" \
+      --repo-root "$REPO_ROOT" \
+      --study-root "$STUDY_ROOT" \
+      --training-commit "$TRAINING_COMMIT" \
+      --evaluator-commit "$EVALUATOR_COMMIT" \
+      --python "$PYTHON_BIN" \
+      --extractor-python "$EXTRACTOR_PYTHON" \
+      --vjepa-source "$VJEPA_SOURCE" \
+      --vjepa-checkpoint "$VJEPA_CHECKPOINT" \
+      --vjepa-checkpoint-sha256 "$VJEPA_CHECKPOINT_SHA256" \
+      --pca "$PCA_STATS" \
+      --pca-sha256 "$PCA_STATS_SHA256" \
+      --train-manifest "$TRAIN_MANIFEST"
+  )" || die "Slurm rejected lockbox cache job"
+  CACHE_DEPENDENCY_RECORD="$FINAL_JOB_DEPENDENCY_RECORD"
+fi
 CACHE_DEPENDENCY="$(normalize_job_id "$CACHE_JOB_ID")"
 
 FINAL_GATE_JOB_ID="$(
@@ -359,6 +456,7 @@ FINAL_GATE_JOB_ID="$(
     --nodes=1 \
     --ntasks=1 \
     --ntasks-per-node=1 \
+    --gpus-per-node=1 \
     --cpus-per-task="$CONTROL_CPUS" \
     --mem="$CONTROL_MEMORY" \
     --time="$CONTROL_TIME" \
@@ -376,16 +474,18 @@ FINAL_GATE_JOB_ID="$(
     --study-root "$STUDY_ROOT" \
     --training-commit "$TRAINING_COMMIT" \
     --evaluator-commit "$EVALUATOR_COMMIT" \
+    --scientific-repo-root "$SCIENTIFIC_REPO_ROOT" \
+    --scientific-evaluator-commit "$SCIENTIFIC_EVALUATOR_COMMIT" \
     --python "$PYTHON_BIN"
 )" || die "Slurm rejected final-artifact gate"
 FINAL_GATE_DEPENDENCY="$(normalize_job_id "$FINAL_GATE_JOB_ID")"
 VALIDATION_DEPENDENCY="afterok:$CACHE_DEPENDENCY:$FINAL_GATE_DEPENDENCY"
 
 QUALITY_JOB_ARGS=(
-  --repo-root "$REPO_ROOT"
+  --repo-root "$SCIENTIFIC_REPO_ROOT"
   --study-root "$STUDY_ROOT"
   --training-commit "$TRAINING_COMMIT"
-  --evaluator-commit "$EVALUATOR_COMMIT"
+  --evaluator-commit "$SCIENTIFIC_EVALUATOR_COMMIT"
   --python "$PYTHON_BIN"
   --wan-dir "$WAN_DIR_VALUE"
   --videox-home "$VIDEOX_HOME_VALUE"
@@ -411,7 +511,7 @@ submit_validation() {
     --output="$LOG_DIR/%x-%j.out" \
     --error="$LOG_DIR/%x-%j.err" \
     "${SCHEDULER_OPTIONAL[@]}" \
-    "$QUALITY_SBATCH" \
+    "$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_quality.sbatch" \
     "${QUALITY_JOB_ARGS[@]}" \
     --arm "$arm"
 }
@@ -428,6 +528,7 @@ SELECT_JOB_ID="$(
     --nodes=1 \
     --ntasks=1 \
     --ntasks-per-node=1 \
+    --gpus-per-node=1 \
     --cpus-per-task="$CONTROL_CPUS" \
     --mem="$CONTROL_MEMORY" \
     --time="$CONTROL_TIME" \
@@ -445,6 +546,8 @@ SELECT_JOB_ID="$(
     --study-root "$STUDY_ROOT" \
     --training-commit "$TRAINING_COMMIT" \
     --evaluator-commit "$EVALUATOR_COMMIT" \
+    --scientific-repo-root "$SCIENTIFIC_REPO_ROOT" \
+    --scientific-evaluator-commit "$SCIENTIFIC_EVALUATOR_COMMIT" \
     --python "$PYTHON_BIN" \
     --wan-dir "$WAN_DIR_VALUE" \
     --videox-home "$VIDEOX_HOME_VALUE" \
@@ -465,11 +568,14 @@ SELECT_JOB_ID="$(
 normalize_job_id "$SELECT_JOB_ID" >/dev/null
 
 "$PYTHON_BIN" - \
-  "$SUBMISSION_RECORD" "$STUDY_ROOT" "$TRAINING_COMMIT" "$EVALUATOR_COMMIT" \
+  "$SUBMISSION_RECORD" "$STUDY_ROOT" "$TRAINING_COMMIT" \
+  "$REPO_ROOT" "$EVALUATOR_COMMIT" \
+  "$SCIENTIFIC_REPO_ROOT" "$SCIENTIFIC_EVALUATOR_COMMIT" \
   "$FINAL_JOB_ID" "$CACHE_JOB_ID" "$FINAL_GATE_JOB_ID" \
   "$VPM_VALIDATION_JOB_ID" "$J1_VALIDATION_JOB_ID" "$SELECT_JOB_ID" \
   "$PYTHON_BIN" "$EXTRACTOR_PYTHON" "$FINAL_JOB_MODE" \
-  "$FINAL_JOB_DEPENDENCY_RECORD" <<'PY'
+  "$FINAL_JOB_DEPENDENCY_RECORD" "$CACHE_DEPENDENCY_RECORD" \
+  "$ADOPTION_EVIDENCE_JSON" <<'PY'
 import datetime
 import json
 import sys
@@ -479,7 +585,10 @@ from pathlib import Path
     output,
     study_root,
     training_commit,
-    evaluator_commit,
+    controller_repo_root,
+    controller_commit,
+    scientific_repo_root,
+    scientific_evaluator_commit,
     final_job,
     cache_job,
     final_gate_job,
@@ -490,14 +599,20 @@ from pathlib import Path
     extractor_python,
     final_job_mode,
     final_job_dependency,
+    cache_dependency,
+    adoption_evidence_json,
 ) = sys.argv[1:]
+adoption_evidence = json.loads(adoption_evidence_json)
 payload = {
     "kind": "vjepa2_nfe_frontier_slurm_submission",
     "schema_version": 1,
     "created_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "study_root": study_root,
     "training_git_commit": training_commit,
-    "evaluator_git_commit": evaluator_commit,
+    "evaluator_git_commit": scientific_evaluator_commit,
+    "scientific_evaluator_repo_root": scientific_repo_root,
+    "controller_repo_root": controller_repo_root,
+    "controller_git_commit": controller_commit,
     "interpreters": {
         "lacwm": lacwm_python,
         "vjepa2_extractor": extractor_python,
@@ -505,6 +620,8 @@ payload = {
     "final_update_1000_job_id": final_job,
     "final_update_1000_accounting_mode": final_job_mode,
     "cache_job_id": cache_job,
+    "cache_job_adopted": adoption_evidence is not None,
+    "cache_adoption_evidence": adoption_evidence,
     "final_artifact_gate_job_id": final_gate_job,
     "validation_job_ids": {
         "VPM": vpm_validation_job,
@@ -512,7 +629,7 @@ payload = {
     },
     "selection_gate_job_id": selection_job,
     "dependencies": {
-        "cache": final_job_dependency,
+        "cache": cache_dependency,
         "final_artifact_gate": final_job_dependency,
         "validation": (
             f"afterok:{cache_job.split(';', 1)[0].split('_', 1)[0]}:"
