@@ -1,0 +1,14 @@
+# Offline-only V-JEPA 2.1 target-extraction environment.
+#
+# Use Python >=3.11, as required by the pinned official V-JEPA 2 source.
+# This environment is intentionally separate from the Python 3.10 LACWM
+# trainer.  The trainer reads the generated .npy cache and does not install or
+# import V-JEPA.
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
+numpy==2.0.1
+decord==0.6.0
+einops==0.8.1
+timm==1.0.19
