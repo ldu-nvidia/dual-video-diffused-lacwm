@@ -146,3 +146,41 @@ def test_oracle_gap_closure_uses_paired_clip_bootstrap():
     assert result["n_paired_units"] == 128
     assert result["gap_closure_fraction"] == pytest.approx(0.4)
     assert result["bootstrap_ci"]["low"] > 0
+
+
+def test_paired_latency_bootstrap_preserves_execution_order_strata():
+    orders = [
+        ["J1", "VPM"] if index % 2 == 0 else ["VPM", "J1"]
+        for index in range(analysis.PAIRED_TIMED_PAIRS)
+    ]
+    j1 = [8.0 if index % 2 == 0 else 9.0 for index in range(100)]
+    vpm = [12.0 if index % 2 == 0 else 13.0 for index in range(100)]
+    result = analysis._counterbalanced_paired_latency_effect(
+        j1,
+        vpm,
+        orders,
+        bootstrap_samples=200,
+        confidence=0.95,
+        seed=19,
+        label="paired-latency-test",
+    )
+    assert result["execution_order_strata"] == {
+        "J1_first": 50,
+        "VPM_first": 50,
+    }
+    assert result["mean_favorable_difference_ms"] == pytest.approx(4.0)
+    assert result["relative_improvement"] == pytest.approx(4.0 / 12.5)
+    assert result["bootstrap_ci"]["low"] > 0
+
+
+def test_paired_latency_bootstrap_rejects_unbalanced_order():
+    with pytest.raises(analysis.StudyValidationError):
+        analysis._counterbalanced_paired_latency_effect(
+            [8.0] * 100,
+            [12.0] * 100,
+            [["J1", "VPM"]] * 100,
+            bootstrap_samples=100,
+            confidence=0.95,
+            seed=3,
+            label="unbalanced",
+        )

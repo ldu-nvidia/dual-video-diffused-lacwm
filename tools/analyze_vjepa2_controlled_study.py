@@ -21,6 +21,8 @@ following fail-closed invariants are checked before any metric is reported:
 * the measured Wan call count equals the declared NFE;
 * oracle sources are explicitly labeled leakage-only;
 * autonomous and autonomous-shuffled NFE=1 endpoints are bit-identical.
+* the final speed comparison is counterbalanced in one process on one B200,
+  with both checkpoints resident and bit-identical observable inputs.
 
 LACWM clock convention: ``sigma=1`` is Gaussian noise and ``sigma=0`` is clean.
 """
@@ -129,6 +131,11 @@ SOURCE_TENSOR_RE = re.compile(
 LATENCY_RE = re.compile(
     r"^source_(autonomous|off)_nfe_([0-9]+)[.]json$"
 )
+PAIRED_LATENCY_BASENAME = "paired_j1_nfe4_vs_vpm_nfe8.json"
+PAIRED_LATENCY_KIND = "vjepa2_controlled_study_paired_latency"
+PAIRED_LATENCY_COMPARISON = "J1_autonomous_nfe4_vs_VPM_autonomous_nfe8"
+PAIRED_WARMUP_PAIRS = 20
+PAIRED_TIMED_PAIRS = 100
 QUALITY_RANK_RE = re.compile(r"^rank_([0-9]{3})[.]jsonl$")
 QUALITY_RANK_MANIFEST_RE = re.compile(
     r"^rank_([0-9]{3})_manifest[.]json$"
@@ -1073,6 +1080,111 @@ def _paired_effect(
     }
 
 
+def _counterbalanced_paired_latency_effect(
+    j1_latency_ms: Sequence[float],
+    vpm_latency_ms: Sequence[float],
+    execution_orders: Sequence[Sequence[str]],
+    *,
+    bootstrap_samples: int,
+    confidence: float,
+    seed: int,
+    label: str,
+) -> dict[str, Any]:
+    """Estimate J1's speedup while preserving the two execution-order strata."""
+
+    j1 = np.asarray(j1_latency_ms, dtype=np.float64)
+    vpm = np.asarray(vpm_latency_ms, dtype=np.float64)
+    if (
+        j1.ndim != 1
+        or j1.shape != vpm.shape
+        or j1.size != PAIRED_TIMED_PAIRS
+        or not np.isfinite(j1).all()
+        or not np.isfinite(vpm).all()
+        or np.any(j1 <= 0)
+        or np.any(vpm <= 0)
+        or len(execution_orders) != j1.size
+    ):
+        raise StudyValidationError(
+            f"invalid counterbalanced latency values for {label}"
+        )
+    strata: dict[str, np.ndarray] = {}
+    for first in ("J1", "VPM"):
+        indexes = [
+            index
+            for index, order in enumerate(execution_orders)
+            if tuple(order) == (
+                (first, "VPM") if first == "J1" else (first, "J1")
+            )
+        ]
+        if len(indexes) != PAIRED_TIMED_PAIRS // 2:
+            raise StudyValidationError(
+                f"latency order stratum {first}-first is not balanced"
+            )
+        strata[first] = np.asarray(indexes, dtype=np.int64)
+
+    j1_mean = float(j1.mean())
+    vpm_mean = float(vpm.mean())
+    if vpm_mean <= 0:
+        raise StudyValidationError("paired VPM latency mean is not positive")
+    relative = (vpm_mean - j1_mean) / vpm_mean
+    rng = np.random.default_rng(_derived_seed(seed, label))
+    stratum_effect_inputs: list[tuple[np.ndarray, np.ndarray]] = []
+    for first in ("J1", "VPM"):
+        indexes = strata[first]
+        draws = rng.integers(
+            0,
+            indexes.size,
+            size=(bootstrap_samples, indexes.size),
+            endpoint=False,
+        )
+        sampled = indexes[draws]
+        stratum_effect_inputs.append(
+            (j1[sampled].mean(axis=1), vpm[sampled].mean(axis=1))
+        )
+    bootstrap_j1 = np.mean(
+        np.stack([item[0] for item in stratum_effect_inputs], axis=0),
+        axis=0,
+    )
+    bootstrap_vpm = np.mean(
+        np.stack([item[1] for item in stratum_effect_inputs], axis=0),
+        axis=0,
+    )
+    if np.any(bootstrap_vpm <= 0):
+        raise StudyValidationError(
+            "paired bootstrap produced non-positive VPM latency"
+        )
+    effects = (bootstrap_vpm - bootstrap_j1) / bootstrap_vpm
+    tail = (1.0 - confidence) / 2.0
+    low, high = np.quantile(effects, [tail, 1.0 - tail])
+    favorable_differences = vpm - j1
+    return {
+        "n_paired_rounds": int(j1.size),
+        "bootstrap_unit": (
+            "paired timing round, resampled separately within J1-first and "
+            "VPM-first execution-order strata"
+        ),
+        "execution_order_strata": {
+            "J1_first": int(strata["J1"].size),
+            "VPM_first": int(strata["VPM"].size),
+        },
+        "J1_mean_ms": j1_mean,
+        "VPM_mean_ms": vpm_mean,
+        "mean_favorable_difference_ms": float(
+            favorable_differences.mean()
+        ),
+        "relative_improvement": float(relative),
+        "relative_improvement_percent": float(100.0 * relative),
+        "bootstrap_ci": {
+            "confidence": confidence,
+            "low": float(low),
+            "high": float(high),
+        },
+        "favorable_pair_fraction": float(
+            np.mean(favorable_differences > 0)
+        ),
+    }
+
+
 def _paired_gap_closure(
     off: Sequence[float],
     autonomous: Sequence[float],
@@ -1260,6 +1372,57 @@ def _manifest_and_stage_inventory(
         problems.append("teacher invocation allowance is non-zero")
     if inference.get("actual_wan_calls_must_equal_nfe") is not True:
         problems.append("Wan-call/NFE contract is disabled")
+    latency_protocol = inference.get("latency_protocol")
+    final_latency = (
+        latency_protocol.get("final_claim_comparison")
+        if isinstance(latency_protocol, dict)
+        else None
+    )
+    if (
+        not isinstance(latency_protocol, dict)
+        or not isinstance(
+            latency_protocol.get("per_arm_grid_telemetry"), dict
+        )
+        or latency_protocol["per_arm_grid_telemetry"].get("claim_role")
+        != "diagnostic_only"
+        or not isinstance(final_latency, dict)
+        or final_latency.get("arms")
+        != [
+            {"arm": "J1", "source": "autonomous", "nfe": 4},
+            {"arm": "VPM", "source": "autonomous", "nfe": 8},
+        ]
+        or final_latency.get("same_slurm_allocation") is not True
+        or final_latency.get("same_node") is not True
+        or final_latency.get("same_B200") is not True
+        or final_latency.get("same_process") is not True
+        or final_latency.get("both_models_resident") is not True
+        or final_latency.get("identical_immutable_batch_inputs") is not True
+        or final_latency.get("warmup_pairs") != PAIRED_WARMUP_PAIRS
+        or final_latency.get("timed_pairs") != PAIRED_TIMED_PAIRS
+        or final_latency.get("counterbalance")
+        != "even pair J1-first; odd pair VPM-first"
+        or final_latency.get("forward_hooks_active_during_timing") is not False
+        or final_latency.get("future_ground_truth_available_to_sampler")
+        is not False
+        or final_latency.get("clean_auxiliary_available_to_sampler")
+        is not False
+        or final_latency.get("online_teacher_calls") != 0
+    ):
+        problems.append("final paired-latency protocol differs")
+    slurm_contract = study.get("slurm")
+    paired_slurm = (
+        slurm_contract.get("paired_latency_post_study_job")
+        if isinstance(slurm_contract, dict)
+        else None
+    )
+    if (
+        not isinstance(paired_slurm, dict)
+        or paired_slurm.get("dependency") != "afterok:final_stage_array"
+        or paired_slurm.get("nodes") != 1
+        or paired_slurm.get("gpus") != 1
+        or paired_slurm.get("runs_final_analyzer_after_benchmark") is not True
+    ):
+        problems.append("paired post-study Slurm contract differs")
     wandb = study.get("wandb")
     if (
         not isinstance(wandb, dict)
@@ -2683,6 +2846,635 @@ def _load_latency(
     }
 
 
+def _normalized_slurm_job_id(value: Any, label: str) -> str:
+    raw = str(value)
+    normalized = raw.split(";", 1)[0].split("_", 1)[0]
+    if not normalized.isdigit() or int(normalized) <= 0:
+        raise StudyValidationError(f"{label} is not a positive Slurm job ID")
+    return normalized
+
+
+def _validate_paired_file_record(
+    record: Any,
+    *,
+    path: Path,
+    label: str,
+    identity_sha256: str | None = None,
+) -> None:
+    if (
+        not isinstance(record, dict)
+        or record.get("path") != str(path)
+        or record.get("sha256") != _hash_file(path)
+        or record.get("bytes") != path.stat().st_size
+        or (
+            identity_sha256 is not None
+            and record.get("identity_sha256") != identity_sha256
+        )
+    ):
+        raise StudyValidationError(f"paired latency {label} record differs")
+
+
+def _validated_paired_latency_vector(
+    value: Any,
+    *,
+    label: str,
+) -> tuple[list[float], dict[str, Any]]:
+    if not isinstance(value, dict) or value.get("count") != PAIRED_TIMED_PAIRS:
+        raise StudyValidationError(f"{label} latency summary is missing")
+    raw = value.get("values")
+    if (
+        not isinstance(raw, list)
+        or len(raw) != PAIRED_TIMED_PAIRS
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            or float(item) <= 0
+            for item in raw
+        )
+    ):
+        raise StudyValidationError(f"{label} latency vector is invalid")
+    values = [float(item) for item in raw]
+    expected_sha = hashlib.sha256(
+        _canonical_json_bytes([round(item, 9) for item in values])
+    ).hexdigest()
+    if value.get("values_sha256") != expected_sha:
+        raise StudyValidationError(f"{label} latency vector digest differs")
+    ordered = sorted(values)
+
+    def percentile(percent: float) -> float:
+        position = (len(ordered) - 1) * percent / 100.0
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        fraction = position - lower
+        return (
+            ordered[lower] * (1.0 - fraction)
+            + ordered[upper] * fraction
+        )
+
+    recomputed = {
+        "p50": percentile(50.0),
+        "p95": percentile(95.0),
+        "mean": sum(values) / len(values),
+        "min": min(values),
+        "max": max(values),
+    }
+    for field, expected in recomputed.items():
+        observed = value.get(field)
+        if (
+            isinstance(observed, bool)
+            or not isinstance(observed, (int, float))
+            or not math.isfinite(float(observed))
+            or not math.isclose(
+                float(observed), expected, rel_tol=1e-12, abs_tol=1e-9
+            )
+        ):
+            raise StudyValidationError(
+                f"{label} latency {field} does not match raw values"
+            )
+    return values, {
+        **recomputed,
+        "count": PAIRED_TIMED_PAIRS,
+        "values_sha256": expected_sha,
+        "raw_values_omitted_from_analysis": True,
+    }
+
+
+def _load_paired_latency(
+    *,
+    study: Mapping[str, Any],
+    study_root: Path,
+    stages: Mapping[str, Any],
+    grid_latency: Mapping[str, Any],
+    bootstrap_samples: int,
+    confidence: float,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    path = _regular_file(
+        study_root / "paired_latency" / PAIRED_LATENCY_BASENAME,
+        "paired latency evidence",
+    )
+    _assert_inside(path, study_root, "paired latency evidence")
+    payload = _read_json(path, "paired latency evidence")
+    expected_commit = study.get("inputs", {}).get("repository", {}).get(
+        "git_commit"
+    )
+    if (
+        not _identity_valid(payload)
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("kind") != PAIRED_LATENCY_KIND
+        or payload.get("comparison") != PAIRED_LATENCY_COMPARISON
+        or payload.get("git_commit") != expected_commit
+    ):
+        raise StudyValidationError(
+            "paired latency identity/comparison/commit differs"
+        )
+
+    study_path = _regular_file(
+        study_root / "study_manifest.json", "paired latency study manifest"
+    )
+    _validate_paired_file_record(
+        payload.get("study"),
+        path=study_path,
+        label="study manifest",
+        identity_sha256=str(study.get("identity_sha256", "")),
+    )
+    submission_path = _regular_file(
+        study_root / "slurm_submission.json",
+        "paired latency submission record",
+    )
+    submission = _read_json(
+        submission_path, "paired latency submission record"
+    )
+    if (
+        not _identity_valid(submission)
+        or submission.get("kind")
+        != "vjepa2_controlled_study_submission"
+        or submission.get("study_identity_sha256")
+        != study.get("identity_sha256")
+        or submission.get("dependency") != "afterok"
+    ):
+        raise StudyValidationError(
+            "paired latency submission provenance differs"
+        )
+    _validate_paired_file_record(
+        payload.get("submission"),
+        path=submission_path,
+        label="submission",
+        identity_sha256=str(submission.get("identity_sha256", "")),
+    )
+    paired_job = submission.get("paired_latency_job")
+    if (
+        not isinstance(paired_job, dict)
+        or paired_job.get("dependency") != "afterok:final_stage_array"
+        or paired_job.get("comparison") != PAIRED_LATENCY_COMPARISON
+        or paired_job.get("nodes") != 1
+        or paired_job.get("gpus") != 1
+        or paired_job.get("same_allocation_pairing") is not True
+        or paired_job.get("runs_final_analyzer_after_benchmark") is not True
+        or paired_job.get("analysis_output_root")
+        != study["slurm"]["paired_latency_post_study_job"][
+            "analysis_output_root"
+        ]
+    ):
+        raise StudyValidationError(
+            "paired latency submission job contract differs"
+        )
+    slurm = payload.get("slurm")
+    if (
+        not isinstance(slurm, dict)
+        or slurm.get("same_allocation") is not True
+        or not isinstance(slurm.get("same_node"), str)
+        or not slurm["same_node"].strip()
+        or not isinstance(slurm.get("cuda_visible_devices"), str)
+        or not slurm["cuda_visible_devices"].strip()
+        or _normalized_slurm_job_id(
+            slurm.get("job_id"), "paired evidence Slurm job ID"
+        )
+        != _normalized_slurm_job_id(
+            paired_job.get("job_id"), "paired submission Slurm job ID"
+        )
+    ):
+        raise StudyValidationError(
+            "paired latency was not bound to one recorded allocation/node/GPU"
+        )
+    device = payload.get("device")
+    if (
+        not isinstance(device, dict)
+        or "B200" not in str(device.get("name", "")).upper()
+        or device.get("index") != 0
+        or isinstance(
+            device.get("peak_allocated_bytes_with_both_models_resident"), bool
+        )
+        or not isinstance(
+            device.get("peak_allocated_bytes_with_both_models_resident"), int
+        )
+        or device["peak_allocated_bytes_with_both_models_resident"] <= 0
+    ):
+        raise StudyValidationError(
+            "paired latency device/resident-model provenance differs"
+        )
+
+    protocol = payload.get("protocol")
+    expected_protocol = {
+        "batch_size": 1,
+        "sample_index": 0,
+        "warmup_pairs": PAIRED_WARMUP_PAIRS,
+        "timed_pairs": PAIRED_TIMED_PAIRS,
+        "counterbalance": "even pair J1-first; odd pair VPM-first",
+        "J1_first_pairs": 50,
+        "VPM_first_pairs": 50,
+        "same_process": True,
+        "same_B200": True,
+        "both_models_resident": True,
+        "identical_immutable_batch_inputs": True,
+        "entrypoint": (
+            "DualExplicitActionDiTModel.sample_future_deployable"
+        ),
+        "collect_artifacts_timed": False,
+        "trajectory_capture_timed": False,
+        "forward_hooks_active_during_timing": False,
+        "future_ground_truth_rgb_available_to_sampler": False,
+        "clean_auxiliary_target_available_to_sampler": False,
+        "online_teacher_calls": 0,
+        "cuda_synchronize_before_and_after_each_arm": True,
+        "timing_scope": (
+            "history preparation inside model + Wan calls + VAE decode"
+        ),
+        "sigma_convention": "sigma=1 noise, sigma=0 clean",
+    }
+    if not isinstance(protocol, dict) or protocol != expected_protocol:
+        raise StudyValidationError("paired latency timing protocol differs")
+
+    immutable = payload.get("immutable_input")
+    expected_identity = grid_latency.get("protocol", {}).get(
+        "fixed_sample_identity"
+    )
+    sample_identity_fields = {
+        "sample_index",
+        "full_rgb_sha256",
+        "history_rgb_sha256",
+        "actions_sha256",
+        "morphology_index_sha256",
+    }
+    if (
+        not isinstance(immutable, dict)
+        or set(immutable) != sample_identity_fields | {"test_cache"}
+        or immutable.get("sample_index") != 0
+        or any(
+            not isinstance(immutable.get(field), str)
+            or SHA256_RE.fullmatch(immutable[field]) is None
+            for field in sample_identity_fields - {"sample_index"}
+        )
+        or {
+            field: immutable[field] for field in sample_identity_fields
+        }
+        != expected_identity
+    ):
+        raise StudyValidationError(
+            "paired latency immutable input differs from the per-arm grid"
+        )
+
+    test = study.get("inputs", {}).get("splits", {}).get("test", {})
+    cache = test.get("cache", {})
+    paired_cache = immutable.get("test_cache")
+    if not isinstance(paired_cache, dict):
+        raise StudyValidationError("paired latency test-cache record is absent")
+    for field, paired_field, label in (
+        ("clip_manifest", "clip_manifest", "test clip manifest"),
+        ("metadata", "cache_metadata", "test cache metadata"),
+    ):
+        study_record = (
+            test.get(field) if field == "clip_manifest" else cache.get(field)
+        )
+        paired_record = paired_cache.get(paired_field)
+        if not isinstance(study_record, dict):
+            raise StudyValidationError(f"study lacks {label} provenance")
+        current = _regular_file(Path(str(study_record.get("path", ""))), label)
+        if (
+            study_record.get("sha256") != _hash_file(current)
+            or not isinstance(paired_record, dict)
+            or paired_record.get("path") != str(current)
+            or paired_record.get("sha256") != study_record.get("sha256")
+            or paired_record.get("bytes") != current.stat().st_size
+        ):
+            raise StudyValidationError(
+                f"paired latency {label} provenance differs"
+            )
+    paired_arrays = paired_cache.get("arrays")
+    if not isinstance(paired_arrays, dict) or set(paired_arrays) != {
+        "target",
+        "rgb",
+        "actions",
+    }:
+        raise StudyValidationError(
+            "paired latency test-cache array inventory differs"
+        )
+    for name in ("target", "rgb", "actions"):
+        study_record = cache.get(name)
+        paired_record = paired_arrays.get(name)
+        if not isinstance(study_record, dict):
+            raise StudyValidationError(
+                f"study lacks test {name} array provenance"
+            )
+        current = _regular_file(
+            Path(str(study_record.get("path", ""))),
+            f"test {name} cache array",
+        )
+        actual_sha = _hash_file(current)
+        if (
+            study_record.get("sha256") != actual_sha
+            or study_record.get("bytes") != current.stat().st_size
+            or not isinstance(paired_record, dict)
+            or paired_record
+            != {
+                "path": str(current),
+                "sha256": actual_sha,
+                "bytes": current.stat().st_size,
+                "full_sha256_verified": True,
+            }
+        ):
+            raise StudyValidationError(
+                f"paired latency test {name} array provenance differs"
+            )
+
+    arms = payload.get("arms")
+    if not isinstance(arms, dict) or set(arms) != {"J1", "VPM"}:
+        raise StudyValidationError("paired latency arm inventory differs")
+    raw_vectors: dict[str, list[float]] = {}
+    arm_results: dict[str, Any] = {}
+    expected_specs = {"J1": 4, "VPM": 8}
+    for arm, nfe in expected_specs.items():
+        record = arms.get(arm)
+        if (
+            not isinstance(record, dict)
+            or record.get("source") != "autonomous"
+            or record.get("nfe") != nfe
+        ):
+            raise StudyValidationError(
+                f"paired latency {arm} source/NFE differs"
+            )
+        stage = stages[arm]["stages"]["1000"]
+        expected_records = {
+            "arm_manifest": (
+                Path(stages[arm]["arm_manifest_path"]),
+                stages[arm]["arm_identity_sha256"],
+            ),
+            "stage_manifest": (
+                Path(stage["stage_manifest_path"]),
+                stage["stage_identity_sha256"],
+            ),
+            "stage_outcome": (
+                Path(stage["path"]),
+                stage["stage_outcome_identity_sha256"],
+            ),
+            "arm_outcome": (Path(stages[arm]["outcome_path"]), None),
+            "resolved_config": (
+                Path(stage["resolved_config"]["path"]),
+                None,
+            ),
+        }
+        for field, (expected_path, expected_identity_value) in (
+            expected_records.items()
+        ):
+            expected_path = _regular_file(
+                expected_path, f"{arm} paired {field}"
+            )
+            if field == "arm_outcome":
+                expected_payload = _read_json(
+                    expected_path, f"{arm} arm outcome"
+                )
+                expected_identity_value = expected_payload.get(
+                    "identity_sha256"
+                )
+            _validate_paired_file_record(
+                record.get(field),
+                path=expected_path,
+                label=f"{arm} {field}",
+                identity_sha256=expected_identity_value,
+            )
+        snapshot = record.get("snapshot")
+        snapshot_path = _regular_file(
+            Path(stages[arm]["final_snapshot"]["path"]),
+            f"{arm} paired final snapshot",
+        )
+        if (
+            not isinstance(snapshot, dict)
+            or snapshot.get("path") != str(snapshot_path)
+            or snapshot.get("sha256")
+            != stages[arm]["final_snapshot"]["sha256"]
+            or snapshot.get("sha256") != _hash_file(snapshot_path)
+            or snapshot.get("bytes") != snapshot_path.stat().st_size
+            or snapshot.get("checkpoint_start_iter") != 1000
+            or snapshot.get("run_identity_sha256")
+            != stages[arm]["arm_identity_sha256"]
+        ):
+            raise StudyValidationError(
+                f"paired latency {arm} snapshot provenance differs"
+            )
+        audit = record.get("audit")
+        expected_counters = {
+            "wan_calls": nfe,
+            "online_teacher_calls": 0,
+            "auxiliary_clean_available": 0,
+            "artifacts_collected": 1,
+            "deployment_mode": 1,
+        }
+        if (
+            not isinstance(audit, dict)
+            or audit.get("nfe") != nfe
+            or audit.get("wan_calls") != nfe
+            or audit.get("online_teacher_calls") != 0
+            or audit.get("clean_auxiliary_available") != 0
+            or audit.get("deployment_mode") != 1
+            or audit.get("trajectory_capture_enabled") is not False
+            or audit.get("independent_forward_hook_wan_count") != nfe
+            or audit.get("forward_hook_active_during_timing") is not False
+            or audit.get("public_entrypoint")
+            != "DualExplicitActionDiTModel.sample_future_deployable"
+            or audit.get("sampler_counters") != expected_counters
+        ):
+            raise StudyValidationError(
+                f"paired latency {arm} deployable audit differs"
+            )
+        raw, summary = _validated_paired_latency_vector(
+            record.get("latency_ms"), label=f"paired {arm}"
+        )
+        raw_vectors[arm] = raw
+        expected_fps = GENERATED_FUTURE_FRAMES * 1000.0 / summary["p95"]
+        observed_fps = record.get(
+            "generated_frames_per_second_at_p95"
+        )
+        if (
+            isinstance(observed_fps, bool)
+            or not isinstance(observed_fps, (int, float))
+            or not math.isclose(
+                float(observed_fps),
+                expected_fps,
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+        ):
+            raise StudyValidationError(
+                f"paired latency {arm} throughput differs"
+            )
+        arm_results[arm] = {
+            "source": "autonomous",
+            "nfe": nfe,
+            "latency_ms": summary,
+            "generated_frames_per_second_at_p95": expected_fps,
+            "snapshot": dict(snapshot),
+            "audit": dict(audit),
+        }
+
+    paired = payload.get("paired")
+    rounds = paired.get("rounds") if isinstance(paired, dict) else None
+    if not isinstance(rounds, list) or len(rounds) != PAIRED_TIMED_PAIRS:
+        raise StudyValidationError("paired timing round inventory differs")
+    if paired.get("favorable_direction") != "positive means J1@4 is faster":
+        raise StudyValidationError("paired timing favorable direction differs")
+    differences: list[float] = []
+    relative_per_pair: list[float] = []
+    execution_orders: list[list[str]] = []
+    for index, round_record in enumerate(rounds):
+        expected_order = (
+            ["J1", "VPM"] if index % 2 == 0 else ["VPM", "J1"]
+        )
+        if (
+            not isinstance(round_record, dict)
+            or round_record.get("pair_index") != index
+            or round_record.get("execution_order") != expected_order
+        ):
+            raise StudyValidationError(
+                f"paired timing round {index} order/index differs"
+            )
+        j1_value = raw_vectors["J1"][index]
+        vpm_value = raw_vectors["VPM"][index]
+        difference = vpm_value - j1_value
+        relative = difference / vpm_value
+        for field, expected in (
+            ("J1_latency_ms", j1_value),
+            ("VPM_latency_ms", vpm_value),
+            ("favorable_difference_ms", difference),
+            ("relative_improvement", relative),
+        ):
+            observed = round_record.get(field)
+            if (
+                isinstance(observed, bool)
+                or not isinstance(observed, (int, float))
+                or not math.isclose(
+                    float(observed),
+                    expected,
+                    rel_tol=1e-12,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise StudyValidationError(
+                    f"paired timing round {index} {field} differs"
+                )
+        differences.append(difference)
+        relative_per_pair.append(relative)
+        execution_orders.append(expected_order)
+    if paired.get("rounds_sha256") != hashlib.sha256(
+        _canonical_json_bytes(rounds)
+    ).hexdigest():
+        raise StudyValidationError("paired timing round digest differs")
+    for field, expected in (
+        ("favorable_difference_ms", differences),
+        ("relative_improvement", relative_per_pair),
+    ):
+        observed = paired.get(field)
+        if (
+            not isinstance(observed, list)
+            or len(observed) != len(expected)
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not math.isclose(
+                    float(item),
+                    expected[index],
+                    rel_tol=1e-12,
+                    abs_tol=1e-9,
+                )
+                for index, item in enumerate(observed)
+            )
+        ):
+            raise StudyValidationError(
+                f"paired timing {field} vector differs"
+            )
+    expected_means = {
+        "mean_favorable_difference_ms": sum(differences) / len(differences),
+        "mean_relative_improvement": (
+            sum(relative_per_pair) / len(relative_per_pair)
+        ),
+    }
+    for field, expected in expected_means.items():
+        observed = paired.get(field)
+        if (
+            isinstance(observed, bool)
+            or not isinstance(observed, (int, float))
+            or not math.isclose(
+                float(observed), expected, rel_tol=1e-12, abs_tol=1e-9
+            )
+        ):
+            raise StudyValidationError(f"paired timing {field} differs")
+    order_strata = paired.get("order_strata")
+    expected_strata: dict[str, Any] = {}
+    for first in ("J1", "VPM"):
+        indexes = [
+            index
+            for index, order in enumerate(execution_orders)
+            if order[0] == first
+        ]
+        expected_strata[f"{first}_first"] = {
+            "count": len(indexes),
+            "mean_favorable_difference_ms": (
+                sum(differences[index] for index in indexes) / len(indexes)
+            ),
+            "mean_relative_improvement": (
+                sum(relative_per_pair[index] for index in indexes)
+                / len(indexes)
+            ),
+        }
+    if not isinstance(order_strata, dict) or set(order_strata) != set(
+        expected_strata
+    ):
+        raise StudyValidationError("paired timing order strata differ")
+    for name, expected in expected_strata.items():
+        observed = order_strata.get(name)
+        if not isinstance(observed, dict) or observed.get("count") != 50:
+            raise StudyValidationError(
+                f"paired timing {name} count differs"
+            )
+        for field in (
+            "mean_favorable_difference_ms",
+            "mean_relative_improvement",
+        ):
+            value = observed.get(field)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isclose(
+                    float(value),
+                    expected[field],
+                    rel_tol=1e-12,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise StudyValidationError(
+                    f"paired timing {name} {field} differs"
+                )
+
+    effect = _counterbalanced_paired_latency_effect(
+        raw_vectors["J1"],
+        raw_vectors["VPM"],
+        execution_orders,
+        bootstrap_samples=bootstrap_samples,
+        confidence=confidence,
+        seed=bootstrap_seed,
+        label="paired-latency:J1-nfe4-vs-VPM-nfe8",
+    )
+    return {
+        "path": str(path),
+        "sha256": _hash_file(path),
+        "identity_sha256": payload["identity_sha256"],
+        "comparison": PAIRED_LATENCY_COMPARISON,
+        "claim_role": "sole_final_speed_gate_evidence",
+        "same_allocation": True,
+        "same_node": slurm["same_node"],
+        "same_B200": True,
+        "same_process": True,
+        "submission_job_id": paired_job["job_id"],
+        "protocol": dict(protocol),
+        "immutable_input_identity": {
+            field: immutable[field] for field in sample_identity_fields
+        },
+        "arms": arm_results,
+        "order_strata": expected_strata,
+        "counterbalanced_paired_effect": effect,
+    }
+
+
 def _normalized_auc(
     update_to_mean: Mapping[int, float],
 ) -> float:
@@ -3055,6 +3847,20 @@ def _build_analysis(
     training["paired_J1_auc_comparisons"] = auc_comparisons
 
     latency = _load_latency(arm_roots, stages)
+    latency["per_arm_grid_claim_role"] = (
+        "diagnostic telemetry only; independent allocations/processes cannot "
+        "supply the final comparative speed gate"
+    )
+    paired_latency = _load_paired_latency(
+        study=study,
+        study_root=study_root,
+        stages=stages,
+        grid_latency=latency,
+        bootstrap_samples=bootstrap_samples,
+        confidence=confidence,
+        bootstrap_seed=bootstrap_seed,
+    )
+    latency["paired_final_claim"] = paired_latency
     training_vpm = final_training_comparisons["VPM"]
     training_a1 = final_training_comparisons["A1"]
     training_j0 = final_training_comparisons["J0"]
@@ -3158,45 +3964,38 @@ def _build_analysis(
         seed=bootstrap_seed,
         label="oracle-gap-closure:J1:nfe4:temporal",
     )
-    latency_j1 = (
-        latency["arms"]
-        .get("J1", {})
-        .get("autonomous", {})
-        .get("4")
-    )
-    latency_vpm = (
-        latency["arms"]
-        .get("VPM", {})
-        .get("autonomous", {})
-        .get("8")
-    )
-    latency_pass: bool | None
-    latency_value: Any
-    if latency_j1 is None or latency_vpm is None:
-        latency_pass = None
-        latency_value = None
-    else:
-        j1_p95 = float(latency_j1["latency_ms"]["p95"])
-        vpm_p95 = float(latency_vpm["latency_ms"]["p95"])
-        latency_pass = j1_p95 < vpm_p95
-        latency_value = {
-            "J1_autonomous_nfe4_p95_ms": j1_p95,
-            "VPM_autonomous_nfe8_p95_ms": vpm_p95,
-            "relative_reduction": (vpm_p95 - j1_p95) / vpm_p95,
-        }
-    j1_p95_fps = (
-        None
-        if latency_j1 is None
-        else float(
-            latency_j1["throughput"][
-                "generated_frames_per_second_at_p95_latency"
-            ]
+    latency_j1 = paired_latency["arms"]["J1"]
+    latency_vpm = paired_latency["arms"]["VPM"]
+    j1_p95 = float(latency_j1["latency_ms"]["p95"])
+    vpm_p95 = float(latency_vpm["latency_ms"]["p95"])
+    paired_effect = paired_latency["counterbalanced_paired_effect"]
+    order_strata = paired_latency["order_strata"]
+    latency_pass = (
+        float(paired_effect["bootstrap_ci"]["low"]) > 0.0
+        and j1_p95 < vpm_p95
+        and all(
+            float(order_strata[name]["mean_favorable_difference_ms"]) > 0.0
+            for name in ("J1_first", "VPM_first")
         )
+    )
+    latency_value = {
+        "evidence": paired_latency["path"],
+        "same_allocation": True,
+        "same_node": paired_latency["same_node"],
+        "J1_autonomous_nfe4_p95_ms": j1_p95,
+        "VPM_autonomous_nfe8_p95_ms": vpm_p95,
+        "p95_relative_reduction": (vpm_p95 - j1_p95) / vpm_p95,
+        "counterbalanced_paired_mean_effect": paired_effect,
+        "execution_order_strata": order_strata,
+    }
+    j1_p95_fps = float(
+        latency_j1["generated_frames_per_second_at_p95"]
     )
     latency["realtime_dagger_diagnostic"] = {
         "J1_autonomous_nfe4_generated_frames_per_second_at_p95": j1_p95_fps,
-        "meets_5_fps": None if j1_p95_fps is None else j1_p95_fps >= 5.0,
-        "meets_10_fps": None if j1_p95_fps is None else j1_p95_fps >= 10.0,
+        "meets_5_fps": j1_p95_fps >= 5.0,
+        "meets_10_fps": j1_p95_fps >= 10.0,
+        "source": "same-allocation paired final benchmark",
         "preregistered_success_gate": False,
     }
 
@@ -3286,11 +4085,23 @@ def _build_analysis(
         "inference": [
             _gate(
                 gate_id="I0",
-                description="The pinned deployable latency inventory is complete",
-                rule="VPM/A1/J0/J1 x autonomous/off x all seven NFEs",
+                description=(
+                    "The diagnostic grid and final paired latency inventories "
+                    "are complete"
+                ),
+                rule=(
+                    "VPM/A1/J0/J1 x autonomous/off x seven NFEs, plus the "
+                    "same-allocation J1@4 versus VPM@8 paired benchmark"
+                ),
                 value={
-                    "observed": latency["observed_record_count"],
-                    "expected": latency["expected_record_count"],
+                    "diagnostic_grid_observed": (
+                        latency["observed_record_count"]
+                    ),
+                    "diagnostic_grid_expected": (
+                        latency["expected_record_count"]
+                    ),
+                    "paired_final_evidence": paired_latency["path"],
+                    "paired_rounds": paired_effect["n_paired_rounds"],
                 },
                 passed=True if latency["complete"] else None,
             ),
@@ -3360,8 +4171,16 @@ def _build_analysis(
             ),
             _gate(
                 gate_id="I6",
-                description="Four-step J1 has lower end-to-end tail latency than eight-step VPM",
-                rule="J1@4 p95 latency < VPM@8 p95 latency",
+                description=(
+                    "Four-step J1 has robustly lower end-to-end latency than "
+                    "eight-step VPM on the same B200"
+                ),
+                rule=(
+                    "same-allocation counterbalanced paired-bootstrap 95% CI "
+                    "lower bound on mean relative speedup >0, J1@4 p95 < "
+                    "VPM@8 p95, and favorable mean difference in both "
+                    "execution-order strata"
+                ),
                 value=latency_value,
                 passed=latency_pass,
             ),
@@ -3459,6 +4278,10 @@ def _build_analysis(
             "auxiliary_history_latent_frames_required": 0,
             "online_teacher_calls_required": 0,
             "actual_wan_calls_must_equal_nfe": True,
+            "final_speed_comparison": (
+                "same-allocation, same-process, counterbalanced paired "
+                "J1 autonomous NFE=4 versus VPM autonomous NFE=8"
+            ),
             "paired_unit": "immutable fixed-test clip_id/clip_index",
             "fixed_test_clip_count": EXPECTED_TEST_CLIPS,
             "trainer_visualization_role": "diagnostic_only",
@@ -3487,6 +4310,11 @@ def _build_analysis(
             "VPM_A1_effective_state_and_clock_gates_are_exactly_zero": True,
             "trainer_visualization_excluded_from_scientific_aggregates": True,
             "raw_held_out_rgb_is_primary_decoded_target": True,
+            "paired_speed_evidence_same_allocation_node_gpu_process": True,
+            "paired_speed_inputs_bit_identical": True,
+            "paired_speed_future_and_clean_auxiliary_unavailable": True,
+            "paired_speed_online_teacher_calls_zero": True,
+            "paired_speed_actual_wan_calls_equal_nfe": True,
         },
         "stage_provenance_and_wall_time": stages,
         "quality": {
@@ -3518,7 +4346,9 @@ def _build_analysis(
                 "convergence-AUC gates use paired bootstrap confidence-interval "
                 "lower bounds over 128 immutable clips. Milestone threshold "
                 "crossing is descriptive and cannot pass the faster-training "
-                "gate without CI-supported paired AUC and wall-time evidence"
+                "gate without CI-supported paired AUC and wall-time evidence. "
+                "The final speed gate uses a paired bootstrap stratified by "
+                "first-executed arm within one shared B200 allocation"
             ),
         },
         "conclusion": conclusion,
@@ -3534,9 +4364,11 @@ def _build_analysis(
             "No LPIPS, FVD, or pretrained perceptual metric is reported because "
             "the immutable study pins no such checkpoint; claims are restricted "
             "to held-out latent and raw-RGB reconstruction metrics.",
-            "Latency compares the deployable dual arms to the parameter-matched "
-            "VPM baseline. V0 has no compatible deployable latency evaluator and "
-            "is not part of the speed claim.",
+            "The final latency claim compares J1 autonomous NFE=4 with the "
+            "parameter-matched VPM autonomous NFE=8 baseline in one process on "
+            "one B200 using identical inputs and counterbalanced paired rounds. "
+            "The wider per-arm grid is diagnostic only. V0 has no compatible "
+            "deployable latency evaluator and is not part of the speed claim.",
         ],
     }
 
@@ -3641,7 +4473,9 @@ def _markdown(payload: Mapping[str, Any]) -> str:
             (
                 f"Latency inventory: {latency['observed_record_count']}/"
                 f"{latency['expected_record_count']} records "
-                f"({'complete' if latency['complete'] else 'incomplete'})."
+                f"({'complete' if latency['complete'] else 'incomplete'}). "
+                "This wider grid is diagnostic; the final speed gate uses the "
+                "single-allocation counterbalanced paired artifact."
             ),
             "",
             (
@@ -3652,7 +4486,9 @@ def _markdown(payload: Mapping[str, Any]) -> str:
                 "legacy MP4 visualization is not an uncompressed paired "
                 "source/NFE evaluator. No LPIPS/FVD claim is made because no "
                 "perceptual checkpoint is pinned. Deployable latency is compared "
-                "against parameter-matched VPM; V0 is outside the speed claim."
+                "against parameter-matched VPM with both checkpoints resident "
+                "in one process on the same B200 and identical observable "
+                "inputs; V0 is outside the speed claim."
             ),
             "",
         ]

@@ -6,12 +6,16 @@ import unittest
 from pathlib import Path
 
 import benchmark_vjepa2_inference as benchmark
+import benchmark_vjepa2_paired_latency as paired_benchmark
 import vjepa2_controlled_study as study
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SBATCH = ROOT / "tools" / "slurm" / "vjepa2_controlled_study.sbatch"
 SUBMIT = ROOT / "tools" / "slurm" / "submit_vjepa2_controlled_study.sh"
+PAIRED_SBATCH = (
+    ROOT / "tools" / "slurm" / "vjepa2_paired_latency.sbatch"
+)
 
 
 class VJEPA2StudyHarnessTest(unittest.TestCase):
@@ -45,6 +49,23 @@ class VJEPA2StudyHarnessTest(unittest.TestCase):
         self.assertEqual(benchmark.REPETITIONS, 100)
         self.assertEqual(benchmark.ALLOWED_SOURCES, ("autonomous", "off"))
         self.assertNotIn("autonomous_shuffled", benchmark.ALLOWED_SOURCES)
+
+    def test_final_latency_comparison_is_paired_and_counterbalanced(self):
+        self.assertEqual(paired_benchmark.WARMUP_PAIRS, 20)
+        self.assertEqual(paired_benchmark.TIMED_PAIRS, 100)
+        self.assertEqual(
+            paired_benchmark.ARM_SPECS["J1"]["nfe"], 4
+        )
+        self.assertEqual(
+            paired_benchmark.ARM_SPECS["VPM"]["nfe"], 8
+        )
+        self.assertEqual(
+            sum(
+                paired_benchmark.counterbalanced_order(index)[0] == "J1"
+                for index in range(100)
+            ),
+            50,
+        )
 
     def test_timed_counter_contract_rejects_teacher_clean_and_artifacts(self):
         valid = {
@@ -103,6 +124,24 @@ class VJEPA2StudyHarnessTest(unittest.TestCase):
         self.assertIn('source "$ACTIVATE"', source)
         self.assertIn('ROBOT_WM_ORIGIN="$(', source)
         self.assertIn('"$REPO_ROOT"/robot_wm/*', source)
+
+    def test_submit_adds_dependent_one_gpu_paired_job(self):
+        source = SUBMIT.read_text(encoding="utf-8")
+        self.assertIn('--dependency="afterok:$PREVIOUS_JOB_ID"', source)
+        self.assertIn("--gpus-per-node=1", source)
+        self.assertIn("--paired-latency-job-id", source)
+        self.assertIn('"$PAIRED_SBATCH_SCRIPT"', source)
+
+    def test_paired_job_runs_benchmark_then_final_analyzer(self):
+        source = PAIRED_SBATCH.read_text(encoding="utf-8")
+        self.assertIn("#SBATCH --gpus-per-node=1", source)
+        self.assertIn('"$PYTHON_BIN" "$BENCHMARK"', source)
+        self.assertIn('"$PYTHON_BIN" "$ANALYZER"', source)
+        self.assertLess(
+            source.index('"$PYTHON_BIN" "$BENCHMARK"'),
+            source.index('"$PYTHON_BIN" "$ANALYZER"'),
+        )
+        self.assertIn("--bootstrap-samples 10000", source)
 
 
 if __name__ == "__main__":

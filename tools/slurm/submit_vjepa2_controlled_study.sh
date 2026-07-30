@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROJECT_ROOT="$REPO_ROOT/projects/latent_action_models"
 HELPER="$REPO_ROOT/tools/vjepa2_controlled_study.py"
 SBATCH_SCRIPT="$REPO_ROOT/tools/slurm/vjepa2_controlled_study.sbatch"
+PAIRED_SBATCH_SCRIPT="$REPO_ROOT/tools/slurm/vjepa2_paired_latency.sbatch"
 ACTIVATE="$REPO_ROOT/tools/env/activate_b200.sh"
 
 LACWM_BASE="${LACWM_BASE:-/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train}"
@@ -40,6 +41,9 @@ PARTITION="batch"
 TIME_LIMIT="12:00:00"
 CPUS="160"
 MEMORY="1000G"
+PAIRED_TIME_LIMIT="12:00:00"
+PAIRED_CPUS="32"
+PAIRED_MEMORY="256G"
 ACCOUNT=""
 QOS=""
 STUDY_ID=""
@@ -68,8 +72,10 @@ Validate or submit the immutable five-arm V-JEPA 2.1 controlled study:
 Primary completed-update milestones are exactly
 [1,50,100,200,400,800,1000]. A 600-update allocation-only stage ensures no
 Slurm allocation performs more than 200 new updates. The eight stage arrays
-form an afterok chain; a failed arm stops all later stages. Inference NFE is
-[1,2,4,6,8,12,20]. V-JEPA teacher calls during training/inference are zero.
+form an afterok chain; a failed arm stops all later stages. A final dependent
+one-B200 job performs the counterbalanced paired J1@NFE4 versus VPM@NFE8
+latency comparison. Inference NFE is [1,2,4,6,8,12,20]. V-JEPA teacher calls
+during training/inference are zero.
 
 Required path/provenance options can instead be supplied through the matching
 environment variables shown in parentheses:
@@ -207,7 +213,8 @@ done
   die "warm-start SHA-256 must be 64 lowercase hex characters"
 
 for path in \
-  "$HELPER" "$SBATCH_SCRIPT" "$ACTIVATE" "$PYTHON_BIN" "$EXTRACTOR_PYTHON" \
+  "$HELPER" "$SBATCH_SCRIPT" "$PAIRED_SBATCH_SCRIPT" "$ACTIVATE" \
+  "$PYTHON_BIN" "$EXTRACTOR_PYTHON" \
   "$BASELINE_CONFIG" "$DUAL_CONFIG" "$WARMSTART" "$VJEPA_CHECKPOINT" \
   "$PCA_STATS" "$TRAIN_MANIFEST" "$TRAIN_CACHE_METADATA" \
   "$VALIDATION_MANIFEST" "$VALIDATION_CACHE_METADATA" \
@@ -216,7 +223,8 @@ for path in \
 done
 [[ -x "$PYTHON_BIN" && -x "$EXTRACTOR_PYTHON" ]] || \
   die "training/extractor Python must be executable"
-[[ -x "$SBATCH_SCRIPT" ]] || die "Slurm entrypoint is not executable"
+[[ -x "$SBATCH_SCRIPT" && -x "$PAIRED_SBATCH_SCRIPT" ]] || \
+  die "Slurm entrypoints must be executable"
 [[ -d "$VJEPA_SOURCE/.git" ]] || die "V-JEPA source is not a Git checkout"
 [[ -d "$WAN_DIR_VALUE" && -d "$VIDEOX_HOME_VALUE/.git" ]] || \
   die "Wan/VideoX runtime assets are unavailable"
@@ -446,10 +454,49 @@ for endpoint in "${STAGE_ENDPOINTS[@]}"; do
   echo "Submitted endpoint $endpoint array: $JOB_ID"
 done
 
+PAIRED_JOB_NAME="vjepa2-${STUDY_ID:0:49}-paired-latency"
+PAIRED_SBATCH=(
+  --parsable
+  --nodes=1
+  --ntasks=1
+  --ntasks-per-node=1
+  --gpus-per-node=1
+  --cpus-per-task="$PAIRED_CPUS"
+  --mem="$PAIRED_MEMORY"
+  --time="$PAIRED_TIME_LIMIT"
+  --partition="$PARTITION"
+  --dependency="afterok:$PREVIOUS_JOB_ID"
+  --no-requeue
+  --open-mode=append
+  --export=ALL
+  --job-name="$PAIRED_JOB_NAME"
+  --output="$LOG_DIR/%x-%j.out"
+  --error="$LOG_DIR/%x-%j.err"
+)
+[[ -n "$ACCOUNT" ]] && PAIRED_SBATCH+=(--account="$ACCOUNT")
+[[ -n "$QOS" ]] && PAIRED_SBATCH+=(--qos="$QOS")
+PAIRED_JOB_ID="$(
+  sbatch \
+    "${PAIRED_SBATCH[@]}" \
+    "$PAIRED_SBATCH_SCRIPT" \
+    --study-id "$STUDY_ID" \
+    --expected-commit "$EXPECTED_COMMIT" \
+    --repo-root "$REPO_ROOT" \
+    --study-root "$STUDY_ROOT" \
+    --python "$PYTHON_BIN" \
+    --wan-dir "$WAN_DIR_VALUE" \
+    --videox-home "$VIDEOX_HOME_VALUE" \
+    --submission-record "$STUDY_ROOT/slurm_submission.json"
+)" || die "Slurm rejected the paired-latency job"
+[[ "$PAIRED_JOB_ID" =~ ^[0-9]+([_;][A-Za-z0-9_.%+-]+)?$ ]] || \
+  die "unexpected paired-latency job identifier: $PAIRED_JOB_ID"
+echo "Submitted paired-latency job: $PAIRED_JOB_ID"
+
 RECORD_ARGS=(
   "$PYTHON_BIN" "$HELPER" record-submission
   --study-manifest "$STUDY_MANIFEST"
   --max-concurrent-arms "$MAX_CONCURRENT_ARMS"
+  --paired-latency-job-id "$PAIRED_JOB_ID"
   "${ALLOW_ACTIVE_JOB_ARGS[@]}"
   --output "$STUDY_ROOT/slurm_submission.json"
 )
@@ -460,4 +507,6 @@ done
 
 echo "Submitted eight afterok-chained five-arm arrays."
 echo "Stage job IDs: ${JOB_IDS[*]}"
+echo "Paired latency job ID: $PAIRED_JOB_ID (afterok final array)"
 echo "Logs: $LOG_DIR/vjepa2-${STUDY_ID:0:54}-u<endpoint>-<job>_<arm>.out"
+echo "Paired latency log: $LOG_DIR/$PAIRED_JOB_NAME-<job>.out"

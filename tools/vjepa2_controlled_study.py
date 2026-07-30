@@ -996,16 +996,57 @@ def _study_manifest(
                 "teacher_invocations_allowed": 0,
                 "actual_wan_calls_must_equal_nfe": True,
                 "latency_protocol": {
-                    "batch_size": 1,
-                    "sources": ["autonomous", "off"],
-                    "warmups": 20,
-                    "timed_repetitions": 100,
-                    "statistics": ["p50_ms", "p95_ms"],
-                    "scope": "model preparation + Wan calls + VAE decode",
-                    "auxiliary_target": None,
-                    "clean_auxiliary_available": False,
-                    "timed_artifact_materialization": False,
-                    "separate_untimed_counter_audit": True,
+                    "per_arm_grid_telemetry": {
+                        "claim_role": "diagnostic_only",
+                        "batch_size": 1,
+                        "sources": ["autonomous", "off"],
+                        "warmups": 20,
+                        "timed_repetitions": 100,
+                        "statistics": ["p50_ms", "p95_ms"],
+                        "scope": (
+                            "model preparation + Wan calls + VAE decode"
+                        ),
+                        "auxiliary_target": None,
+                        "clean_auxiliary_available": False,
+                        "timed_artifact_materialization": False,
+                        "separate_untimed_counter_audit": True,
+                    },
+                    "final_claim_comparison": {
+                        "arms": [
+                            {
+                                "arm": "J1",
+                                "source": "autonomous",
+                                "nfe": 4,
+                            },
+                            {
+                                "arm": "VPM",
+                                "source": "autonomous",
+                                "nfe": 8,
+                            },
+                        ],
+                        "same_slurm_allocation": True,
+                        "same_node": True,
+                        "same_B200": True,
+                        "same_process": True,
+                        "both_models_resident": True,
+                        "identical_immutable_batch_inputs": True,
+                        "batch_size": 1,
+                        "warmup_pairs": 20,
+                        "timed_pairs": 100,
+                        "counterbalance": (
+                            "even pair J1-first; odd pair VPM-first"
+                        ),
+                        "timed_artifact_materialization": False,
+                        "forward_hooks_active_during_timing": False,
+                        "future_ground_truth_available_to_sampler": False,
+                        "clean_auxiliary_available_to_sampler": False,
+                        "online_teacher_calls": 0,
+                        "claim_statistics": [
+                            "paired_stratified_bootstrap_mean_relative_improvement",
+                            "p95_ms",
+                            "execution_order_strata",
+                        ],
+                    },
                 },
                 "autonomous_shuffled_policy": (
                     "quality-only mechanism control with effective batch >=2; "
@@ -1110,6 +1151,19 @@ def _study_manifest(
                 "array": f"0-{len(ARMS) - 1}",
                 "non_requeueable": True,
                 "dependency_chain": "afterok across allocation stage endpoints",
+                "paired_latency_post_study_job": {
+                    "dependency": "afterok:final_stage_array",
+                    "nodes": 1,
+                    "gpus": 1,
+                    "purpose": (
+                        "same-B200 paired J1 autonomous NFE4 versus "
+                        "VPM autonomous NFE8 benchmark"
+                    ),
+                    "runs_final_analyzer_after_benchmark": True,
+                    "analysis_output_root": str(
+                        run_root / "_analysis" / study_id
+                    ),
+                },
                 "allowed_preexisting_active_job_ids": allowed_jobs,
                 "existing_jobs_are_read_only_and_untouched": True,
             },
@@ -2048,6 +2102,8 @@ def command_record_submission(args: argparse.Namespace) -> int:
         )
     if any(JOB_ID_RE.fullmatch(value) is None for value in job_ids):
         raise ContractError("Slurm returned an invalid job ID")
+    if JOB_ID_RE.fullmatch(args.paired_latency_job_id) is None:
+        raise ContractError("Slurm returned an invalid paired-latency job ID")
     payload = _identity_payload(
         {
             "schema_version": SCHEMA_VERSION,
@@ -2060,6 +2116,18 @@ def command_record_submission(args: argparse.Namespace) -> int:
                 for endpoint, job_id in zip(STAGE_ENDPOINTS, job_ids)
             ],
             "dependency": "afterok",
+            "paired_latency_job": {
+                "job_id": args.paired_latency_job_id,
+                "dependency": "afterok:final_stage_array",
+                "comparison": "J1_autonomous_nfe4_vs_VPM_autonomous_nfe8",
+                "nodes": 1,
+                "gpus": 1,
+                "same_allocation_pairing": True,
+                "runs_final_analyzer_after_benchmark": True,
+                "analysis_output_root": study["slurm"][
+                    "paired_latency_post_study_job"
+                ]["analysis_output_root"],
+            },
             "max_concurrent_arms": int(args.max_concurrent_arms),
             "allowed_preexisting_active_job_ids": allowed,
         }
@@ -2178,6 +2246,7 @@ def build_parser() -> argparse.ArgumentParser:
     submission = subparsers.add_parser("record-submission")
     submission.add_argument("--study-manifest", required=True)
     submission.add_argument("--job-id", action="append", required=True)
+    submission.add_argument("--paired-latency-job-id", required=True)
     submission.add_argument("--max-concurrent-arms", type=int, required=True)
     submission.add_argument("--allow-active-job-id", action="append", default=[])
     submission.add_argument("--output", required=True)
