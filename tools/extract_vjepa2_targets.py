@@ -154,6 +154,15 @@ def _atomic_torch_save(path: Path, payload: Mapping[str, Any]) -> None:
                 pass
 
 
+def _pca_runtime_metadata() -> dict[str, str]:
+    """Return weights-only-safe scalar metadata for the PCA artifact."""
+    # PyTorch 2.6 exposes ``torch.__version__`` as a ``TorchVersion`` (a
+    # ``str`` subclass with a non-allowlisted pickle global).  Persist a plain
+    # built-in string so our mandatory ``weights_only=True`` validation can
+    # reload the artifact without weakening the safe-load boundary.
+    return {"torch_version": str(torch.__version__)}
+
+
 def validate_teacher_inputs(
     *,
     source_path: str | Path,
@@ -556,7 +565,7 @@ def fit_train_pca(
             "pca_seed": int(seed),
             "pca_rank_computed": int(q),
             "pca_iterations": int(pca_iterations),
-            "torch_version": torch.__version__,
+            **_pca_runtime_metadata(),
         }
     )
     _atomic_torch_save(output_path, payload)

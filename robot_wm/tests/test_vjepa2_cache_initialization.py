@@ -3,9 +3,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from tools.extract_vjepa2_targets import (
     ExtractionError,
+    _atomic_torch_save,
+    _pca_runtime_metadata,
     _publish_initialized_cache_directory,
 )
 
@@ -59,3 +62,14 @@ def test_initialization_never_replaces_a_published_cache(tmp_path):
 
     with pytest.raises(ExtractionError, match="existing cache directory"):
         _publish_initialized_cache_directory(cache, _metadata())
+
+
+def test_pca_runtime_metadata_is_weights_only_safe(tmp_path):
+    metadata = _pca_runtime_metadata()
+    assert type(metadata["torch_version"]) is str
+
+    artifact = tmp_path / "pca-metadata.pt"
+    _atomic_torch_save(artifact, metadata)
+
+    loaded = torch.load(artifact, map_location="cpu", weights_only=True)
+    assert loaded == metadata
