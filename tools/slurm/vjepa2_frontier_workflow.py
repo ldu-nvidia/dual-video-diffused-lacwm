@@ -1190,6 +1190,57 @@ def _require_allocation(
         raise WorkflowError(f"{job_id} accounting requested TRES differ")
 
 
+def _validated_recovery_lacwm_python(
+    *,
+    study: Mapping[str, Any],
+    submission: Mapping[str, Any],
+) -> str:
+    runtime = study.get("inputs", {}).get("runtime", {})
+    if not isinstance(runtime, Mapping):
+        raise WorkflowError("study runtime evidence is missing")
+    study_python = _require_line_safe(
+        runtime.get("python"), "study LACWM Python"
+    )
+    interpreters = submission.get("interpreters")
+    if not isinstance(interpreters, Mapping):
+        raise WorkflowError("predecessor interpreter evidence is missing")
+    submitted_python = _require_line_safe(
+        interpreters.get("lacwm"), "predecessor submitted LACWM Python"
+    )
+    study_path = Path(study_python)
+    submitted_path = Path(submitted_python)
+    if not study_path.is_absolute() or not submitted_path.is_absolute():
+        raise WorkflowError("recovery LACWM Python paths must be absolute")
+    try:
+        study_resolved = study_path.resolve(strict=True)
+        submitted_resolved = submitted_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise WorkflowError(
+            "recovery LACWM Python evidence does not resolve"
+        ) from exc
+    if (
+        study_path != study_resolved
+        or not study_resolved.is_file()
+        or not os.access(study_resolved, os.X_OK)
+    ):
+        raise WorkflowError(
+            "study LACWM Python must be a canonical executable file"
+        )
+    if (
+        not submitted_resolved.is_file()
+        or not os.access(submitted_path, os.X_OK)
+        or submitted_resolved != study_resolved
+    ):
+        raise WorkflowError(
+            "predecessor submitted LACWM Python does not resolve to "
+            "the study runtime"
+        )
+    # Preserve the immutable launcher spelling for exact SubmitLine matching.
+    # The study records the canonical target, whereas the original sbatch
+    # commands intentionally contain the environment symlink.
+    return submitted_python
+
+
 def _validate_recovery_submission(
     *,
     path: Path,
@@ -1252,6 +1303,12 @@ def _validate_recovery_submission(
         }
     ):
         raise WorkflowError("predecessor submission DAG identities differ")
+    interpreters = submission.get("interpreters")
+    if not isinstance(interpreters, Mapping):
+        raise WorkflowError("predecessor interpreter evidence is missing")
+    _require_line_safe(
+        interpreters.get("lacwm"), "predecessor submitted LACWM Python"
+    )
     adoption = submission.get("cache_adoption_evidence")
     if (
         not isinstance(adoption, Mapping)
@@ -1381,7 +1438,9 @@ def validate_completed_recovery_rows(
         raise WorkflowError("completed cache SubmitLine differs from adopted job")
 
     runtime = study.get("inputs", {}).get("runtime", {})
-    python = _require_line_safe(runtime.get("python"), "study LACWM Python")
+    python = _validated_recovery_lacwm_python(
+        study=study, submission=submission
+    )
     wan_dir = _require_line_safe(runtime.get("wan_dir"), "study Wan directory")
     videox_home = _require_line_safe(
         runtime.get("videox_home"), "study VideoX checkout"

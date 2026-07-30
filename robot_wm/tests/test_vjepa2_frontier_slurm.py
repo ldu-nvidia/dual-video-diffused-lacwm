@@ -651,6 +651,13 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
         scientific_repo = self.root / "scientific"
         for directory in (prior_log_dir, prior_controller, scientific_repo):
             directory.mkdir(parents=True, exist_ok=True)
+        canonical_python = self.root / "python" / "python3.10"
+        canonical_python.parent.mkdir(parents=True)
+        canonical_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        canonical_python.chmod(0o755)
+        submitted_python = self.root / "envs" / "lacwm" / "bin" / "python"
+        submitted_python.parent.mkdir(parents=True)
+        submitted_python.symlink_to(canonical_python)
         args = argparse.Namespace(
             study_root=str(study_root),
             training_commit="9" * 40,
@@ -668,7 +675,7 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
         study: dict[str, object] = {
             "inputs": {
                 "runtime": {
-                    "python": "/env/lacwm/bin/python",
+                    "python": str(canonical_python),
                     "wan_dir": "/assets/wan",
                     "videox_home": "/src/videox",
                 }
@@ -680,7 +687,10 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
                 "submit_line_sha256": workflow.hashlib.sha256(
                     cache_submit_line.encode("utf-8")
                 ).hexdigest()
-            }
+            },
+            "interpreters": {
+                "lacwm": str(submitted_python),
+            },
         }
         prior_commit = "b" * 40
         expected_user = workflow.pwd.getpwuid(os.getuid()).pw_name
@@ -733,7 +743,7 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
                 "--scientific-evaluator-commit",
                 "8" * 40,
                 "--python",
-                "/env/lacwm/bin/python",
+                str(submitted_python),
             ],
         )
 
@@ -757,7 +767,7 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
                     "--evaluator-commit",
                     "8" * 40,
                     "--python",
-                    "/env/lacwm/bin/python",
+                    str(submitted_python),
                     "--wan-dir",
                     "/assets/wan",
                     "--videox-home",
@@ -792,7 +802,7 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
                 "--scientific-evaluator-commit",
                 "8" * 40,
                 "--python",
-                "/env/lacwm/bin/python",
+                str(submitted_python),
                 "--wan-dir",
                 "/assets/wan",
                 "--videox-home",
@@ -945,6 +955,14 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
             prior_log_dir=prior_log_dir,
             scientific_repo=scientific_repo,
         )
+        submitted_python = Path(submission["interpreters"]["lacwm"])
+        study_python = Path(study["inputs"]["runtime"]["python"])
+        self.assertTrue(submitted_python.is_symlink())
+        self.assertNotEqual(submitted_python, study_python)
+        self.assertEqual(
+            submitted_python.resolve(strict=True),
+            study_python.resolve(strict=True),
+        )
         self.assertEqual(evidence["481556"]["state"], "COMPLETED")
         self.assertEqual(evidence["481577"]["exit_code"], "2:0")
         self.assertEqual(evidence["481578"]["state"], "CANCELLED")
@@ -1000,6 +1018,20 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
                 rows,
                 **{**kwargs, "submission": bad_submission},
             )
+        unrelated_python = self.root / "python" / "unrelated-python"
+        unrelated_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        unrelated_python.chmod(0o755)
+        bad_interpreter = json.loads(json.dumps(submission))
+        bad_interpreter["interpreters"]["lacwm"] = str(unrelated_python)
+        with self.assertRaisesRegex(
+            workflow.WorkflowError,
+            "does not resolve to the study runtime",
+        ):
+            workflow.validate_completed_recovery_rows(
+                args,
+                rows,
+                **{**kwargs, "submission": bad_interpreter},
+            )
 
     def test_recovery_predecessor_receipt_binds_all_exact_job_ids(self) -> None:
         (
@@ -1033,6 +1065,7 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
                 "submit_line_exact_match": True,
                 "submit_line_sha256": "1" * 64,
             },
+            "interpreters": {"lacwm": "/env/lacwm/bin/python"},
             "final_artifact_gate_job_id": args.failed_gate_job_id,
             "validation_job_ids": {
                 "J1": args.cancelled_j1_job_id,
@@ -1072,6 +1105,27 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
         self.assertEqual(validated["cache_job_id"], "481556")
         self.assertEqual(controller, prior_controller)
         self.assertEqual(commit, "b" * 40)
+
+        missing_interpreter = json.loads(json.dumps(payload))
+        missing_interpreter.pop("interpreters")
+        path.unlink()
+        _write_json(path, missing_interpreter)
+        with self.assertRaisesRegex(
+            workflow.WorkflowError, "interpreter evidence is missing"
+        ):
+            workflow._validate_recovery_submission(
+                path=path,
+                study_root=Path(args.study_root),
+                training_commit=args.training_commit,
+                cache_job_id=args.cache_job_id,
+                failed_gate_job_id=args.failed_gate_job_id,
+                cancelled_vpm_job_id=args.cancelled_vpm_job_id,
+                cancelled_j1_job_id=args.cancelled_j1_job_id,
+                cancelled_selection_job_id=args.cancelled_selection_job_id,
+                final_job_id=args.final_job_id,
+                scientific_repo=scientific_repo,
+                scientific_commit=args.scientific_commit,
+            )
 
         payload["final_update_1000_job_id"] = "999999"
         path.unlink()
