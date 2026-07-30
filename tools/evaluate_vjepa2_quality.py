@@ -23,6 +23,11 @@ metric is instantiated: the study manifest does not pin an LPIPS/video-model
 checkpoint, and implicit downloads are forbidden.  Claims are therefore
 restricted to latent and decoded reconstruction metrics.
 
+The opt-in frontier mode is separate: it evaluates the full autonomous grid on
+validation, then only a frozen pair on a newly registered episode-disjoint
+lockbox. The already inspected original test split cannot serve as that
+lockbox.
+
 LACWM clock convention: ``sigma=1`` is Gaussian noise and ``sigma=0`` is clean.
 """
 
@@ -41,6 +46,13 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    from tools import vjepa2_frontier_lockbox as frontier_lockbox
+    from tools import vjepa2_nfe_frontier as frontier_contract
+except ModuleNotFoundError:  # Direct ``python tools/...`` invocation.
+    import vjepa2_frontier_lockbox as frontier_lockbox
+    import vjepa2_nfe_frontier as frontier_contract
 
 
 SCHEMA_VERSION = 1
@@ -64,6 +76,8 @@ SOURCE_CODES = {
 }
 QUANTITATIVE_ARMS = {"VPM", "A1", "J0", "J1"}
 EXPECTED_TEST_CLIPS = 128
+EXPECTED_FRONTIER_CLIPS = {"validation": 64, "lockbox": 128}
+FRONTIER_SAMPLE_ID_OFFSETS = {"validation": 1_000_000, "lockbox": 3_000_000}
 EXPECTED_WORLD_SIZE = 8
 DEFAULT_BATCH_SIZE_PER_RANK = 2
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -85,6 +99,38 @@ def intermediate_grid() -> tuple[tuple[str, int], ...]:
 
 def final_grid() -> tuple[tuple[str, int], ...]:
     return tuple((source, nfe) for source in SOURCES for nfe in NFE_STEPS)
+
+
+def frontier_validation_grid() -> tuple[tuple[str, int], ...]:
+    """Validation-only deployable grid used to select the NFE frontier."""
+
+    return tuple(("autonomous", nfe) for nfe in NFE_STEPS)
+
+
+def frontier_test_grid(
+    arm: str, selection: Mapping[str, Any]
+) -> tuple[tuple[str, int], ...]:
+    """Frozen test grid; no candidate selection is permitted on test."""
+
+    pair = selection.get("selected_pair")
+    left = pair.get("left") if isinstance(pair, Mapping) else None
+    reference = pair.get("reference") if isinstance(pair, Mapping) else None
+    k = left.get("nfe") if isinstance(left, Mapping) else None
+    m = reference.get("nfe") if isinstance(reference, Mapping) else None
+    if (
+        arm not in {"J1", "VPM"}
+        or not isinstance(k, int)
+        or isinstance(k, bool)
+        or not isinstance(m, int)
+        or isinstance(m, bool)
+        or k < 2
+        or k >= m
+        or k not in NFE_STEPS
+        or m not in NFE_STEPS
+    ):
+        raise QualityEvaluationError("frontier selection pair is invalid")
+    nfes = (k,) if arm == "J1" else (k, m)
+    return tuple(("autonomous", nfe) for nfe in nfes)
 
 
 def quality_grid(completed_updates: int) -> tuple[tuple[str, int], ...]:
@@ -453,8 +499,31 @@ def _validate_inputs(
     verify_snapshot_sha256: bool,
     verify_cache_arrays: bool,
 ) -> dict[str, Any]:
+    frontier_split = getattr(args, "frontier_split", None)
+    evaluator_commit = (
+        getattr(args, "evaluator_commit", None) or args.expected_commit
+    )
     repo = _canonical_directory(args.repo_root, "repository root")
-    _assert_clean_commit(repo, args.expected_commit)
+    executed_roots = {
+        Path(module.__file__).resolve().parents[1]
+        for module in (frontier_contract, frontier_lockbox)
+    }
+    executed_roots.add(Path(__file__).resolve().parents[1])
+    if executed_roots != {repo}:
+        raise QualityEvaluationError(
+            "evaluator and frontier helpers do not belong to --repo-root"
+        )
+    _assert_clean_commit(repo, evaluator_commit)
+    try:
+        inference_compatibility = (
+            frontier_contract.git_inference_compatibility(
+                repo,
+                training_commit=args.expected_commit,
+                tool_commit=evaluator_commit,
+            )
+        )
+    except frontier_contract.FrontierError as exc:
+        raise QualityEvaluationError(str(exc)) from exc
     run_dir = _canonical_directory(args.run_dir, "arm run directory")
     arm_path = _canonical_file(args.arm_manifest, "arm manifest")
     study_path = _canonical_file(args.study_manifest, "study manifest")
@@ -491,6 +560,14 @@ def _validate_inputs(
         != arm.get("study_identity_sha256")
     ):
         raise QualityEvaluationError("study manifest identity differs")
+    videox_path = _canonical_directory(
+        study.get("inputs", {}).get("runtime", {}).get("videox_home", ""),
+        "pinned VideoX-Fun checkout",
+    )
+    try:
+        videox_runtime = frontier_contract.git_runtime_provenance(videox_path)
+    except frontier_contract.FrontierError as exc:
+        raise QualityEvaluationError(str(exc)) from exc
     if (
         not _identity_valid(stage)
         or stage.get("kind") != "vjepa2_controlled_study_stage"
@@ -540,15 +617,132 @@ def _validate_inputs(
         raise QualityEvaluationError(
             "live snapshot differs from the immutable stage outcome"
         )
+    selection: dict[str, Any] | None = None
+    selection_path: Path | None = None
+    selection_identity: str | None = None
+    lockbox_registration: dict[str, Any] | None = None
+    lockbox_validation: dict[str, Any] | None = None
+    lockbox_identity: str | None = None
+    if frontier_split is None:
+        split_name = "test"
+        expected_clips = EXPECTED_TEST_CLIPS
+        dataset_config_key = "viz_dataset"
+        grid = quality_grid(args.completed_updates)
+        expected_output = (
+            run_dir / "quality" / f"update_{args.completed_updates:04d}"
+        )
+        if getattr(args, "frontier_selection", None) is not None:
+            raise QualityEvaluationError(
+                "--frontier-selection requires --frontier-split lockbox"
+            )
+    else:
+        if args.completed_updates != FINAL_UPDATE or arm_code not in {"J1", "VPM"}:
+            raise QualityEvaluationError(
+                "frontier evaluation requires final J1 or VPM checkpoint"
+            )
+        if args.batch_size_per_rank != DEFAULT_BATCH_SIZE_PER_RANK:
+            raise QualityEvaluationError(
+                "frontier evaluation requires batch size 2 per rank"
+            )
+        split_name = frontier_split
+        expected_clips = EXPECTED_FRONTIER_CLIPS[split_name]
+        dataset_config_key = (
+            "val_dataset" if split_name == "validation" else "viz_dataset"
+        )
+        if split_name == "validation":
+            if getattr(args, "frontier_selection", None) is not None:
+                raise QualityEvaluationError(
+                    "validation frontier grid must precede selection"
+                )
+            grid = frontier_validation_grid()
+            expected_output = (
+                run_dir
+                / "frontier_quality"
+                / "validation"
+                / f"update_{args.completed_updates:04d}"
+            )
+        else:
+            if getattr(args, "frontier_selection", None) is None:
+                raise QualityEvaluationError(
+                    "frontier lockbox requires a frozen validation selection"
+                )
+            selection_path = _canonical_file(
+                args.frontier_selection, "frontier selection"
+            )
+            selection = _read_json(selection_path, "frontier selection")
+            if (
+                not _identity_valid(selection)
+                or selection.get("kind") != "vjepa2_nfe_frontier_selection"
+                or selection.get("confirmatory_eligible") is not True
+                or selection.get("selection_split") != "validation"
+                or selection.get("training_git_commit")
+                != args.expected_commit
+                or selection.get("evaluator_git_commit")
+                != evaluator_commit
+                or selection.get("study_identity_sha256")
+                != study.get("identity_sha256")
+                or selection.get("arm_identity_sha256", {}).get(arm_code)
+                != arm.get("identity_sha256")
+                or selection.get("stage_identity_sha256", {}).get(arm_code)
+                != stage.get("identity_sha256")
+            ):
+                raise QualityEvaluationError(
+                    "frontier lockbox selection is not confirmatory "
+                    "validation evidence"
+                )
+            selection_identity = str(selection["identity_sha256"])
+            candidate_lockbox = selection.get("lockbox_registration")
+            if not isinstance(candidate_lockbox, dict):
+                raise QualityEvaluationError(
+                    "selection does not bind a registered fresh lockbox"
+                )
+            try:
+                lockbox_validation = frontier_lockbox.validate_registration(
+                    candidate_lockbox,
+                    study=study,
+                    rehash_arrays=False,
+                    verify_construction=verify_cache_arrays,
+                )
+            except frontier_lockbox.LockboxError as exc:
+                raise QualityEvaluationError(str(exc)) from exc
+            lockbox_registration = candidate_lockbox
+            lockbox_identity = str(candidate_lockbox["identity_sha256"])
+            if (
+                candidate_lockbox.get("registration_git_commit")
+                != evaluator_commit
+                or candidate_lockbox.get("inference_code_compatibility")
+                != inference_compatibility
+            ):
+                raise QualityEvaluationError(
+                    "lockbox registration/evaluator code provenance differs"
+                )
+            grid = frontier_test_grid(arm_code, selection)
+            expected_output = (
+                run_dir
+                / "frontier_quality"
+                / "lockbox"
+                / lockbox_identity
+                / selection_identity
+                / f"update_{args.completed_updates:04d}"
+            )
     output_dir = Path(args.output_dir).expanduser()
-    expected_output = (
-        run_dir / "quality" / f"update_{args.completed_updates:04d}"
-    )
     if output_dir.absolute() != expected_output:
         raise QualityEvaluationError(
             f"output directory must be exactly {expected_output}"
         )
-    test_split = study.get("inputs", {}).get("splits", {}).get("test", {})
+    if split_name == "lockbox":
+        assert lockbox_registration is not None
+        evaluation_split = {
+            "clip_manifest": lockbox_registration["manifest"],
+            "cache": {
+                "metadata": lockbox_registration["cache"]["metadata"],
+                **lockbox_registration["cache"]["arrays"],
+            },
+        }
+    else:
+        evaluation_split = (
+            study.get("inputs", {}).get("splits", {}).get(split_name, {})
+        )
     quality_protocol = study.get("inference", {}).get("quality_protocol", {})
     expected_grid = [
         {"source": source, "nfe": nfe}
@@ -559,7 +753,7 @@ def _validate_inputs(
         if args.completed_updates == FINAL_UPDATE
         else quality_protocol.get("intermediate_grid")
     )
-    if (
+    if frontier_split is None and (
         quality_protocol.get("fixed_test_clips") != EXPECTED_TEST_CLIPS
         or quality_protocol.get("distributed_world_size")
         != EXPECTED_WORLD_SIZE
@@ -586,48 +780,50 @@ def _validate_inputs(
         raise QualityEvaluationError(
             "study quality protocol differs from evaluator contract"
         )
-    manifest_record = test_split.get("clip_manifest", {})
-    cache_record = test_split.get("cache", {}).get("metadata", {})
+    manifest_record = evaluation_split.get("clip_manifest", {})
+    cache_record = evaluation_split.get("cache", {}).get("metadata", {})
     if (
         not isinstance(manifest_record, dict)
-        or manifest_record.get("entries") != EXPECTED_TEST_CLIPS
+        or manifest_record.get("entries") != expected_clips
         or not isinstance(cache_record, dict)
     ):
         raise QualityEvaluationError(
-            "study must pin exactly 128 immutable test clips"
+            f"study must pin exactly {expected_clips} immutable {split_name} clips"
         )
-    test_manifest = _canonical_file(
-        manifest_record.get("path", ""), "test clip manifest"
+    evaluation_manifest = _canonical_file(
+        manifest_record.get("path", ""), f"{split_name} clip manifest"
     )
     cache_metadata = _canonical_file(
-        cache_record.get("path", ""), "test cache metadata"
+        cache_record.get("path", ""), f"{split_name} cache metadata"
     )
     if (
-        manifest_record.get("sha256") != _sha256(test_manifest)
+        manifest_record.get("sha256") != _sha256(evaluation_manifest)
         or cache_record.get("sha256") != _sha256(cache_metadata)
     ):
-        raise QualityEvaluationError("test manifest/cache digest differs")
-    cache = _read_json(cache_metadata, "test cache metadata")
+        raise QualityEvaluationError(
+            f"{split_name} manifest/cache digest differs"
+        )
+    cache = _read_json(cache_metadata, f"{split_name} cache metadata")
     cache_arrays: dict[str, dict[str, Any]] = {}
     for name, file_key, sha_key in (
         ("target", "target_file", "target_sha256"),
         ("rgb", "rgb_file", "rgb_sha256"),
         ("actions", "actions_file", "actions_sha256"),
     ):
-        study_record = test_split.get("cache", {}).get(name)
+        study_record = evaluation_split.get("cache", {}).get(name)
         if not isinstance(study_record, dict):
             raise QualityEvaluationError(
-                f"study lacks pinned test {name} array"
+                f"study lacks pinned {split_name} {name} array"
             )
         array_path = _canonical_file(
-            study_record.get("path", ""), f"test {name} cache array"
+            study_record.get("path", ""), f"{split_name} {name} cache array"
         )
         metadata_value = cache.get(file_key)
         metadata_path = Path(str(metadata_value))
         if not metadata_path.is_absolute():
             metadata_path = cache_metadata.parent / metadata_path
         metadata_path = _canonical_file(
-            metadata_path, f"metadata test {name} cache array"
+            metadata_path, f"metadata {split_name} {name} cache array"
         )
         recorded_sha = study_record.get("sha256")
         if (
@@ -642,7 +838,7 @@ def _validate_inputs(
             )
         ):
             raise QualityEvaluationError(
-                f"test {name} cache array differs from immutable study record"
+                f"{split_name} {name} cache array differs from study record"
             )
         cache_arrays[name] = {
             "path": str(array_path),
@@ -651,22 +847,37 @@ def _validate_inputs(
             "full_sha256_verified_by_rank0": verify_cache_arrays,
         }
     descriptors = []
-    with test_manifest.open(encoding="utf-8") as handle:
+    with evaluation_manifest.open(encoding="utf-8") as handle:
         for line in handle:
             if line.strip():
                 descriptors.append(json.loads(line))
-    if len(descriptors) != EXPECTED_TEST_CLIPS:
-        raise QualityEvaluationError("test manifest does not contain 128 rows")
+    if len(descriptors) != expected_clips:
+        raise QualityEvaluationError(
+            f"{split_name} manifest does not contain {expected_clips} rows"
+        )
     indexes = [int(row.get("auxiliary_index", -1)) for row in descriptors]
     clip_ids = [str(row.get("clip_id", "")) for row in descriptors]
     if (
-        indexes != list(range(EXPECTED_TEST_CLIPS))
-        or len(set(clip_ids)) != EXPECTED_TEST_CLIPS
+        indexes != list(range(expected_clips))
+        or len(set(clip_ids)) != expected_clips
         or any(not clip_id for clip_id in clip_ids)
     ):
         raise QualityEvaluationError(
-            "test clip IDs/indexes are not unique, dense, and ordered"
+            f"{split_name} clip IDs/indexes are not unique, dense, and ordered"
         )
+    if selection is not None:
+        validation_clip_ids = {
+            str(unit[0])
+            for unit in selection.get("selection_clip_units", [])
+            if isinstance(unit, list) and len(unit) == 2
+        }
+        if (
+            len(validation_clip_ids) != EXPECTED_FRONTIER_CLIPS["validation"]
+            or validation_clip_ids.intersection(clip_ids)
+        ):
+            raise QualityEvaluationError(
+                "frozen validation selection and lockbox clips are not disjoint"
+            )
     return {
         "repo": repo,
         "run_dir": run_dir,
@@ -682,10 +893,25 @@ def _validate_inputs(
         "stage_manifest": stage,
         "stage_outcome": stage_outcome,
         "arm_code": arm_code,
-        "test_manifest": test_manifest,
+        "evaluation_manifest": evaluation_manifest,
         "cache_metadata": cache_metadata,
         "cache_arrays": cache_arrays,
         "descriptors": descriptors,
+        "evaluation_split": split_name,
+        "frontier_mode": frontier_split is not None,
+        "frontier_selection_path": selection_path,
+        "frontier_selection": selection,
+        "frontier_selection_identity_sha256": selection_identity,
+        "lockbox_registration": lockbox_registration,
+        "lockbox_registration_identity_sha256": lockbox_identity,
+        "lockbox_validation": lockbox_validation,
+        "dataset_config_key": dataset_config_key,
+        "expected_clips": expected_clips,
+        "grid": grid,
+        "training_git_commit": args.expected_commit,
+        "evaluator_git_commit": evaluator_commit,
+        "inference_code_compatibility": inference_compatibility,
+        "videox_runtime": videox_runtime,
         "output_dir": expected_output,
     }
 
@@ -736,21 +962,36 @@ def _load_model_and_dataset(
     _assert_teacher_absent(model, config)
     if getattr(model, "time_frequency_transform", None) is not None:
         raise QualityEvaluationError("online auxiliary transform is present")
-    dataset = instantiate(config.viz_dataset)
-    if len(dataset) != EXPECTED_TEST_CLIPS:
+    dataset_config = config[inputs["dataset_config_key"]]
+    if inputs["evaluation_split"] == "lockbox":
+        from omegaconf import OmegaConf
+
+        dataset_config = OmegaConf.create(
+            OmegaConf.to_container(dataset_config, resolve=True)
+        )
+        dataset_config.datasets.ABC.clip_manifest = str(
+            inputs["evaluation_manifest"]
+        )
+        dataset_config.datasets.ABC.cache_metadata = str(
+            inputs["cache_metadata"]
+        )
+    dataset = instantiate(dataset_config)
+    if len(dataset) != inputs["expected_clips"]:
         raise QualityEvaluationError(
-            f"resolved test dataset has {len(dataset)} != 128 clips"
+            f"resolved {inputs['evaluation_split']} dataset has {len(dataset)} "
+            f"!= {inputs['expected_clips']} clips"
         )
     abc = getattr(dataset, "datasets", {}).get("ABC")
     if (
         abc is None
         or Path(str(getattr(abc, "clip_manifest", "")))
-        != inputs["test_manifest"]
+        != inputs["evaluation_manifest"]
         or Path(str(getattr(abc, "cache_metadata", "")))
         != inputs["cache_metadata"]
     ):
         raise QualityEvaluationError(
-            "resolved test dataset differs from pinned study inputs"
+            f"resolved {inputs['evaluation_split']} dataset differs from "
+            "pinned study inputs"
         )
     return model, dataset, config
 
@@ -858,6 +1099,19 @@ def _artifact_rows(
     clip_indexes: Sequence[int],
     clip_ids: Sequence[str],
     observed_wan_calls: int,
+    evaluation_split: str | None = None,
+    frontier_selection_identity_sha256: str | None = None,
+    lockbox_registration_identity_sha256: str | None = None,
+    study_identity_sha256: str | None = None,
+    arm_identity_sha256: str | None = None,
+    stage_identity_sha256: str | None = None,
+    training_git_commit: str | None = None,
+    evaluator_git_commit: str | None = None,
+    inference_code_compatibility_sha256: str | None = None,
+    videox_runtime_identity_sha256: str | None = None,
+    evaluation_world_size: int | None = None,
+    evaluation_batch_size_per_rank: int | None = None,
+    sampling_ids: Sequence[int] | None = None,
 ) -> list[dict[str, Any]]:
     import torch
 
@@ -999,13 +1253,19 @@ def _artifact_rows(
         raise QualityEvaluationError(
             f"quality NFE record differs: {declared_nfe}"
         )
+    expected_sample_ids = tuple(
+        int(value)
+        for value in (
+            clip_indexes if sampling_ids is None else sampling_ids
+        )
+    )
     recorded_sample_ids = tuple(
         int(value) for value in artifacts["sample_ids"].tolist()
     )
-    if recorded_sample_ids != tuple(int(value) for value in clip_indexes):
+    if recorded_sample_ids != expected_sample_ids:
         raise QualityEvaluationError(
             f"artifact sample IDs differ: {recorded_sample_ids} != "
-            f"{tuple(clip_indexes)}"
+            f"{expected_sample_ids}"
         )
     if not torch.equal(auxiliary_initial, auxiliary_noise):
         raise QualityEvaluationError(
@@ -1069,6 +1329,36 @@ def _artifact_rows(
         )
     rows = []
     for index, (clip_index, clip_id) in enumerate(zip(clip_indexes, clip_ids)):
+        frontier_fields = (
+            {}
+            if evaluation_split is None
+            else {
+                "evaluation_split": evaluation_split,
+                "frontier_selection_identity_sha256": (
+                    frontier_selection_identity_sha256
+                ),
+                "lockbox_registration_identity_sha256": (
+                    lockbox_registration_identity_sha256
+                ),
+                "study_identity_sha256": study_identity_sha256,
+                "arm_identity_sha256": arm_identity_sha256,
+                "stage_identity_sha256": stage_identity_sha256,
+                "training_git_commit": training_git_commit,
+                "evaluator_git_commit": evaluator_git_commit,
+                "inference_code_compatibility_sha256": (
+                    inference_code_compatibility_sha256
+                ),
+                "videox_runtime_identity_sha256": (
+                    videox_runtime_identity_sha256
+                ),
+                "evaluation_world_size": evaluation_world_size,
+                "evaluation_batch_size_per_rank": (
+                    evaluation_batch_size_per_rank
+                ),
+                "sampling_id": expected_sample_ids[index],
+                "sampling_namespace": evaluation_split,
+            }
+        )
         row = _identity_payload(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -1077,6 +1367,7 @@ def _artifact_rows(
                 "completed_updates": completed_updates,
                 "clip_index": int(clip_index),
                 "clip_id": str(clip_id),
+                **frontier_fields,
                 "source": source,
                 "oracle_leakage": source in ORACLE_SOURCES,
                 "deployable_evidence": deployable_source,
@@ -1151,8 +1442,10 @@ def _artifact_rows(
     return rows
 
 
-def _expected_rank_indexes(rank: int, world_size: int) -> list[int]:
-    return list(range(rank, EXPECTED_TEST_CLIPS, world_size))
+def _expected_rank_indexes(
+    rank: int, world_size: int, clip_count: int = EXPECTED_TEST_CLIPS
+) -> list[int]:
+    return list(range(rank, clip_count, world_size))
 
 
 def _validate_global_rows(
@@ -1162,10 +1455,14 @@ def _validate_global_rows(
     completed_updates: int,
     grid: Sequence[tuple[str, int]],
     descriptors: Sequence[Mapping[str, Any]],
+    expected_clips: int = EXPECTED_TEST_CLIPS,
+    evaluation_split: str | None = None,
+    frontier_selection_identity_sha256: str | None = None,
+    lockbox_registration_identity_sha256: str | None = None,
 ) -> dict[str, Any]:
     expected_keys = {
         (index, source, nfe)
-        for index in range(EXPECTED_TEST_CLIPS)
+        for index in range(expected_clips)
         for source, nfe in grid
     }
     observed: dict[tuple[int, str, int], Mapping[str, Any]] = {}
@@ -1200,6 +1497,28 @@ def _validate_global_rows(
             or row.get("online_teacher_call_count") != 0
             or row.get("actual_wan_call_count") != key[2]
             or row.get("auxiliary_history_latent_frames") != 0
+            or (
+                evaluation_split is not None
+                and row.get("evaluation_split") != evaluation_split
+            )
+            or (
+                evaluation_split in {"test", "lockbox"}
+                and row.get("frontier_selection_identity_sha256")
+                != frontier_selection_identity_sha256
+            )
+            or (
+                evaluation_split == "lockbox"
+                and row.get("lockbox_registration_identity_sha256")
+                != lockbox_registration_identity_sha256
+            )
+            or (
+                evaluation_split is not None
+                and (
+                    row.get("sampling_namespace") != evaluation_split
+                    or row.get("sampling_id")
+                    != FRONTIER_SAMPLE_ID_OFFSETS[evaluation_split] + key[0]
+                )
+            )
         ):
             raise QualityEvaluationError(
                 f"quality row provenance/counters differ: {key}"
@@ -1288,7 +1607,7 @@ def _validate_global_rows(
         "auxiliary_initial_state_sha256",
         "auxiliary_initial_noise_sha256",
     )
-    for clip_index in range(EXPECTED_TEST_CLIPS):
+    for clip_index in range(expected_clips):
         clip_rows = [
             observed[(clip_index, source, nfe)] for source, nfe in grid
         ]
@@ -1312,7 +1631,7 @@ def _validate_global_rows(
     available_by_nfe: dict[int, list[str]] = {}
     for source, nfe in grid:
         available_by_nfe.setdefault(nfe, []).append(source)
-    for clip_index in range(EXPECTED_TEST_CLIPS):
+    for clip_index in range(expected_clips):
         for nfe, available_sources in available_by_nfe.items():
             if arm in {"VPM", "A1"}:
                 compare_sources = available_sources
@@ -1343,7 +1662,7 @@ def _validate_global_rows(
                     )
     return {
         "record_count": len(rows),
-        "clip_count": EXPECTED_TEST_CLIPS,
+        "clip_count": expected_clips,
         "grid_count": len(grid),
         "all_clip_source_nfe_keys_present_once": True,
         "per_clip_clean_and_initial_noise_pairing_exact": True,
@@ -1380,25 +1699,24 @@ def command_evaluate(args: argparse.Namespace) -> int:
         raise QualityEvaluationError(
             f"quality evaluation requires B200, found {properties.name}"
         )
-    assigned_indexes = _expected_rank_indexes(rank, world_size)
+    assigned_indexes = _expected_rank_indexes(
+        rank, world_size, inputs["expected_clips"]
+    )
     if len(assigned_indexes) % args.batch_size_per_rank:
         raise QualityEvaluationError(
             "each rank's clip count must divide batch size exactly"
         )
     if rank == 0:
-        quality_parent = inputs["run_dir"] / "quality"
-        if not quality_parent.exists():
-            os.mkdir(quality_parent, mode=0o700)
         if inputs["output_dir"].exists():
             raise QualityEvaluationError(
                 f"fresh quality output already exists: {inputs['output_dir']}"
             )
-        os.mkdir(inputs["output_dir"], mode=0o700)
+        inputs["output_dir"].mkdir(parents=True, mode=0o700)
     dist.barrier()
     output_dir = _canonical_directory(
         inputs["output_dir"], "quality output directory"
     )
-    grid = quality_grid(args.completed_updates)
+    grid = inputs["grid"]
     model, dataset, _config = _load_model_and_dataset(inputs, device=device)
     # Preserve every batch element in the transient CPU evidence.  The
     # evaluator immediately reduces it to per-clip metrics/hashes and never
@@ -1436,6 +1754,11 @@ def command_evaluate(args: argparse.Namespace) -> int:
             ]
             scoring_targets = _prepare_scoring_targets(model, batch)
             history_rgb = batch["rgb"][:, : model.num_history_frames]
+            sampling_ids = batch["clip_index"]
+            if inputs["frontier_mode"]:
+                sampling_ids = sampling_ids + FRONTIER_SAMPLE_ID_OFFSETS[
+                    inputs["evaluation_split"]
+                ]
             for source, nfe in grid:
                 model.evaluation_condition_sources = (source,)
                 model.evaluation_nfe_steps = (nfe,)
@@ -1455,7 +1778,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                             auxiliary_target=batch["auxiliary_target"],
                             collect_artifacts=True,
                             deployment_mode=False,
-                            sample_ids=batch["clip_index"],
+                            sample_ids=sampling_ids,
                         )
                     else:
                         model.sample_future_deployable(
@@ -1463,7 +1786,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                             batch["actions"],
                             morphology_index=batch["morphology_index"],
                             collect_artifacts=True,
-                            sample_ids=batch["clip_index"],
+                            sample_ids=sampling_ids,
                         )
                 artifacts = model.pop_visualization_artifacts()
                 if not isinstance(artifacts, Mapping):
@@ -1500,6 +1823,44 @@ def command_evaluate(args: argparse.Namespace) -> int:
                         clip_indexes=clip_indexes,
                         clip_ids=clip_ids,
                         observed_wan_calls=hook_calls,
+                        evaluation_split=(
+                            inputs["evaluation_split"]
+                            if inputs["frontier_mode"]
+                            else None
+                        ),
+                        frontier_selection_identity_sha256=inputs[
+                            "frontier_selection_identity_sha256"
+                        ],
+                        lockbox_registration_identity_sha256=inputs[
+                            "lockbox_registration_identity_sha256"
+                        ],
+                        study_identity_sha256=inputs["study_manifest"][
+                            "identity_sha256"
+                        ],
+                        arm_identity_sha256=inputs["arm_manifest"][
+                            "identity_sha256"
+                        ],
+                        stage_identity_sha256=inputs["stage_manifest"][
+                            "identity_sha256"
+                        ],
+                        training_git_commit=inputs["training_git_commit"],
+                        evaluator_git_commit=inputs["evaluator_git_commit"],
+                        inference_code_compatibility_sha256=hashlib.sha256(
+                            _canonical_json(
+                                inputs["inference_code_compatibility"]
+                            )
+                        ).hexdigest(),
+                        videox_runtime_identity_sha256=hashlib.sha256(
+                            _canonical_json(inputs["videox_runtime"])
+                        ).hexdigest(),
+                        evaluation_world_size=world_size,
+                        evaluation_batch_size_per_rank=(
+                            args.batch_size_per_rank
+                        ),
+                        sampling_ids=[
+                            int(value)
+                            for value in sampling_ids.detach().cpu().tolist()
+                        ],
                     )
                 )
                 actual_backbone_invocations += hook_calls
@@ -1528,6 +1889,124 @@ def command_evaluate(args: argparse.Namespace) -> int:
         _canonical_json(row) + b"\n" for row in rows
     )
     _exclusive_bytes(rows_path, rows_bytes)
+    manifest_inputs = {
+        "resolved_config": {
+            "path": str(inputs["resolved_config"]),
+            "sha256": _sha256(inputs["resolved_config"]),
+        },
+        "snapshot": {
+            "path": str(inputs["snapshot"]),
+            "sha256": inputs["snapshot_sha256"],
+        },
+        "arm_manifest": {
+            "path": str(inputs["arm_manifest_path"]),
+            "sha256": _sha256(inputs["arm_manifest_path"]),
+        },
+        "study_manifest": {
+            "path": str(inputs["study_manifest_path"]),
+            "sha256": _sha256(inputs["study_manifest_path"]),
+        },
+        "stage_manifest": {
+            "path": str(inputs["stage_manifest_path"]),
+            "sha256": _sha256(inputs["stage_manifest_path"]),
+        },
+        "stage_outcome": {
+            "path": str(inputs["stage_outcome_path"]),
+            "sha256": _sha256(inputs["stage_outcome_path"]),
+            "identity_sha256": inputs["stage_outcome"]["identity_sha256"],
+        },
+        (
+            "evaluation_clip_manifest"
+            if inputs["frontier_mode"]
+            else "test_clip_manifest"
+        ): {
+            "path": str(inputs["evaluation_manifest"]),
+            "sha256": _sha256(inputs["evaluation_manifest"]),
+        },
+        (
+            "evaluation_cache_metadata"
+            if inputs["frontier_mode"]
+            else "test_cache_metadata"
+        ): {
+            "path": str(inputs["cache_metadata"]),
+            "sha256": _sha256(inputs["cache_metadata"]),
+        },
+        (
+            "evaluation_cache_arrays"
+            if inputs["frontier_mode"]
+            else "test_cache_arrays"
+        ): {
+            name: {
+                "path": record["path"],
+                "sha256": record["sha256"],
+                "bytes": record["bytes"],
+            }
+            for name, record in inputs["cache_arrays"].items()
+        },
+    }
+    if inputs["evaluation_split"] == "lockbox":
+        manifest_inputs["lockbox_registration"] = {
+            "identity_sha256": inputs[
+                "lockbox_registration_identity_sha256"
+            ],
+            "manifest": inputs["lockbox_registration"]["manifest"],
+            "cache": inputs["lockbox_registration"]["cache"],
+            "episode_isolation": inputs["lockbox_registration"][
+                "episode_isolation"
+            ],
+            "rank0_deterministic_construction_reverified": (
+                rank == 0
+                and inputs["lockbox_validation"][
+                    "deterministic_construction_reverified"
+                ]
+            ),
+        }
+    frontier_manifest_fields = (
+        {}
+        if not inputs["frontier_mode"]
+        else {
+            "evaluation_split": inputs["evaluation_split"],
+            "frontier_mode": True,
+            "training_git_commit": inputs["training_git_commit"],
+            "evaluator_git_commit": inputs["evaluator_git_commit"],
+            "inference_code_compatibility": inputs[
+                "inference_code_compatibility"
+            ],
+            "videox_runtime": inputs["videox_runtime"],
+            "frontier_selection_identity_sha256": inputs[
+                "frontier_selection_identity_sha256"
+            ],
+            "lockbox_registration_identity_sha256": inputs[
+                "lockbox_registration_identity_sha256"
+            ],
+            "evaluation_dataset_override": (
+                None
+                if inputs["evaluation_split"] != "lockbox"
+                else {
+                    "base_config": "viz_dataset from pinned resolved config",
+                    "only_overridden_fields": [
+                        "datasets.ABC.clip_manifest",
+                        "datasets.ABC.cache_metadata",
+                    ],
+                    "clip_manifest": str(inputs["evaluation_manifest"]),
+                    "cache_metadata": str(inputs["cache_metadata"]),
+                    "image_augmentation": False,
+                    "online_teacher": False,
+                }
+            ),
+            "frontier_selection": (
+                None
+                if inputs["frontier_selection_path"] is None
+                else {
+                    "path": str(inputs["frontier_selection_path"]),
+                    "sha256": _sha256(inputs["frontier_selection_path"]),
+                    "identity_sha256": inputs[
+                        "frontier_selection_identity_sha256"
+                    ],
+                }
+            ),
+        }
+    )
     rank_manifest = _identity_payload(
         {
             "schema_version": SCHEMA_VERSION,
@@ -1557,51 +2036,8 @@ def command_evaluate(args: argparse.Namespace) -> int:
             },
             "actual_wan_backbone_invocations": actual_backbone_invocations,
             "online_teacher_call_count": 0,
-            "inputs": {
-                "resolved_config": {
-                    "path": str(inputs["resolved_config"]),
-                    "sha256": _sha256(inputs["resolved_config"]),
-                },
-                "snapshot": {
-                    "path": str(inputs["snapshot"]),
-                    "sha256": inputs["snapshot_sha256"],
-                },
-                "arm_manifest": {
-                    "path": str(inputs["arm_manifest_path"]),
-                    "sha256": _sha256(inputs["arm_manifest_path"]),
-                },
-                "study_manifest": {
-                    "path": str(inputs["study_manifest_path"]),
-                    "sha256": _sha256(inputs["study_manifest_path"]),
-                },
-                "stage_manifest": {
-                    "path": str(inputs["stage_manifest_path"]),
-                    "sha256": _sha256(inputs["stage_manifest_path"]),
-                },
-                "stage_outcome": {
-                    "path": str(inputs["stage_outcome_path"]),
-                    "sha256": _sha256(inputs["stage_outcome_path"]),
-                    "identity_sha256": inputs["stage_outcome"][
-                        "identity_sha256"
-                    ],
-                },
-                "test_clip_manifest": {
-                    "path": str(inputs["test_manifest"]),
-                    "sha256": _sha256(inputs["test_manifest"]),
-                },
-                "test_cache_metadata": {
-                    "path": str(inputs["cache_metadata"]),
-                    "sha256": _sha256(inputs["cache_metadata"]),
-                },
-                "test_cache_arrays": {
-                    name: {
-                        "path": record["path"],
-                        "sha256": record["sha256"],
-                        "bytes": record["bytes"],
-                    }
-                    for name, record in inputs["cache_arrays"].items()
-                },
-            },
+            "inputs": manifest_inputs,
+            **frontier_manifest_fields,
             "device": {
                 "name": properties.name,
                 "local_rank": local_rank,
@@ -1654,7 +2090,35 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 or other_manifest.get("stage_outcome_identity_sha256")
                 != inputs["stage_outcome"]["identity_sha256"]
                 or other_manifest.get("assigned_clip_indexes")
-                != _expected_rank_indexes(other_rank, world_size)
+                != _expected_rank_indexes(
+                    other_rank, world_size, inputs["expected_clips"]
+                )
+                or (
+                    inputs["frontier_mode"]
+                    and (
+                        other_manifest.get("evaluation_split")
+                        != inputs["evaluation_split"]
+                        or other_manifest.get("frontier_mode") is not True
+                        or other_manifest.get("training_git_commit")
+                        != inputs["training_git_commit"]
+                        or other_manifest.get("evaluator_git_commit")
+                        != inputs["evaluator_git_commit"]
+                        or other_manifest.get(
+                            "inference_code_compatibility"
+                        )
+                        != inputs["inference_code_compatibility"]
+                        or other_manifest.get("videox_runtime")
+                        != inputs["videox_runtime"]
+                        or other_manifest.get(
+                            "frontier_selection_identity_sha256"
+                        )
+                        != inputs["frontier_selection_identity_sha256"]
+                        or other_manifest.get(
+                            "lockbox_registration_identity_sha256"
+                        )
+                        != inputs["lockbox_registration_identity_sha256"]
+                    )
+                )
                 or other_manifest.get("rows", {}).get("path")
                 != str(other_rows_path)
                 or other_manifest.get("rows", {}).get("sha256")
@@ -1685,6 +2149,18 @@ def command_evaluate(args: argparse.Namespace) -> int:
             completed_updates=args.completed_updates,
             grid=grid,
             descriptors=inputs["descriptors"],
+            expected_clips=inputs["expected_clips"],
+            evaluation_split=(
+                inputs["evaluation_split"]
+                if inputs["frontier_mode"]
+                else None
+            ),
+            frontier_selection_identity_sha256=inputs[
+                "frontier_selection_identity_sha256"
+            ],
+            lockbox_registration_identity_sha256=inputs[
+                "lockbox_registration_identity_sha256"
+            ],
         )
         inventory = _identity_payload(
             {
@@ -1707,12 +2183,34 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 "completed_updates": args.completed_updates,
                 "world_size": world_size,
                 "batch_size_per_rank": args.batch_size_per_rank,
-                "clip_count": EXPECTED_TEST_CLIPS,
+                "clip_count": inputs["expected_clips"],
+                **(
+                    {}
+                    if not inputs["frontier_mode"]
+                    else {
+                        "evaluation_split": inputs["evaluation_split"],
+                        "frontier_mode": True,
+                        "training_git_commit": inputs["training_git_commit"],
+                        "evaluator_git_commit": inputs[
+                            "evaluator_git_commit"
+                        ],
+                        "inference_code_compatibility": inputs[
+                            "inference_code_compatibility"
+                        ],
+                        "videox_runtime": inputs["videox_runtime"],
+                        "frontier_selection_identity_sha256": inputs[
+                            "frontier_selection_identity_sha256"
+                        ],
+                        "lockbox_registration_identity_sha256": inputs[
+                            "lockbox_registration_identity_sha256"
+                        ],
+                    }
+                ),
                 "grid": [
                     {"source": source, "nfe": nfe}
                     for source, nfe in grid
                 ],
-                "expected_record_count": EXPECTED_TEST_CLIPS * len(grid),
+                "expected_record_count": inputs["expected_clips"] * len(grid),
                 "observed_record_count": len(all_rows),
                 "rank_evidence": rank_records,
                 "validation": validation,
@@ -1744,6 +2242,24 @@ def command_evaluate(args: argparse.Namespace) -> int:
                         for name, record in inputs["cache_arrays"].items()
                     },
                 },
+                "lockbox_integrity": (
+                    None
+                    if inputs["evaluation_split"] != "lockbox"
+                    else {
+                        "registration_identity_sha256": inputs[
+                            "lockbox_registration_identity_sha256"
+                        ],
+                        "deterministic_next_unused_construction_reverified": (
+                            inputs["lockbox_validation"][
+                                "deterministic_construction_reverified"
+                            ]
+                        ),
+                        "episode_isolation_verified": inputs[
+                            "lockbox_validation"
+                        ]["episode_isolation_verified"],
+                        "all_cache_arrays_fully_rehashed_by_rank0": True,
+                    }
+                ),
                 "sigma_convention": "sigma=1 noise, sigma=0 clean",
             }
         )
@@ -1756,9 +2272,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
                     "status": "passed",
                     "arm": inputs["arm_code"],
                     "completed_updates": args.completed_updates,
-                    "clips": EXPECTED_TEST_CLIPS,
+                    "clips": inputs["expected_clips"],
                     "grid_count": len(grid),
-                    "records": EXPECTED_TEST_CLIPS * len(grid),
+                    "records": inputs["expected_clips"] * len(grid),
                     "output": str(output_dir / "inventory.json"),
                 },
                 sort_keys=True,
@@ -1770,7 +2286,19 @@ def command_evaluate(args: argparse.Namespace) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", required=True)
-    parser.add_argument("--expected-commit", required=True)
+    parser.add_argument(
+        "--expected-commit",
+        required=True,
+        help="immutable training/checkpoint commit recorded by the study",
+    )
+    parser.add_argument(
+        "--evaluator-commit",
+        default=None,
+        help=(
+            "clean evaluator checkout commit; defaults to --expected-commit "
+            "for the legacy single-commit protocol"
+        ),
+    )
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--arm-manifest", required=True)
     parser.add_argument("--study-manifest", required=True)
@@ -1783,6 +2311,20 @@ def _parser() -> argparse.ArgumentParser:
         "--batch-size-per-rank",
         type=int,
         default=DEFAULT_BATCH_SIZE_PER_RANK,
+    )
+    parser.add_argument(
+        "--frontier-split",
+        choices=("validation", "lockbox"),
+        default=None,
+        help=(
+            "opt-in NFE-frontier protocol; validation emits the full "
+            "autonomous grid, lockbox emits only a frozen selected pair"
+        ),
+    )
+    parser.add_argument(
+        "--frontier-selection",
+        default=None,
+        help="frozen validation selection; required only for frontier lockbox",
     )
     parser.add_argument("--output-dir", required=True)
     return parser

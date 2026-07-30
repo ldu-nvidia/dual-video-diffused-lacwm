@@ -1,5 +1,11 @@
 # Guarded training tools
 
+The opt-in validation-selected V-JEPA NFE frontier, fresh episode-disjoint
+lockbox constructor/registration, and same-B200 three-endpoint benchmark are
+documented in
+[`docs/experiments/VJEPA2_NFE_FRONTIER_PROTOCOL.md`](../docs/experiments/VJEPA2_NFE_FRONTIER_PROTOCOL.md).
+They do not modify the immutable fixed J1@4/VPM@8 v3 contract.
+
 These tools are deliberately separate from `setup_training.sh`: they never download
 assets or data, stop processes, choose a GPU implicitly, or launch in the background.
 Every launch is fail-closed and remains attached to the terminal.
