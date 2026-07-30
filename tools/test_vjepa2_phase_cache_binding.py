@@ -10,13 +10,16 @@ from __future__ import annotations
 import copy
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
+import venv
 from pathlib import Path
 from unittest import mock
 
 import vjepa2_controlled_study as study
+import vjepa2_phase_gate as phase_gate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +27,7 @@ SUBMIT = ROOT / "tools" / "slurm" / "submit_vjepa2_controlled_study.sh"
 STAGE_SBATCH = ROOT / "tools" / "slurm" / "vjepa2_controlled_study.sbatch"
 PAIRED_SBATCH = ROOT / "tools" / "slurm" / "vjepa2_paired_latency.sbatch"
 PHASE_HELPER = ROOT / "tools" / "vjepa2_phase_gate.py"
+PHASE_SBATCH = ROOT / "tools" / "slurm" / "vjepa2_phase_gate.sbatch"
 BASE_MODEL_CONFIG = (
     ROOT
     / "projects"
@@ -1064,6 +1068,56 @@ class CacheBuildBindingTest(unittest.TestCase):
 
 
 class StaticEntrypointContractTest(unittest.TestCase):
+    def test_phase_launcher_preserves_venv_symlink_for_execution(self) -> None:
+        source = PHASE_SBATCH.read_text(encoding="utf-8")
+        self.assertNotIn('PYTHON_BIN="$(readlink -f', source)
+        self.assertIn(
+            'PYTHON_REAL_BIN="$(readlink -f -- "$PYTHON_BIN")"',
+            source,
+        )
+        self.assertIn(
+            'die "failed to resolve Python executable: $PYTHON_BIN"',
+            source,
+        )
+        self.assertIn('export LACWM_PYTHON="$PYTHON_BIN"', source)
+        self.assertIn('"$PYTHON_BIN" "$VERIFY_RUNTIME"', source)
+        self.assertIn('"$PYTHON_BIN" -m torch.distributed.run', source)
+        self.assertIn('"$PYTHON_BIN" - "$REPORT"', source)
+        command_start = source.index("COMMAND=(")
+        command_end = source.index(")", command_start)
+        self.assertNotIn("PYTHON_REAL_BIN", source[command_start:command_end])
+
+    def test_phase_helper_records_resolved_binary_not_venv_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            link = Path(temporary) / "python"
+            real = Path(sys.executable).resolve(strict=True)
+            link.symlink_to(real)
+            record = phase_gate.runtime_python_record(link)
+        self.assertEqual(record["path"], str(real))
+        self.assertEqual(record["sha256"], study._sha256(real))
+        self.assertEqual(record["bytes"], real.stat().st_size)
+
+    def test_executing_venv_symlink_preserves_pyvenv_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = Path(temporary) / "runtime"
+            venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+            launcher = environment / "bin" / "python"
+            real = launcher.resolve(strict=True)
+            self.assertTrue(launcher.is_symlink())
+            launcher_prefix = subprocess.check_output(
+                [str(launcher), "-c", "import sys; print(sys.prefix)"],
+                text=True,
+            ).strip()
+            resolved_prefix = subprocess.check_output(
+                [str(real), "-c", "import sys; print(sys.prefix)"],
+                text=True,
+            ).strip()
+        self.assertEqual(Path(launcher_prefix).resolve(), environment.resolve())
+        self.assertNotEqual(
+            Path(resolved_prefix).resolve(),
+            environment.resolve(),
+        )
+
     def test_phase_report_is_mandatory_in_parser_and_submitter(self) -> None:
         parser = study.build_parser()
         subparser_action = next(

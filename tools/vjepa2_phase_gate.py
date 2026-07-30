@@ -170,6 +170,21 @@ def file_record(path: Path) -> dict[str, Any]:
     }
 
 
+def runtime_python_record(
+    executable: str | Path | None = None,
+) -> dict[str, Any]:
+    """Record the real binary without using it to execute the venv.
+
+    A venv's ``bin/python`` may be a symlink to base CPython. Executing the
+    symlink activates ``pyvenv.cfg`` semantics, while executing its resolved
+    target does not. Provenance nevertheless uses the canonical target so it
+    agrees with the controlled-study input record.
+    """
+    requested = Path(sys.executable if executable is None else executable)
+    resolved = requested.expanduser().resolve(strict=True)
+    return file_record(canonical_file(resolved, "runtime Python"))
+
+
 def unchanged_file(record: Mapping[str, Any]) -> bool:
     path = Path(str(record["path"]))
     try:
@@ -994,9 +1009,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     pca_path=pca,
                 ),
                 "warmstart": file_record(warmstart),
-                "runtime_python": file_record(
-                    canonical_file(sys.executable, "runtime Python")
-                ),
+                "runtime_python": runtime_python_record(),
             },
             rank,
         )

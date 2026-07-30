@@ -51,6 +51,7 @@ REPO_ROOT=""
 PROJECT_ROOT=""
 OUTPUT_DIR=""
 PYTHON_BIN=""
+PYTHON_REAL_BIN=""
 WAN_DIR_VALUE=""
 VIDEOX_HOME_VALUE=""
 CACHE_BUILD_COMPLETE=""
@@ -135,9 +136,15 @@ for path in \
   [[ -f "$path" && ! -L "$path" ]] || \
     die "missing or symlinked required file: $path"
 done
-[[ -x "$PYTHON_BIN" ]] || die "Python is unavailable or non-executable"
-PYTHON_BIN="$(readlink -f "$PYTHON_BIN")"
-[[ -f "$PYTHON_BIN" && -x "$PYTHON_BIN" && ! -L "$PYTHON_BIN" ]] || \
+[[ "$PYTHON_BIN" == /* ]] || die "Python path must be absolute"
+[[ -f "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || \
+  die "Python is unavailable or non-executable"
+# Keep the venv launcher path for execution. Invoking its resolved base-CPython
+# target bypasses pyvenv.cfg and therefore loses the pinned site-packages.
+PYTHON_REAL_BIN="$(readlink -f -- "$PYTHON_BIN")" || \
+  die "failed to resolve Python executable: $PYTHON_BIN"
+[[ -n "$PYTHON_REAL_BIN" && -f "$PYTHON_REAL_BIN" && \
+   -x "$PYTHON_REAL_BIN" && ! -L "$PYTHON_REAL_BIN" ]] || \
   die "resolved Python is not a canonical regular executable"
 [[ -d "$WAN_DIR_VALUE" && ! -L "$WAN_DIR_VALUE" ]] || die "invalid Wan directory"
 [[ -d "$VIDEOX_HOME_VALUE/.git" && ! -L "$VIDEOX_HOME_VALUE" ]] || \
@@ -159,6 +166,7 @@ fi
 
 export WAN_DIR="$WAN_DIR_VALUE"
 export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
+export LACWM_PYTHON="$PYTHON_BIN"
 export LACWM_NNODES=1
 export LACWM_WORLD_SIZE=8
 export LACWM_GPUS_PER_NODE=8
@@ -201,6 +209,7 @@ echo "Inference gate: public future-only sampler, autonomous NFE=1"
 echo "Teacher calls: training=0 inference=0"
 echo "W&B: disabled; checkpoints: disabled"
 echo "Clock: sigma=1 noise, sigma=0 clean"
+echo "Python launcher: $PYTHON_BIN (resolved binary: $PYTHON_REAL_BIN)"
 printf 'Command:'
 printf ' %q' "${COMMAND[@]}"
 printf '\n'
