@@ -174,6 +174,60 @@ The lockbox repeats both comparisons without reselection:
 - J1@k versus VPM@k establishes V-JEPA attribution; and
 - J1@k versus VPM@m establishes quality-preserving call reduction.
 
+## Preregistered within-J1 causality sidecar
+
+The main frontier comparison cannot by itself prove that J1 uses its generated
+V-JEPA state: an arm-level gain could come from auxiliary multitask
+regularization or its clock schedule. A separate conditional sidecar therefore
+freezes the selected `k` before any lockbox metric is inspected. It is runnable
+only when `frontier_selection.json` says `confirmatory_eligible=true` and
+`frontier_continuation.json` proves that the main J1 autonomous lockbox job was
+created below that eligibility gate.
+
+The sidecar waits specifically for the existing J1 array task, reuses its
+autonomous J1@k rows, and evaluates exactly two new deployable controls once on
+the same 128 registered clips:
+
+- `off@k`, with generated auxiliary-to-video fusion disabled; and
+- `autonomous_shuffled@k`, with generated auxiliary state assigned to the
+  wrong clip within the fixed batch.
+
+All three sources must use the history-only public sampler, pass no clean future
+RGB or clean V-JEPA target, make zero online-teacher calls, make exactly `k` Wan
+calls, and have identical clip/raw-target/cache/checkpoint/stage/selection/
+lockbox identities plus bit-identical initial video and auxiliary noise hashes.
+Any mismatch aborts confirmation.
+
+For each autonomous-versus-control contrast, the preregistered paired
+10,000-bootstrap, 95%-CI protocol uses seed `1234`. The CI gate requires
+temporal relative-improvement CI-low `> 0`, video-latent NMSE CI-low `> -1%`,
+and decoded-MSE CI-low `> -1%`. The artifact separately reports whether the
+temporal point effect is at least 3% as a practical-materiality threshold.
+Causal support requires both contrasts to pass the CI gate; practically
+material causal support additionally requires both temporal effects to reach
+3%.
+
+This result is written only to
+`frontier_lockbox_j1_causality_confirmation.json`. It makes zero selection
+decisions and is not an input to the main confirmation, timing, or final report.
+After installing this preregistered commit in a new clean detached evaluator
+worktree, submit it only after the eligible continuation exists:
+
+```bash
+tools/slurm/submit_vjepa2_frontier_causality.sh \
+  --evaluator-commit FULL_SIDECAR_COMMIT
+
+# After reviewing the dry run:
+tools/slurm/submit_vjepa2_frontier_causality.sh \
+  --evaluator-commit FULL_SIDECAR_COMMIT \
+  --execute
+```
+
+The launcher records each accepted job before submitting the next. Re-running
+the identical command adopts those immutable receipts and finishes a partial
+two-job submission without duplicating the quality job. Existing or partial
+scientific output fails closed.
+
 Timing requires a paired speedup CI-low above zero, lower J1 p95, and favorable
 mean latency in both pairwise execution-order strata. The 120 timed rounds form
 20 complete six-permutation counterbalance blocks; bootstrap resampling uses

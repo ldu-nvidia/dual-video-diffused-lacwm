@@ -49,9 +49,11 @@ from typing import Any
 
 try:
     from tools import vjepa2_frontier_lockbox as frontier_lockbox
+    from tools import vjepa2_lockbox_causality as causality_contract
     from tools import vjepa2_nfe_frontier as frontier_contract
 except ModuleNotFoundError:  # Direct ``python tools/...`` invocation.
     import vjepa2_frontier_lockbox as frontier_lockbox
+    import vjepa2_lockbox_causality as causality_contract
     import vjepa2_nfe_frontier as frontier_contract
 
 
@@ -131,6 +133,21 @@ def frontier_test_grid(
         raise QualityEvaluationError("frontier selection pair is invalid")
     nfes = (k,) if arm == "J1" else (k, m)
     return tuple(("autonomous", nfe) for nfe in nfes)
+
+
+def frontier_causality_sidecar_grid(
+    arm: str, selection: Mapping[str, Any]
+) -> tuple[tuple[str, int], ...]:
+    """Frozen within-J1 controls; never part of frontier selection/finalization."""
+
+    if arm != "J1":
+        raise QualityEvaluationError(
+            "frontier causality sidecar is defined only for J1"
+        )
+    try:
+        return causality_contract.sidecar_grid(selection)
+    except causality_contract.CausalityError as exc:
+        raise QualityEvaluationError(str(exc)) from exc
 
 
 def quality_grid(completed_updates: int) -> tuple[tuple[str, int], ...]:
@@ -500,13 +517,30 @@ def _validate_inputs(
     verify_cache_arrays: bool,
 ) -> dict[str, Any]:
     frontier_split = getattr(args, "frontier_split", None)
+    causality_sidecar = bool(
+        getattr(args, "frontier_causality_sidecar", False)
+    )
+    continuation_argument = getattr(args, "frontier_continuation", None)
+    if causality_sidecar and frontier_split != "lockbox":
+        raise QualityEvaluationError(
+            "--frontier-causality-sidecar requires --frontier-split lockbox"
+        )
+    if causality_sidecar != (continuation_argument is not None):
+        raise QualityEvaluationError(
+            "--frontier-continuation is required exactly for the causality "
+            "sidecar"
+        )
     evaluator_commit = (
         getattr(args, "evaluator_commit", None) or args.expected_commit
     )
     repo = _canonical_directory(args.repo_root, "repository root")
     executed_roots = {
         Path(module.__file__).resolve().parents[1]
-        for module in (frontier_contract, frontier_lockbox)
+        for module in (
+            frontier_contract,
+            frontier_lockbox,
+            causality_contract,
+        )
     }
     executed_roots.add(Path(__file__).resolve().parents[1])
     if executed_roots != {repo}:
@@ -623,6 +657,8 @@ def _validate_inputs(
     lockbox_registration: dict[str, Any] | None = None
     lockbox_validation: dict[str, Any] | None = None
     lockbox_identity: str | None = None
+    causality_prerequisites: dict[str, Any] | None = None
+    causality_sidecar_provenance: dict[str, Any] | None = None
     if frontier_split is None:
         split_name = "test"
         expected_clips = EXPECTED_TEST_CLIPS
@@ -639,6 +675,10 @@ def _validate_inputs(
         if args.completed_updates != FINAL_UPDATE or arm_code not in {"J1", "VPM"}:
             raise QualityEvaluationError(
                 "frontier evaluation requires final J1 or VPM checkpoint"
+            )
+        if causality_sidecar and arm_code != "J1":
+            raise QualityEvaluationError(
+                "frontier causality sidecar requires the final J1 checkpoint"
             )
         if args.batch_size_per_rank != DEFAULT_BATCH_SIZE_PER_RANK:
             raise QualityEvaluationError(
@@ -670,6 +710,7 @@ def _validate_inputs(
                 args.frontier_selection, "frontier selection"
             )
             selection = _read_json(selection_path, "frontier selection")
+            selected_evaluator_commit = selection.get("evaluator_git_commit")
             if (
                 not _identity_valid(selection)
                 or selection.get("kind") != "vjepa2_nfe_frontier_selection"
@@ -677,8 +718,18 @@ def _validate_inputs(
                 or selection.get("selection_split") != "validation"
                 or selection.get("training_git_commit")
                 != args.expected_commit
-                or selection.get("evaluator_git_commit")
-                != evaluator_commit
+                or (
+                    not causality_sidecar
+                    and selected_evaluator_commit != evaluator_commit
+                )
+                or (
+                    causality_sidecar
+                    and (
+                        not isinstance(selected_evaluator_commit, str)
+                        or COMMIT_RE.fullmatch(selected_evaluator_commit)
+                        is None
+                    )
+                )
                 or selection.get("study_identity_sha256")
                 != study.get("identity_sha256")
                 or selection.get("arm_identity_sha256", {}).get(arm_code)
@@ -709,22 +760,69 @@ def _validate_inputs(
             lockbox_identity = str(candidate_lockbox["identity_sha256"])
             if (
                 candidate_lockbox.get("registration_git_commit")
-                != evaluator_commit
+                != (
+                    selected_evaluator_commit
+                    if causality_sidecar
+                    else evaluator_commit
+                )
                 or candidate_lockbox.get("inference_code_compatibility")
                 != inference_compatibility
             ):
                 raise QualityEvaluationError(
                     "lockbox registration/evaluator code provenance differs"
                 )
-            grid = frontier_test_grid(arm_code, selection)
-            expected_output = (
-                run_dir
-                / "frontier_quality"
-                / "lockbox"
-                / lockbox_identity
-                / selection_identity
-                / f"update_{args.completed_updates:04d}"
-            )
+            if causality_sidecar:
+                try:
+                    causality_prerequisites = (
+                        causality_contract.validate_prerequisites(
+                            study_root=study_path.parent,
+                            selection_path=selection_path,
+                            continuation_path=Path(continuation_argument),
+                            sidecar_evaluator_commit=evaluator_commit,
+                            current_inference_compatibility=(
+                                inference_compatibility
+                            ),
+                            require_autonomous_inventory=True,
+                        )
+                    )
+                except causality_contract.CausalityError as exc:
+                    raise QualityEvaluationError(str(exc)) from exc
+                if causality_prerequisites["selection"] != selection:
+                    raise QualityEvaluationError(
+                        "causality prerequisites reproduced a different selection"
+                    )
+                grid = frontier_causality_sidecar_grid(arm_code, selection)
+                expected_output = causality_contract.sidecar_output_directory(
+                    run_dir, selection
+                )
+                autonomous = causality_prerequisites["autonomous"]
+                continuation = causality_prerequisites["continuation"]
+                assert autonomous is not None
+                causality_sidecar_provenance = {
+                    "frontier_primary_evaluator_git_commit": (
+                        selected_evaluator_commit
+                    ),
+                    "frontier_continuation_sha256": continuation["sha256"],
+                    "frontier_continuation_lockbox_quality_array_job_id": (
+                        continuation["lockbox_quality_array_job_id"]
+                    ),
+                    "frontier_autonomous_inventory_identity_sha256": (
+                        autonomous["identity_sha256"]
+                    ),
+                    "frontier_autonomous_inventory_sha256": autonomous[
+                        "sha256"
+                    ],
+                }
+            else:
+                grid = frontier_test_grid(arm_code, selection)
+                expected_output = (
+                    run_dir
+                    / "frontier_quality"
+                    / "lockbox"
+                    / lockbox_identity
+                    / selection_identity
+                    / f"update_{args.completed_updates:04d}"
+                )
     output_dir = Path(args.output_dir).expanduser()
     if output_dir.absolute() != expected_output:
         raise QualityEvaluationError(
@@ -899,6 +997,11 @@ def _validate_inputs(
         "descriptors": descriptors,
         "evaluation_split": split_name,
         "frontier_mode": frontier_split is not None,
+        "frontier_causality_sidecar": causality_sidecar,
+        "frontier_causality_sidecar_provenance": (
+            causality_sidecar_provenance
+        ),
+        "frontier_causality_prerequisites": causality_prerequisites,
         "frontier_selection_path": selection_path,
         "frontier_selection": selection,
         "frontier_selection_identity_sha256": selection_identity,
@@ -1112,6 +1215,7 @@ def _artifact_rows(
     evaluation_world_size: int | None = None,
     evaluation_batch_size_per_rank: int | None = None,
     sampling_ids: Sequence[int] | None = None,
+    causality_sidecar_provenance: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     import torch
 
@@ -1359,6 +1463,14 @@ def _artifact_rows(
                 "sampling_namespace": evaluation_split,
             }
         )
+        sidecar_fields = (
+            {}
+            if causality_sidecar_provenance is None
+            else {
+                "frontier_causality_sidecar": True,
+                **dict(causality_sidecar_provenance),
+            }
+        )
         row = _identity_payload(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -1368,6 +1480,7 @@ def _artifact_rows(
                 "clip_index": int(clip_index),
                 "clip_id": str(clip_id),
                 **frontier_fields,
+                **sidecar_fields,
                 "source": source,
                 "oracle_leakage": source in ORACLE_SOURCES,
                 "deployable_evidence": deployable_source,
@@ -1459,6 +1572,7 @@ def _validate_global_rows(
     evaluation_split: str | None = None,
     frontier_selection_identity_sha256: str | None = None,
     lockbox_registration_identity_sha256: str | None = None,
+    causality_sidecar_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     expected_keys = {
         (index, source, nfe)
@@ -1517,6 +1631,20 @@ def _validate_global_rows(
                     row.get("sampling_namespace") != evaluation_split
                     or row.get("sampling_id")
                     != FRONTIER_SAMPLE_ID_OFFSETS[evaluation_split] + key[0]
+                )
+            )
+            or (
+                causality_sidecar_provenance is None
+                and row.get("frontier_causality_sidecar", False) is not False
+            )
+            or (
+                causality_sidecar_provenance is not None
+                and (
+                    row.get("frontier_causality_sidecar") is not True
+                    or any(
+                        row.get(field) != value
+                        for field, value in causality_sidecar_provenance.items()
+                    )
                 )
             )
         ):
@@ -1861,6 +1989,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
                             int(value)
                             for value in sampling_ids.detach().cpu().tolist()
                         ],
+                        causality_sidecar_provenance=inputs[
+                            "frontier_causality_sidecar_provenance"
+                        ],
                     )
                 )
                 actual_backbone_invocations += hook_calls
@@ -2007,6 +2138,18 @@ def command_evaluate(args: argparse.Namespace) -> int:
             ),
         }
     )
+    causality_manifest_fields = (
+        {}
+        if not inputs["frontier_causality_sidecar"]
+        else {
+            "frontier_causality_sidecar": True,
+            **inputs["frontier_causality_sidecar_provenance"],
+            "causality_role": (
+                "separate within-J1 controls; excluded from frontier "
+                "selection, main confirmation, timing, and final report"
+            ),
+        }
+    )
     rank_manifest = _identity_payload(
         {
             "schema_version": SCHEMA_VERSION,
@@ -2038,6 +2181,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
             "online_teacher_call_count": 0,
             "inputs": manifest_inputs,
             **frontier_manifest_fields,
+            **causality_manifest_fields,
             "device": {
                 "name": properties.name,
                 "local_rank": local_rank,
@@ -2117,6 +2261,28 @@ def command_evaluate(args: argparse.Namespace) -> int:
                             "lockbox_registration_identity_sha256"
                         )
                         != inputs["lockbox_registration_identity_sha256"]
+                        or (
+                            inputs["frontier_causality_sidecar"]
+                            and (
+                                other_manifest.get(
+                                    "frontier_causality_sidecar"
+                                )
+                                is not True
+                                or any(
+                                    other_manifest.get(field) != value
+                                    for field, value in inputs[
+                                        "frontier_causality_sidecar_provenance"
+                                    ].items()
+                                )
+                            )
+                        )
+                        or (
+                            not inputs["frontier_causality_sidecar"]
+                            and other_manifest.get(
+                                "frontier_causality_sidecar", False
+                            )
+                            is not False
+                        )
                     )
                 )
                 or other_manifest.get("rows", {}).get("path")
@@ -2160,6 +2326,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
             ],
             lockbox_registration_identity_sha256=inputs[
                 "lockbox_registration_identity_sha256"
+            ],
+            causality_sidecar_provenance=inputs[
+                "frontier_causality_sidecar_provenance"
             ],
         )
         inventory = _identity_payload(
@@ -2206,6 +2375,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                         ],
                     }
                 ),
+                **causality_manifest_fields,
                 "grid": [
                     {"source": source, "nfe": nfe}
                     for source, nfe in grid
@@ -2325,6 +2495,22 @@ def _parser() -> argparse.ArgumentParser:
         "--frontier-selection",
         default=None,
         help="frozen validation selection; required only for frontier lockbox",
+    )
+    parser.add_argument(
+        "--frontier-causality-sidecar",
+        action="store_true",
+        help=(
+            "evaluate only J1 off/autonomous_shuffled at selected lockbox NFE; "
+            "this separate sidecar never enters the main frontier result"
+        ),
+    )
+    parser.add_argument(
+        "--frontier-continuation",
+        default=None,
+        help=(
+            "existing eligible frontier_continuation.json; required exactly "
+            "with --frontier-causality-sidecar"
+        ),
     )
     parser.add_argument("--output-dir", required=True)
     return parser
