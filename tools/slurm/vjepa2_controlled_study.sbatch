@@ -139,6 +139,13 @@ for path in \
 done
 [[ -x "$PYTHON_BIN" ]] || die "Python is not executable: $PYTHON_BIN"
 
+# This runs for every allocation before creating an arm/stage/runtime artifact,
+# including evidence-only resumption paths that intentionally skip preparation.
+"$PYTHON_BIN" "$HELPER" validate-study-inputs \
+  --study-manifest "$STUDY_MANIFEST" \
+  --expected-commit "$EXPECTED_COMMIT" \
+  --repo-root "$REPO_ROOT"
+
 IFS=$'\t' read -r \
   ARM_CODE ARM_NAME SELECTOR_KIND DUAL_ENABLED CONDITION_MODE \
   CONDITION_ON_STATE CONDITION_ON_CLOCK SCHEDULE_MODE AUXILIARY_LEAD_LOGIT \

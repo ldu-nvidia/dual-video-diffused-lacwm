@@ -24,7 +24,9 @@ time_frequency_transform:
   # train-split whitening statistics are a later representation ablation.
   normalization: none
 dual_diffusion:
-  enabled: true
+  # Fail closed: generic model composition is video-only. Research launchers
+  # must opt into the dual pathway explicitly after their phase gate passes.
+  enabled: false
   condition_on_tf: false
   # Legacy RFFT targets are causal in their observed prefix. Bidirectional
   # learned targets such as V-JEPA override this with ``diffuse_all`` so no

@@ -54,6 +54,64 @@ VJEPA_SOURCE_DIM = 768
 VJEPA_TARGET_SHAPE = (64, 4, 24, 120)
 VJEPA_FRAME_MAP = (0, 0, 0, 0, *range(1, 13))
 SIGMA_CONVENTION = "sigma=1 noise, sigma=0 clean"
+EXPECTED_SPLIT_COUNTS = {"train": 512, "val": 64, "test": 128}
+EXPECTED_CACHE_BUILD_SEED = 20_260_729
+EXPECTED_CLIPS_PER_EPISODE = 1
+
+# This is intentionally independent of ``tools/vjepa2_phase_gate.py``.  A
+# producer and its consumer sharing one mutable source of truth would let a
+# semantic regression bless itself.
+EXPECTED_PHASE_J0_CONTRACT = {
+    "model_target": (
+        "lam.dual_explicit_action_dit_model.DualExplicitActionDiTModel"
+    ),
+    "dual_enabled": True,
+    "auxiliary_history_mode": "diffuse_all",
+    "tf_channels": 64,
+    "condition_mode": "matched",
+    "condition_on_tf": True,
+    "condition_on_tf_clock": True,
+    "schedule_mode": "aligned",
+    "tf_lead_logit": 0.0,
+    "tf_loss_weight": 1.0,
+    "state_gate_init": 0.0,
+    "state_gate_trainable": True,
+    "clock_gate_init": 0.0,
+    "clock_gate_trainable": True,
+    "head_condition_on_tf_clock": True,
+    "video_only_control": False,
+    "parameter_matched_control": False,
+    "time_frequency_transform": None,
+}
+EXPECTED_PHASE_RESET_PREFIXES = (
+    "inverse_model",
+    "rgb_pos_embed",
+    "action_decoder",
+    "action_pos_embed",
+    "action_pool",
+    "morphology_tokens",
+    "forward_model.tf_token_adapter",
+    "forward_model.tf_clock_embedding",
+    "forward_model.tf_velocity_head",
+)
+EXPECTED_PHASE_BATCH_SHAPES = {
+    "rgb": [1, 13, 3, 180, 960],
+    "actions": [1, 13, 5, 157],
+    "mask": [1, 13],
+    "auxiliary_target": [1, 64, 4, 24, 120],
+    "clip_index": [1],
+    "morphology_index": [1],
+}
+EXPECTED_PHASE_GRADIENT_GROUPS = {
+    "auxiliary_state_gate",
+    "auxiliary_state_projection",
+    "auxiliary_state_norm",
+    "auxiliary_clock_gate",
+    "auxiliary_clock_network",
+    "auxiliary_velocity_head",
+    "action_control",
+    "shared_video_lora",
+}
 
 SEED = 1234
 TOTAL_UPDATES = 1000
@@ -251,10 +309,50 @@ def _canonical_directory(value: str | Path, label: str) -> Path:
     return path.resolve(strict=True)
 
 
+def _canonical_episode_directory(value: Any, label: str) -> Path:
+    """Require a lexical and physical canonical directory for split identity.
+
+    ``Path.resolve`` alone is unsafe for population-disjointness: two strings
+    can name the same episode through ``..`` or a symlink ancestor.  We reject
+    those aliases before recording/comparing the resolved directory.
+    """
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"{label} must be a non-empty string")
+    path = Path(value)
+    if not path.is_absolute():
+        raise ContractError(f"{label} is not absolute")
+    if ".." in path.parts:
+        raise ContractError(f"{label} must not contain '..'")
+    if str(path) != value:
+        raise ContractError(f"{label} is not lexically canonical: {value!r}")
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise ContractError(f"{label} is missing: {path}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ContractError(f"{label} must be a non-symlink directory: {path}")
+    resolved = path.resolve(strict=True)
+    if resolved != path:
+        raise ContractError(
+            f"{label} uses a symlink or other physical alias: {path} -> {resolved}"
+        )
+    return resolved
+
+
 def _python_executable(value: str | Path) -> Path:
-    path = Path(value).expanduser().absolute()
-    if not path.is_file() or not os.access(path, os.X_OK):
-        raise ContractError(f"Python is missing or not executable: {path}")
+    requested = Path(value).expanduser().absolute()
+    if not requested.is_file() or not os.access(requested, os.X_OK):
+        raise ContractError(f"Python is missing or not executable: {requested}")
+    path = requested.resolve(strict=True)
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or not os.access(path, os.X_OK)
+    ):
+        raise ContractError(
+            f"resolved Python is not an executable regular file: {path}"
+        )
     return path
 
 
@@ -336,6 +434,8 @@ def _assert_recorded_file_unchanged(
         raise ContractError(f"{label} record is incomplete")
     _validated_sha256(digest, f"{label} SHA-256")
     path = _canonical_file(path_value, label)
+    if path_value != str(path):
+        raise ContractError(f"{label} path is not canonical")
     if path.stat().st_size != byte_count:
         raise ContractError(
             f"{label} byte count changed: {path.stat().st_size} != {byte_count}"
@@ -362,6 +462,18 @@ def _assert_study_inputs_unchanged(study: Mapping[str, Any]) -> None:
         (
             "PCA companion metadata",
             inputs["vjepa"]["pca_companion_metadata"],
+        ),
+        ("phase-gate report", inputs["phase_gate"]["report"]),
+        ("phase-gate runtime Python", inputs["phase_gate"]["runtime_python"]),
+        ("cache-build completion record", inputs["cache_build"]["complete"]),
+        ("cache-build request", inputs["cache_build"]["request"]),
+        (
+            "cache-build manifest metadata",
+            inputs["cache_build"]["manifest_metadata"],
+        ),
+        (
+            "cache-build episode manifest",
+            inputs["cache_build"]["episode_manifest"],
         ),
     ]
     for split_name, split in inputs["splits"].items():
@@ -399,6 +511,43 @@ def _assert_study_inputs_unchanged(study: Mapping[str, Any]) -> None:
         raise ContractError("V-JEPA source commit changed after preflight")
     if _git(source, "status", "--porcelain", "--untracked-files=all"):
         raise ContractError("V-JEPA source became dirty after preflight")
+
+    repository = inputs.get("repository")
+    if not isinstance(repository, Mapping):
+        raise ContractError("study repository record is missing")
+    repo = _canonical_directory(repository.get("root", ""), "repository root")
+    expected_commit = _validated_commit(
+        str(repository.get("git_commit", "")), "study Git commit"
+    )
+    _assert_clean_commit(repo, expected_commit)
+    phase_path = _canonical_file(
+        inputs["phase_gate"]["report"]["path"], "V-JEPA phase-gate report"
+    )
+    phase_gate, phase_report = _validate_phase_gate_report(
+        phase_path,
+        repo=repo,
+        expected_commit=expected_commit,
+        warmstart=inputs["warmstart"],
+        vjepa_checkpoint=inputs["vjepa"]["checkpoint"],
+        pca_stats=inputs["vjepa"]["pca_stats"],
+        train_split=inputs["splits"]["train"],
+        runtime_python_path=Path(inputs["runtime"]["python"]),
+    )
+    if phase_gate != inputs["phase_gate"]:
+        raise ContractError("phase-gate study binding changed")
+    cache_build = _validate_cache_build(
+        repo=repo,
+        expected_commit=expected_commit,
+        phase_report=phase_report,
+        phase_gate_record=phase_gate,
+        splits=inputs["splits"],
+        pca_stats=inputs["vjepa"]["pca_stats"],
+        vjepa_source=source,
+        vjepa_checkpoint=inputs["vjepa"]["checkpoint"],
+        extractor_python=Path(inputs["runtime"]["extractor_python"]),
+    )
+    if cache_build != inputs["cache_build"]:
+        raise ContractError("cache-build study binding changed")
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -470,6 +619,8 @@ def _manifest_record(
     *,
     expected_split: str,
 ) -> dict[str, Any]:
+    if expected_split not in EXPECTED_SPLIT_COUNTS:
+        raise ContractError(f"unsupported expected split: {expected_split!r}")
     rows: list[dict[str, Any]] = []
     try:
         with path.open(encoding="utf-8") as handle:
@@ -501,22 +652,46 @@ def _manifest_record(
             raise ContractError(
                 f"clip manifest row {index} lacks {sorted(missing)}"
             )
-        if int(row["auxiliary_index"]) != index:
+        if (
+            isinstance(row["auxiliary_index"], bool)
+            or not isinstance(row["auxiliary_index"], int)
+            or row["auxiliary_index"] != index
+        ):
             raise ContractError("auxiliary indexes must be dense and ordered")
         if str(row["split"]) != expected_split:
             raise ContractError(
                 f"clip manifest row {index} has split={row['split']!r}, "
                 f"expected {expected_split!r}"
             )
-        if isinstance(row["start"], bool) or int(row["start"]) < 0:
+        if (
+            isinstance(row["start"], bool)
+            or not isinstance(row["start"], int)
+            or row["start"] < 0
+        ):
             raise ContractError(f"clip row {index} has an invalid start")
-        episode = str(row["episode_dir"])
-        if not Path(episode).is_absolute():
-            raise ContractError(f"clip row {index} episode path is not absolute")
-        clip_ids.append(str(row["clip_id"]))
+        episode = str(
+            _canonical_episode_directory(
+                row["episode_dir"],
+                f"clip row {index} episode directory",
+            )
+        )
+        clip_id = row["clip_id"]
+        if not isinstance(clip_id, str) or not clip_id:
+            raise ContractError(f"clip row {index} has an invalid clip ID")
+        clip_ids.append(clip_id)
         episodes.append(episode)
     if len(set(clip_ids)) != len(clip_ids):
         raise ContractError("clip IDs must be unique within a manifest")
+    expected_count = EXPECTED_SPLIT_COUNTS[expected_split]
+    if len(rows) != expected_count:
+        raise ContractError(
+            f"{expected_split} manifest must contain exactly {expected_count} "
+            f"clips, found {len(rows)}"
+        )
+    if len(set(episodes)) != len(rows):
+        raise ContractError(
+            f"{expected_split} manifest must contain one unique episode per clip"
+        )
     return {
         **_file_record(path),
         "entries": len(rows),
@@ -543,6 +718,7 @@ def _cache_record(
     *,
     manifest: Mapping[str, Any],
     expected_split: str,
+    train_manifest_sha256: str,
     checkpoint_sha256: str,
     pca_sha256: str,
     external_validation_stdout: str,
@@ -550,6 +726,8 @@ def _cache_record(
     metadata = _read_json(metadata_path, "V-JEPA cache metadata")
     if int(metadata.get("format_version", -1)) != 1:
         raise ContractError("unsupported V-JEPA cache metadata format")
+    if metadata.get("artifact_type") != "vjepa2.1-wan-grid-cache":
+        raise ContractError("unexpected V-JEPA cache artifact type")
     if metadata.get("complete") is not True:
         raise ContractError("V-JEPA cache is not marked complete")
     if str(metadata.get("split")) != expected_split:
@@ -559,6 +737,16 @@ def _cache_record(
         )
     if metadata.get("clip_manifest_sha256") != manifest["sha256"]:
         raise ContractError("cache metadata refers to another clip manifest")
+    if int(metadata.get("clip_count", -1)) != int(manifest["entries"]):
+        raise ContractError("cache clip_count differs from the clip manifest")
+    if metadata.get("train_manifest_sha256") != train_manifest_sha256:
+        raise ContractError("cache metadata refers to another training manifest")
+    if metadata.get("pca_sha256") != pca_sha256:
+        raise ContractError("cache metadata refers to another PCA artifact")
+    cache_id = metadata.get("cache_id")
+    if not isinstance(cache_id, str):
+        raise ContractError("cache metadata lacks cache_id")
+    _validated_sha256(cache_id, "V-JEPA cache ID")
     shape = metadata.get("target_shape")
     if (
         not isinstance(shape, list)
@@ -654,6 +842,11 @@ def _cache_record(
             )
     return {
         "metadata": _file_record(metadata_path),
+        "split": expected_split,
+        "clip_count": int(manifest["entries"]),
+        "cache_id": cache_id,
+        "train_manifest_sha256": train_manifest_sha256,
+        "pca_sha256": pca_sha256,
         "target": target_record,
         "rgb": cached_inputs["rgb"],
         "actions": cached_inputs["actions"],
@@ -763,6 +956,7 @@ def _split_record(
         metadata_path,
         manifest=manifest,
         expected_split=expected_split,
+        train_manifest_sha256=_sha256(train_manifest),
         checkpoint_sha256=checkpoint_sha256,
         pca_sha256=pca_sha256,
         external_validation_stdout=validation_stdout,
@@ -782,7 +976,14 @@ def _assert_disjoint_splits(splits: Mapping[str, Mapping[str, Any]]) -> None:
                 if not line.strip():
                     continue
                 row = json.loads(line)
-                episodes.add(str(row["episode_dir"]))
+                episodes.add(
+                    str(
+                        _canonical_episode_directory(
+                            row["episode_dir"],
+                            f"{split} split episode directory",
+                        )
+                    )
+                )
                 clips.add(str(row["clip_id"]))
         episode_sets[split] = episodes
         clip_sets[split] = clips
@@ -796,6 +997,662 @@ def _assert_disjoint_splits(splits: Mapping[str, Mapping[str, Any]]) -> None:
                     f"{left}/{right} split overlap: "
                     f"episodes={len(episode_overlap)}, clips={len(clip_overlap)}"
                 )
+
+
+def _embedded_file_record(
+    record: Any,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Validate a phase-gate file record against the bytes on disk."""
+    if not isinstance(record, Mapping):
+        raise ContractError(f"{label} record is missing")
+    path_value = record.get("path")
+    sha256 = record.get("sha256")
+    byte_count = record.get("bytes")
+    if (
+        not isinstance(path_value, str)
+        or not isinstance(sha256, str)
+        or not isinstance(byte_count, int)
+    ):
+        raise ContractError(f"{label} record is incomplete")
+    _validated_sha256(sha256, f"{label} SHA-256")
+    path = _canonical_file(path_value, label)
+    if path_value != str(path):
+        raise ContractError(f"{label} path is not canonical")
+    observed = _file_record(path)
+    if observed["sha256"] != sha256 or observed["bytes"] != byte_count:
+        raise ContractError(f"{label} bytes differ from the phase-gate record")
+    return observed
+
+
+def _assert_same_file_record(
+    observed: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    for key in ("path", "sha256", "bytes"):
+        if observed.get(key) != expected.get(key):
+            raise ContractError(f"{label} {key} differs")
+
+
+def _validate_phase_sampler_counters(
+    counters: Any,
+    *,
+    deployment_mode: int,
+    label: str,
+) -> None:
+    if not isinstance(counters, Mapping):
+        raise ContractError(f"{label} sampler counters are missing")
+    calls = counters.get("wan_calls_by_source_nfe")
+    if not isinstance(calls, Mapping):
+        raise ContractError(f"{label} Wan-call counters are missing")
+    expected = {
+        "online_teacher_calls": 0,
+        "auxiliary_clean_available": 0,
+        "deployment_mode": deployment_mode,
+        "artifacts_collected": 1,
+        "wan_calls_total": 1,
+    }
+    if any(counters.get(key) != value for key, value in expected.items()):
+        raise ContractError(f"{label} future-free NFE=1 counters differ")
+    if dict(calls) != {"autonomous:nfe_1": 1}:
+        raise ContractError(
+            f"{label} must make exactly one autonomous NFE=1 Wan call"
+        )
+
+
+def _validate_phase_rank_reports(
+    ranks: Any,
+    *,
+    topology_gpus: Sequence[Any],
+    training: Mapping[str, Any],
+) -> None:
+    if not isinstance(ranks, list) or len(ranks) != 8:
+        raise ContractError("phase gate must contain exactly eight rank reports")
+    observed_ranks: set[int] = set()
+    clip_indices: list[int] = []
+    sync_records: list[Any] = []
+    for expected_rank, rank_report in enumerate(ranks):
+        if not isinstance(rank_report, Mapping) or not _identity_is_valid(
+            rank_report
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} identity is invalid"
+            )
+        rank = rank_report.get("rank")
+        local_rank = rank_report.get("local_rank")
+        if rank != expected_rank or local_rank != expected_rank:
+            raise ContractError("phase-gate rank/local-rank topology differs")
+        observed_ranks.add(int(rank))
+        gpu = rank_report.get("gpu")
+        if gpu != topology_gpus[expected_rank] or "B200" not in str(gpu).upper():
+            raise ContractError(f"phase-gate rank {expected_rank} is not B200")
+        if rank_report.get("batch_shapes") != EXPECTED_PHASE_BATCH_SHAPES:
+            raise ContractError(
+                f"phase-gate rank {expected_rank} batch shapes differ"
+            )
+        if rank_report.get("morphology_index") != 9:
+            raise ContractError(
+                f"phase-gate rank {expected_rank} morphology differs"
+            )
+        clip_index = rank_report.get("shape_audit_clip_index")
+        if (
+            isinstance(clip_index, bool)
+            or not isinstance(clip_index, int)
+            or not 0 <= clip_index < EXPECTED_SPLIT_COUNTS["train"]
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} clip index is invalid"
+            )
+        clip_indices.append(clip_index)
+
+        zero_gate = rank_report.get("zero_gate_equivalence")
+        if (
+            not isinstance(zero_gate, Mapping)
+            or zero_gate.get("state_gate") != 0.0
+            or zero_gate.get("clock_gate") != 0.0
+            or zero_gate.get("bitwise_equal") is not True
+            or zero_gate.get("max_absolute_difference") != 0.0
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} zero-gate proof differs"
+            )
+        warmstart_load = rank_report.get("warmstart_load")
+        if (
+            not isinstance(warmstart_load, Mapping)
+            or warmstart_load.get("reset_prefixes")
+            != list(EXPECTED_PHASE_RESET_PREFIXES)
+            or not isinstance(warmstart_load.get("loaded_tensor_count"), int)
+            or warmstart_load["loaded_tensor_count"] <= 0
+            or not isinstance(warmstart_load.get("loaded_parameter_bytes"), int)
+            or warmstart_load["loaded_parameter_bytes"] <= 0
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} warm-start proof differs"
+            )
+
+        optimizer = rank_report.get("optimizer")
+        if (
+            not isinstance(optimizer, Mapping)
+            or optimizer.get("completed_updates") != 4
+            or optimizer.get("optimizer_step_values") != [1, 2, 3, 4]
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} optimizer proof differs"
+            )
+        gradients = optimizer.get("gradient_reachability")
+        if (
+            not isinstance(gradients, Mapping)
+            or set(gradients) != EXPECTED_PHASE_GRADIENT_GROUPS
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} gradient groups differ"
+            )
+        for group, evidence in gradients.items():
+            updates = evidence.get("updates") if isinstance(evidence, Mapping) else None
+            if not isinstance(updates, list) or len(updates) != 4:
+                raise ContractError(
+                    f"phase-gate {group} gradient update count differs"
+                )
+            if not all(
+                isinstance(item, Mapping)
+                and isinstance(item.get("calls"), int)
+                and not isinstance(item.get("calls"), bool)
+                and item["calls"] >= 1
+                and item.get("finite") is True
+                for item in updates
+            ):
+                raise ContractError(
+                    f"phase-gate {group} gradient reachability differs"
+                )
+            if not any(item.get("nonzero") is True for item in updates):
+                raise ContractError(
+                    f"phase-gate {group} never has a nonzero gradient"
+                )
+
+        inference = rank_report.get("future_free_nfe1")
+        if not isinstance(inference, Mapping):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} inference proof is missing"
+            )
+        if (
+            inference.get("history_shape") != [1, 5, 3, 180, 960]
+            or inference.get("actions_shape") != [1, 13, 5, 157]
+            or inference.get("prediction_shape") != [1, 3, 8, 180, 960]
+            or inference.get("auxiliary_target_argument") is not None
+            or inference.get("teacher_constructed") is not False
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} future-free proof differs"
+            )
+        _validate_phase_sampler_counters(
+            inference.get("sampler_counters"),
+            deployment_mode=1,
+            label=f"phase-gate rank {expected_rank} deployable",
+        )
+        ordinary = inference.get("ordinary_full_clip_audit")
+        if (
+            not isinstance(ordinary, Mapping)
+            or ordinary.get("condition_source") != "autonomous"
+            or ordinary.get("nfe") != 1
+            or ordinary.get("auxiliary_target_argument") is not None
+            or ordinary.get("generated_future_bitwise_equal") is not True
+            or ordinary.get("generated_future_max_absolute_difference") != 0.0
+            or ordinary.get("same_initial_noise_and_reference") is not True
+            or ordinary.get("ground_truth_used_as_condition") is not False
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} scoring-path proof differs"
+            )
+        _validate_phase_sampler_counters(
+            ordinary.get("sampler_counters"),
+            deployment_mode=0,
+            label=f"phase-gate rank {expected_rank} scoring audit",
+        )
+        artifact_hashes = ordinary.get("artifact_sha256")
+        if (
+            not isinstance(artifact_hashes, Mapping)
+            or set(artifact_hashes)
+            != {
+                "video_initial_state",
+                "tf_initial_state",
+                "tf_initial_noise",
+                "reference_latents",
+            }
+            or any(
+                not isinstance(value, str)
+                or SHA256_RE.fullmatch(value) is None
+                for value in artifact_hashes.values()
+            )
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} initial-noise proof differs"
+            )
+        sync = rank_report.get("model_sync_sha256")
+        sync_keys = set(sync) if isinstance(sync, Mapping) else set()
+        required_sync_keys = {
+            "forward_model.tf_token_adapter.gate",
+            "forward_model.tf_clock_embedding.gate",
+            "forward_model.tf_velocity_head.linear.weight",
+        }
+        if (
+            not isinstance(sync, Mapping)
+            or len(sync) != 4
+            or not required_sync_keys.issubset(sync_keys)
+            or len(sync_keys - required_sync_keys) != 1
+            or "lora_" not in next(iter(sync_keys - required_sync_keys), "")
+            or any(
+                not isinstance(value, str)
+                or SHA256_RE.fullmatch(value) is None
+                for value in sync.values()
+            )
+        ):
+            raise ContractError(
+                f"phase-gate rank {expected_rank} model-sync proof differs"
+            )
+        sync_records.append(dict(sync))
+
+    if observed_ranks != set(range(8)) or len(set(clip_indices)) != 8:
+        raise ContractError("phase-gate rank or clip-index population differs")
+    if training.get("shape_audit_clip_indices") != clip_indices:
+        raise ContractError("phase-gate top-level clip indices differ from ranks")
+    if any(record != sync_records[0] for record in sync_records[1:]):
+        raise ContractError("phase-gate rank model states are not synchronized")
+
+
+def _validate_phase_gate_report(
+    path: Path,
+    *,
+    repo: Path,
+    expected_commit: str,
+    warmstart: Mapping[str, Any],
+    vjepa_checkpoint: Mapping[str, Any],
+    pca_stats: Mapping[str, Any],
+    train_split: Mapping[str, Any],
+    runtime_python_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    report = _read_json(path, "V-JEPA phase-gate report")
+    if not _identity_is_valid(report):
+        raise ContractError("V-JEPA phase-gate report identity is invalid")
+    exact_fields = {
+        "artifact_type": "vjepa2-j0-phase-gate",
+        "format_version": 1,
+        "passed": True,
+        "sigma_convention": SIGMA_CONVENTION,
+        "teacher_role": "offline target extractor only",
+        "teacher_calls_training": 0,
+        "teacher_calls_inference": 0,
+        "world_size": 8,
+        "j0_contract": EXPECTED_PHASE_J0_CONTRACT,
+    }
+    for key, expected in exact_fields.items():
+        if report.get(key) != expected:
+            raise ContractError(f"V-JEPA phase-gate {key} differs")
+    resolved_digest = report.get("resolved_config_sha256")
+    if (
+        not isinstance(resolved_digest, str)
+        or SHA256_RE.fullmatch(resolved_digest) is None
+    ):
+        raise ContractError("V-JEPA phase-gate resolved-config digest is invalid")
+
+    topology = report.get("topology")
+    if not isinstance(topology, Mapping):
+        raise ContractError("V-JEPA phase-gate topology is missing")
+    gpus = topology.get("gpus")
+    if (
+        topology.get("nodes") != 1
+        or topology.get("backend") != "nccl"
+        or not isinstance(gpus, list)
+        or len(gpus) != 8
+        or any("B200" not in str(gpu).upper() for gpu in gpus)
+    ):
+        raise ContractError("V-JEPA phase gate did not use eight B200 GPUs")
+
+    training = report.get("training")
+    if not isinstance(training, Mapping):
+        raise ContractError("V-JEPA phase-gate training evidence is missing")
+    expected_training = {
+        "ddp": True,
+        "optimizer_updates": 4,
+        "effective_global_batch_size": 8,
+        "shape_audit_clip_indices_unique": True,
+        "morphology_indices": [9] * 8,
+        "morphology_contract": "ABC integer index exactly 9",
+        "wandb_enabled": False,
+        "checkpoint_writes": 0,
+    }
+    if any(training.get(key) != value for key, value in expected_training.items()):
+        raise ContractError("V-JEPA phase-gate training contract differs")
+    inference = report.get("inference")
+    if inference != {
+        "source": "autonomous",
+        "nfe": 1,
+        "observable_history_frames": 5,
+        "future_rgb_supplied": False,
+        "clean_auxiliary_supplied": False,
+    }:
+        raise ContractError("V-JEPA phase-gate inference is not future-free NFE=1")
+    if report.get("input_invariance") != {
+        "repository_clean": True,
+        "warmstart_unchanged": True,
+        "cache_records_unchanged": True,
+    }:
+        raise ContractError("V-JEPA phase-gate input invariance differs")
+    if report.get("warmstart_policy") != {
+        "mode": "strict allowlisted reset",
+        "reset_prefixes": list(EXPECTED_PHASE_RESET_PREFIXES),
+    }:
+        raise ContractError("V-JEPA phase-gate warm-start policy differs")
+
+    provenance = report.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ContractError("V-JEPA phase-gate provenance is missing")
+    if provenance.get("repository") != {
+        "path": str(repo),
+        "commit": expected_commit,
+        "clean": True,
+    }:
+        raise ContractError("V-JEPA phase-gate repository identity differs")
+    phase_warmstart = _embedded_file_record(
+        provenance.get("warmstart"), label="phase-gate warm start"
+    )
+    _assert_same_file_record(
+        phase_warmstart, warmstart, label="phase-gate warm start"
+    )
+    cache = provenance.get("cache")
+    if not isinstance(cache, Mapping):
+        raise ContractError("V-JEPA phase-gate cache provenance is missing")
+    phase_train_manifest = _embedded_file_record(
+        cache.get("train_manifest"), label="phase-gate training manifest"
+    )
+    _assert_same_file_record(
+        phase_train_manifest,
+        train_split["clip_manifest"],
+        label="phase-gate training manifest",
+    )
+    phase_train_metadata = _embedded_file_record(
+        cache.get("train_metadata"), label="phase-gate training metadata"
+    )
+    _assert_same_file_record(
+        phase_train_metadata,
+        train_split["cache"]["metadata"],
+        label="phase-gate training metadata",
+    )
+    phase_pca = _embedded_file_record(
+        cache.get("pca"), label="phase-gate PCA artifact"
+    )
+    _assert_same_file_record(
+        phase_pca, pca_stats, label="phase-gate PCA artifact"
+    )
+    train_cache = train_split["cache"]
+    expected_cache_values = {
+        "cache_id": train_cache["cache_id"],
+        "target_sha256": train_cache["target"]["sha256"],
+        "rgb_sha256": train_cache["rgb"]["sha256"],
+        "actions_sha256": train_cache["actions"]["sha256"],
+        "checkpoint_sha256": vjepa_checkpoint["sha256"],
+        "source_commit": VJEPA_SOURCE_COMMIT,
+    }
+    if any(cache.get(key) != value for key, value in expected_cache_values.items()):
+        raise ContractError("V-JEPA phase-gate cache identity differs")
+    phase_complete = _embedded_file_record(
+        cache.get("complete"), label="phase-gate cache completion record"
+    )
+    full_cache = report.get("full_cache_validation")
+    if full_cache != {
+        "validated": True,
+        "split": "train",
+        "clip_count": EXPECTED_SPLIT_COUNTS["train"],
+        "cache_id": train_cache["cache_id"],
+        "target_shape": [512, 64, 4, 24, 120],
+        "rgb_shape": [512, 13, 3, 180, 960],
+        "actions_shape": [512, 13, 5, 23],
+    }:
+        raise ContractError("V-JEPA phase-gate full-cache validation differs")
+    _validate_phase_rank_reports(
+        report.get("rank_reports"),
+        topology_gpus=gpus,
+        training=training,
+    )
+    runtime_python = _embedded_file_record(
+        provenance.get("runtime_python"), label="phase-gate runtime Python"
+    )
+    if runtime_python["path"] != str(runtime_python_path):
+        raise ContractError("V-JEPA phase-gate runtime Python differs")
+    return (
+        {
+            "report": _file_record(path),
+            "identity_sha256": report["identity_sha256"],
+            "validated": True,
+            "cache_complete": phase_complete,
+            "runtime_python": runtime_python,
+        },
+        report,
+    )
+
+
+def _assert_git_ancestor(
+    repo: Path,
+    ancestor: str,
+    descendant: str,
+) -> None:
+    _validated_commit(ancestor, "cache-build Git commit")
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, descendant],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise ContractError(
+            f"cache-build commit {ancestor} is not an ancestor of {descendant}"
+        )
+
+
+def _validate_cache_build(
+    *,
+    repo: Path,
+    expected_commit: str,
+    phase_report: Mapping[str, Any],
+    phase_gate_record: Mapping[str, Any],
+    splits: Mapping[str, Mapping[str, Any]],
+    pca_stats: Mapping[str, Any],
+    vjepa_source: Path,
+    vjepa_checkpoint: Mapping[str, Any],
+    extractor_python: Path,
+) -> dict[str, Any]:
+    complete_record = phase_gate_record["cache_complete"]
+    complete_path = Path(complete_record["path"])
+    complete = _read_json(complete_path, "immutable cache-build completion record")
+    if (
+        complete.get("artifact_type") != "vjepa2.1-immutable-cache-build"
+        or complete.get("format_version") != 1
+    ):
+        raise ContractError("cache-build completion schema differs")
+
+    request_path = _canonical_file(
+        complete_path.with_name("build_request.json"),
+        "immutable cache-build request",
+    )
+    request_record = _file_record(request_path)
+    if complete.get("build_request_sha256") != request_record["sha256"]:
+        raise ContractError("cache-build request digest differs from complete.json")
+    request = _read_json(request_path, "immutable cache-build request")
+    expected_request_fields = {
+        "artifact_type": "vjepa2.1-immutable-cache-build-request",
+        "format_version": 1,
+        "build_id": complete.get("build_id"),
+        "build_root": str(complete_path.parent),
+        "extractor_python": str(extractor_python),
+        "vjepa_source": str(vjepa_source),
+        "vjepa_source_commit": VJEPA_SOURCE_COMMIT,
+        "vjepa_checkpoint": vjepa_checkpoint["path"],
+        "vjepa_checkpoint_sha256": vjepa_checkpoint["sha256"],
+        "train_clips": EXPECTED_SPLIT_COUNTS["train"],
+        "val_clips": EXPECTED_SPLIT_COUNTS["val"],
+        "test_clips": EXPECTED_SPLIT_COUNTS["test"],
+        "clips_per_episode": EXPECTED_CLIPS_PER_EPISODE,
+        "seed": EXPECTED_CACHE_BUILD_SEED,
+        "pca_max_clips": 256,
+        "pca_max_tokens": 250_000,
+    }
+    if any(
+        request.get(key) != value for key, value in expected_request_fields.items()
+    ):
+        raise ContractError("immutable cache-build request contract differs")
+    build_repo_value = request.get("repo_root")
+    if not isinstance(build_repo_value, str):
+        raise ContractError("cache-build repository path is missing")
+    build_repo = _canonical_directory(
+        build_repo_value, "cache-build repository root"
+    )
+    if str(build_repo) != build_repo_value:
+        raise ContractError("cache-build repository path is not canonical")
+    if not (build_repo / ".git").exists():
+        raise ContractError("cache-build repository root is not a Git checkout")
+    build_commit = request.get("git_commit")
+    if build_commit != complete.get("git_commit"):
+        raise ContractError("cache-build Git commit differs across records")
+    _assert_clean_commit(
+        build_repo,
+        _validated_commit(str(build_commit), "cache-build Git commit"),
+    )
+    _assert_git_ancestor(repo, str(build_commit), expected_commit)
+
+    manifest_metadata_path = _canonical_file(
+        complete.get("manifest_metadata", ""),
+        "cache-build manifest metadata",
+    )
+    manifest_metadata_record = _file_record(manifest_metadata_path)
+    if (
+        complete.get("manifest_metadata") != manifest_metadata_record["path"]
+        or complete.get("manifest_metadata_sha256")
+        != manifest_metadata_record["sha256"]
+    ):
+        raise ContractError("manifest-metadata digest differs from complete.json")
+    manifest_metadata = _read_json(
+        manifest_metadata_path, "cache-build manifest metadata"
+    )
+    expected_manifest_fields = {
+        "format_version": 1,
+        "schema": "abc-vjepa2.1-fixed-clips-v1",
+        "seed": EXPECTED_CACHE_BUILD_SEED,
+        "sample_size": 13,
+        "chunk_size": 5,
+        "action_span": 65,
+        "frame_offsets": list(range(0, 61, 5)),
+        "clips_per_episode": EXPECTED_CLIPS_PER_EPISODE,
+        "episode_count_consumed": sum(EXPECTED_SPLIT_COUNTS.values()),
+    }
+    if any(
+        manifest_metadata.get(key) != value
+        for key, value in expected_manifest_fields.items()
+    ):
+        raise ContractError("cache-build manifest metadata contract differs")
+    episode_manifest_path = _canonical_file(
+        manifest_metadata.get("episode_manifest", ""),
+        "cache-build episode manifest",
+    )
+    episode_manifest_record = _file_record(episode_manifest_path)
+    if (
+        manifest_metadata.get("episode_manifest_sha256")
+        != episode_manifest_record["sha256"]
+        or request.get("episode_manifest") != episode_manifest_record["path"]
+        or request.get("episode_manifest_sha256")
+        != episode_manifest_record["sha256"]
+    ):
+        raise ContractError("cache-build episode-manifest binding differs")
+
+    pca_path = _canonical_file(complete.get("pca", ""), "cache-build PCA artifact")
+    pca_record = _file_record(pca_path)
+    if (
+        complete.get("pca") != pca_record["path"]
+        or complete.get("pca_sha256") != pca_record["sha256"]
+        or pca_record != {
+            key: pca_stats[key] for key in ("path", "sha256", "bytes")
+        }
+    ):
+        raise ContractError("cache-build PCA binding differs")
+
+    complete_splits = complete.get("splits")
+    metadata_splits = manifest_metadata.get("splits")
+    if not isinstance(complete_splits, Mapping) or set(complete_splits) != {
+        "train",
+        "val",
+        "test",
+    }:
+        raise ContractError("complete.json must bind exactly train/val/test")
+    if not isinstance(metadata_splits, Mapping) or set(metadata_splits) != {
+        "train",
+        "val",
+        "test",
+    }:
+        raise ContractError("manifest metadata must bind exactly train/val/test")
+    study_keys = {"train": "train", "val": "validation", "test": "test"}
+    for split_name, study_key in study_keys.items():
+        split_record = splits[study_key]
+        manifest_record = split_record["clip_manifest"]
+        cache_record = split_record["cache"]
+        count = EXPECTED_SPLIT_COUNTS[split_name]
+        metadata_entry = metadata_splits[split_name]
+        if not isinstance(metadata_entry, Mapping):
+            raise ContractError(f"{split_name} manifest metadata is missing")
+        expected_manifest_name = f"{split_name}.jsonl"
+        if metadata_entry.get("file") != expected_manifest_name:
+            raise ContractError(
+                f"{split_name} manifest metadata filename differs"
+            )
+        manifest_path = _canonical_file(
+            manifest_metadata_path.parent / expected_manifest_name,
+            f"{split_name} cache-build clip manifest",
+        )
+        if (
+            str(manifest_path) != manifest_record["path"]
+            or metadata_entry.get("sha256") != manifest_record["sha256"]
+            or metadata_entry.get("clip_count") != count
+            or metadata_entry.get("episode_count") != count
+        ):
+            raise ContractError(
+                f"{split_name} cache-build manifest binding differs"
+            )
+        complete_entry = complete_splits[split_name]
+        if not isinstance(complete_entry, Mapping):
+            raise ContractError(f"{split_name} complete.json entry is missing")
+        expected_complete_entry = {
+            "metadata": cache_record["metadata"]["path"],
+            "metadata_sha256": cache_record["metadata"]["sha256"],
+            "cache_id": cache_record["cache_id"],
+            "clip_count": count,
+            "target_sha256": cache_record["target"]["sha256"],
+            "rgb_sha256": cache_record["rgb"]["sha256"],
+            "actions_sha256": cache_record["actions"]["sha256"],
+        }
+        if dict(complete_entry) != expected_complete_entry:
+            raise ContractError(
+                f"{split_name} cache binding differs from complete.json"
+            )
+
+    phase_cache = phase_report.get("provenance", {}).get("cache", {})
+    if (
+        not isinstance(phase_cache, Mapping)
+        or phase_cache.get("complete", {}).get("sha256")
+        != complete_record["sha256"]
+    ):
+        raise ContractError("phase gate refers to another cache build")
+    return {
+        "complete": dict(complete_record),
+        "request": request_record,
+        "manifest_metadata": manifest_metadata_record,
+        "episode_manifest": episode_manifest_record,
+        "build_id": complete["build_id"],
+        "git_commit": str(build_commit),
+        "seed": EXPECTED_CACHE_BUILD_SEED,
+        "clips_per_episode": EXPECTED_CLIPS_PER_EPISODE,
+        "split_counts": dict(EXPECTED_SPLIT_COUNTS),
+        "validated": True,
+    }
 
 
 def _collect_inputs(args: argparse.Namespace) -> dict[str, Any]:
@@ -900,7 +1757,7 @@ def _collect_inputs(args: argparse.Namespace) -> dict[str, Any]:
         ),
     }
     _assert_disjoint_splits(splits)
-    return {
+    inputs = {
         "repository": {
             "root": str(repo),
             "git_commit": expected_commit,
@@ -947,6 +1804,33 @@ def _collect_inputs(args: argparse.Namespace) -> dict[str, Any]:
         },
         "splits": splits,
     }
+    phase_report_path = _canonical_file(
+        args.phase_gate_report, "V-JEPA phase-gate report"
+    )
+    phase_gate, phase_report = _validate_phase_gate_report(
+        phase_report_path,
+        repo=repo,
+        expected_commit=expected_commit,
+        warmstart=warmstart_record,
+        vjepa_checkpoint=vjepa_checkpoint_record,
+        pca_stats=pca_record,
+        train_split=splits["train"],
+        runtime_python_path=python,
+    )
+    cache_build = _validate_cache_build(
+        repo=repo,
+        expected_commit=expected_commit,
+        phase_report=phase_report,
+        phase_gate_record=phase_gate,
+        splits=splits,
+        pca_stats=pca_record,
+        vjepa_source=vjepa_source,
+        vjepa_checkpoint=vjepa_checkpoint_record,
+        extractor_python=extractor_python,
+    )
+    inputs["phase_gate"] = phase_gate
+    inputs["cache_build"] = cache_build
+    return inputs
 
 
 def _study_manifest(
@@ -1625,6 +2509,52 @@ def command_create_study(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_validate_study_inputs(args: argparse.Namespace) -> int:
+    """Revalidate and rehash every immutable study boundary.
+
+    Stage and post-study entrypoints invoke this before creating any new
+    evidence/output path, including evidence-only resumptions.
+    """
+    expected_commit = _validated_commit(args.expected_commit)
+    repo = _canonical_directory(args.repo_root, "repository root")
+    _assert_clean_commit(repo, expected_commit)
+    manifest_path = _canonical_file(args.study_manifest, "study manifest")
+    study = _validate_study_manifest(
+        manifest_path,
+        expected_commit=expected_commit,
+    )
+    repository = study.get("inputs", {}).get("repository", {})
+    if (
+        not isinstance(repository, Mapping)
+        or repository.get("root") != str(repo)
+        or repository.get("git_commit") != expected_commit
+        or repository.get("clean") is not True
+    ):
+        raise ContractError("study manifest repository binding differs")
+    _assert_study_inputs_unchanged(study)
+    print(
+        json.dumps(
+            {
+                "status": "passed",
+                "kind": "vjepa2_controlled_study_input_revalidation",
+                "study_identity_sha256": study["identity_sha256"],
+                "phase_gate_identity_sha256": study["inputs"]["phase_gate"][
+                    "identity_sha256"
+                ],
+                "phase_gate_report_sha256": study["inputs"]["phase_gate"][
+                    "report"
+                ]["sha256"],
+                "cache_build_complete_sha256": study["inputs"]["cache_build"][
+                    "complete"
+                ]["sha256"],
+                "git_commit": expected_commit,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def command_create_arm(args: argparse.Namespace) -> int:
     arm = _arm(args.array_task_id)
     study_id = _validated_id(args.study_id, "study ID")
@@ -1733,6 +2663,9 @@ def command_prepare_stage(args: argparse.Namespace) -> int:
     )
     if arm_manifest["study_identity_sha256"] != study["identity_sha256"]:
         raise ContractError("arm manifest refers to another study identity")
+    # Keep the command safe even when invoked outside the audited Slurm
+    # entrypoint. The entrypoint also validates before any stage-path mutation,
+    # including evidence-only resumes that do not call this command.
     _assert_study_inputs_unchanged(study)
     config_record = study["inputs"]["configs"][arm["selector_kind"]]
     if args.config_selector != config_record["selector"]:
@@ -2158,6 +3091,7 @@ def _add_input_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--vjepa-checkpoint-sha256", required=True)
     parser.add_argument("--pca-stats", required=True)
     parser.add_argument("--pca-stats-sha256", required=True)
+    parser.add_argument("--phase-gate-report", required=True)
     parser.add_argument("--train-manifest", required=True)
     parser.add_argument("--train-cache-metadata", required=True)
     parser.add_argument("--validation-manifest", required=True)
@@ -2192,6 +3126,12 @@ def build_parser() -> argparse.ArgumentParser:
     study.add_argument("--allow-active-job-id", action="append", default=[])
     study.add_argument("--output", required=True)
     study.set_defaults(handler=command_create_study)
+
+    validate_inputs = subparsers.add_parser("validate-study-inputs")
+    validate_inputs.add_argument("--study-manifest", required=True)
+    validate_inputs.add_argument("--expected-commit", required=True)
+    validate_inputs.add_argument("--repo-root", required=True)
+    validate_inputs.set_defaults(handler=command_validate_study_inputs)
 
     create_arm = subparsers.add_parser("create-arm")
     create_arm.add_argument("--array-task-id", type=int, required=True)

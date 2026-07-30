@@ -436,6 +436,8 @@ def validate_j0_config(cfg: Any) -> dict[str, Any]:
         "clock_gate_init": 0.0,
         "clock_gate_trainable": True,
         "head_condition_on_tf_clock": True,
+        "video_only_control": False,
+        "parameter_matched_control": False,
         "time_frequency_transform": None,
     }
     observed = {
@@ -454,6 +456,8 @@ def validate_j0_config(cfg: Any) -> dict[str, Any]:
         "clock_gate_init": dual["clock_gate_init"],
         "clock_gate_trainable": dual["clock_gate_trainable"],
         "head_condition_on_tf_clock": dual["head_condition_on_tf_clock"],
+        "video_only_control": dual["video_only_control"],
+        "parameter_matched_control": dual["parameter_matched_control"],
         "time_frequency_transform": model["time_frequency_transform"],
     }
     if observed != expected:
@@ -909,6 +913,7 @@ def _compose_config(
         "wandb.enabled=false",
         "wandb.mode=disabled",
         "model.viz_num_steps=1",
+        "model.dual_diffusion.enabled=true",
         "model.dual_diffusion.capture_latent_trajectories=false",
         "model.dual_diffusion.artifact_batch_limit=1",
         "model.dual_diffusion.evaluation_nfe_steps=[1]",

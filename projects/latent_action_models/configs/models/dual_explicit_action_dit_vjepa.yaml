@@ -6,7 +6,9 @@ defaults:
 # is deliberately absent from model construction, checkpoints, and inference.
 time_frequency_transform: null
 dual_diffusion:
-  enabled: true
+  # The V-JEPA schema may be composed for inspection without silently enabling
+  # dual diffusion. Controlled-study and phase-gate entrypoints opt in.
+  enabled: false
   auxiliary_history_mode: diffuse_all
   tf_channels: 64
   head_condition_on_tf_clock: true

@@ -89,11 +89,12 @@ done
 
 BENCHMARK="$REPO_ROOT/tools/benchmark_vjepa2_paired_latency.py"
 ANALYZER="$REPO_ROOT/tools/analyze_vjepa2_controlled_study.py"
+HELPER="$REPO_ROOT/tools/vjepa2_controlled_study.py"
 ACTIVATE="$REPO_ROOT/tools/env/activate_b200.sh"
 VERIFY_RUNTIME="$REPO_ROOT/tools/env/verify_b200_runtime.py"
 STUDY_MANIFEST="$STUDY_ROOT/study_manifest.json"
 for path in \
-  "$BENCHMARK" "$ANALYZER" "$ACTIVATE" "$VERIFY_RUNTIME" "$STUDY_MANIFEST" \
+  "$BENCHMARK" "$ANALYZER" "$HELPER" "$ACTIVATE" "$VERIFY_RUNTIME" "$STUDY_MANIFEST" \
   "$SUBMISSION_RECORD"; do
   [[ -f "$path" && ! -L "$path" ]] || \
     die "missing or symlinked required file: $path"
@@ -128,6 +129,13 @@ case "$ROBOT_WM_ORIGIN" in
   "$REPO_ROOT"/robot_wm/*) ;;
   *) die "Python resolved robot_wm outside the study repository: $ROBOT_WM_ORIGIN" ;;
 esac
+
+# Re-hash and semantically revalidate the phase gate, cache build, and all
+# immutable study inputs before creating paired-benchmark output.
+"$PYTHON_BIN" "$HELPER" validate-study-inputs \
+  --study-manifest "$STUDY_MANIFEST" \
+  --expected-commit "$EXPECTED_COMMIT" \
+  --repo-root "$REPO_ROOT"
 
 OUTPUT_DIR="$STUDY_ROOT/paired_latency"
 [[ ! -e "$OUTPUT_DIR" ]] || \

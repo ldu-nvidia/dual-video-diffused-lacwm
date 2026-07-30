@@ -28,6 +28,7 @@ VJEPA_CHECKPOINT="${VJEPA_CHECKPOINT:-}"
 VJEPA_CHECKPOINT_SHA256="${VJEPA_CHECKPOINT_SHA256:-}"
 PCA_STATS="${VJEPA_PCA_STATS:-}"
 PCA_STATS_SHA256="${VJEPA_PCA_STATS_SHA256:-}"
+PHASE_GATE_REPORT="${VJEPA_PHASE_GATE_REPORT:-}"
 TRAIN_MANIFEST="${VJEPA_TRAIN_CLIP_MANIFEST:-}"
 TRAIN_CACHE_METADATA="${VJEPA_TRAIN_CACHE_METADATA:-}"
 VALIDATION_MANIFEST="${VJEPA_VAL_CLIP_MANIFEST:-}"
@@ -87,6 +88,8 @@ environment variables shown in parentheses:
   --vjepa-checkpoint-sha256 HEX (VJEPA_CHECKPOINT_SHA256)
   --pca-stats PATH              Train-split PCA64 artifact (VJEPA_PCA_STATS)
   --pca-stats-sha256 HEX        (VJEPA_PCA_STATS_SHA256)
+  --phase-gate-report PATH      Passed immutable eight-B200 J0 gate report
+                                (VJEPA_PHASE_GATE_REPORT)
   --train-manifest PATH         (VJEPA_TRAIN_CLIP_MANIFEST)
   --train-cache-metadata PATH   (VJEPA_TRAIN_CACHE_METADATA)
   --validation-manifest PATH    (VJEPA_VAL_CLIP_MANIFEST)
@@ -134,6 +137,7 @@ while (($#)); do
     --vjepa-checkpoint-sha256) [[ $# -ge 2 ]] || die "--vjepa-checkpoint-sha256 requires a value"; VJEPA_CHECKPOINT_SHA256="$2"; shift 2 ;;
     --pca-stats) [[ $# -ge 2 ]] || die "--pca-stats requires a value"; PCA_STATS="$2"; shift 2 ;;
     --pca-stats-sha256) [[ $# -ge 2 ]] || die "--pca-stats-sha256 requires a value"; PCA_STATS_SHA256="$2"; shift 2 ;;
+    --phase-gate-report) [[ $# -ge 2 ]] || die "--phase-gate-report requires a value"; PHASE_GATE_REPORT="$2"; shift 2 ;;
     --train-manifest) [[ $# -ge 2 ]] || die "--train-manifest requires a value"; TRAIN_MANIFEST="$2"; shift 2 ;;
     --train-cache-metadata) [[ $# -ge 2 ]] || die "--train-cache-metadata requires a value"; TRAIN_CACHE_METADATA="$2"; shift 2 ;;
     --validation-manifest) [[ $# -ge 2 ]] || die "--validation-manifest requires a value"; VALIDATION_MANIFEST="$2"; shift 2 ;;
@@ -197,6 +201,7 @@ for required_pair in \
   "V-JEPA checkpoint SHA-256:$VJEPA_CHECKPOINT_SHA256" \
   "PCA statistics:$PCA_STATS" \
   "PCA statistics SHA-256:$PCA_STATS_SHA256" \
+  "phase-gate report:$PHASE_GATE_REPORT" \
   "train manifest:$TRAIN_MANIFEST" \
   "train cache metadata:$TRAIN_CACHE_METADATA" \
   "validation manifest:$VALIDATION_MANIFEST" \
@@ -216,7 +221,7 @@ for path in \
   "$HELPER" "$SBATCH_SCRIPT" "$PAIRED_SBATCH_SCRIPT" "$ACTIVATE" \
   "$PYTHON_BIN" "$EXTRACTOR_PYTHON" \
   "$BASELINE_CONFIG" "$DUAL_CONFIG" "$WARMSTART" "$VJEPA_CHECKPOINT" \
-  "$PCA_STATS" "$TRAIN_MANIFEST" "$TRAIN_CACHE_METADATA" \
+  "$PCA_STATS" "$PHASE_GATE_REPORT" "$TRAIN_MANIFEST" "$TRAIN_CACHE_METADATA" \
   "$VALIDATION_MANIFEST" "$VALIDATION_CACHE_METADATA" \
   "$TEST_MANIFEST" "$TEST_CACHE_METADATA"; do
   [[ -f "$path" ]] || die "required file is missing: $path"
@@ -287,6 +292,7 @@ INPUT_ARGS=(
   --vjepa-checkpoint-sha256 "$VJEPA_CHECKPOINT_SHA256"
   --pca-stats "$PCA_STATS"
   --pca-stats-sha256 "$PCA_STATS_SHA256"
+  --phase-gate-report "$PHASE_GATE_REPORT"
   --train-manifest "$TRAIN_MANIFEST"
   --train-cache-metadata "$TRAIN_CACHE_METADATA"
   --validation-manifest "$VALIDATION_MANIFEST"
