@@ -112,6 +112,47 @@ job ID, nonempty log/output tree, dirty worktree, changed scientific code, or
 pre-existing submission record aborts this recovery path. It never calls
 `scancel`, a mutating `scontrol` command, or a second cache `sbatch`.
 
+### Completed-cache failed-DAG recovery
+
+The recorded recovery case is narrower than cache adoption. Cache job `481556`
+completed successfully, but final-artifact gate `481577` failed before either
+validation arm ran; Slurm consequently cancelled validation jobs `481578` and
+`481579` and selection job `481580`. Recover it only from a clean descendant
+controller worktree:
+
+```bash
+"$CONTROLLER_REPO/tools/slurm/recover_vjepa2_frontier_workflow.sh" \
+  --controller-commit "$CONTROLLER_COMMIT"
+
+# Add --execute only after reviewing the read-only evidence.
+"$CONTROLLER_REPO/tools/slurm/recover_vjepa2_frontier_workflow.sh" \
+  --controller-commit "$CONTROLLER_COMMIT" \
+  --execute
+```
+
+The preflight revalidates the original submission and exact five-task
+`481132` predecessor, the completed cache allocation and registration with
+full array rehashing, the exact failed/cancelled Slurm rows and `SubmitLine`
+values for jobs `481577` through `481580`, the original gate error, and the
+absence of validation, selection, confirmation, latency, and final outputs.
+It also proves that the controller's scientific/cache changes are allowlisted
+and that all evaluation remains frozen at scientific commit
+`87f3f8f969e160c86f5a8149b3ee8d0b32758f99`.
+
+Execution repeats that validation under a lock and creates the new, unique
+`_frontier_slurm_recovery_481556_481577` control root. It submits only:
+
+1. a corrected final-artifact gate from the controller commit;
+2. fresh VPM and J1 validation jobs from the frozen scientific commit, each
+   `afterok` the gate; and
+3. a controller selection job `afterok` both validation jobs, with all
+   conditional scientific descendants still pinned to the frozen commit.
+
+Each accepted job receives an exclusive receipt containing the exact tokenized
+`sbatch` command and its digest before the final recovery submission record is
+published. A partial new submission is therefore auditable. This path never
+deletes, rewrites, requeues, or duplicates cache job `481556`.
+
 Every scientific output is fresh-only. The launcher refuses any pre-existing
 frontier output tree, freezes one clean evaluator commit that is an
 inference-tree-identical descendant of the training commit, and verifies that

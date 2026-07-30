@@ -21,12 +21,14 @@ from tools.slurm import vjepa2_frontier_workflow as workflow
 ROOT = Path(__file__).resolve().parents[2]
 SLURM = ROOT / "tools" / "slurm"
 LAUNCHER = SLURM / "submit_vjepa2_frontier_workflow.sh"
+RECOVERY_LAUNCHER = SLURM / "recover_vjepa2_frontier_workflow.sh"
 SELECTION_GATE = SLURM / "vjepa2_frontier_select_and_submit.sbatch"
 QUALITY = SLURM / "vjepa2_frontier_quality.sbatch"
 TIMING = SLURM / "vjepa2_frontier_latency.sbatch"
 CACHE = SLURM / "vjepa2_frontier_cache.sbatch"
 SHELL_SCRIPTS = (
     LAUNCHER,
+    RECOVERY_LAUNCHER,
     CACHE,
     SLURM / "vjepa2_frontier_final_gate.sbatch",
     QUALITY,
@@ -632,6 +634,593 @@ class FrontierWorkflowHelperTest(unittest.TestCase):
             ["scontrol", "show", "job", "--oneliner", "481556"],
         )
 
+    def _completed_recovery_rows_fixture(
+        self,
+    ) -> tuple[
+        argparse.Namespace,
+        list[str],
+        dict[str, object],
+        dict[str, object],
+        Path,
+        Path,
+        Path,
+    ]:
+        study_root = self.root / "study"
+        prior_log_dir = study_root / "_frontier_slurm" / "logs"
+        prior_controller = self.root / "prior-controller"
+        scientific_repo = self.root / "scientific"
+        for directory in (prior_log_dir, prior_controller, scientific_repo):
+            directory.mkdir(parents=True, exist_ok=True)
+        args = argparse.Namespace(
+            study_root=str(study_root),
+            training_commit="9" * 40,
+            cache_job_id="481556",
+            failed_gate_job_id="481577",
+            cancelled_vpm_job_id="481578",
+            cancelled_j1_job_id="481579",
+            cancelled_selection_job_id="481580",
+            final_job_id="481132",
+            partition="batch",
+            account="coreai_chef_posttrain",
+            qos="normal",
+            scientific_commit="8" * 40,
+        )
+        study: dict[str, object] = {
+            "inputs": {
+                "runtime": {
+                    "python": "/env/lacwm/bin/python",
+                    "wan_dir": "/assets/wan",
+                    "videox_home": "/src/videox",
+                }
+            }
+        }
+        cache_submit_line = "sbatch --immutable-completed-cache"
+        submission: dict[str, object] = {
+            "cache_adoption_evidence": {
+                "submit_line_sha256": workflow.hashlib.sha256(
+                    cache_submit_line.encode("utf-8")
+                ).hexdigest()
+            }
+        }
+        prior_commit = "b" * 40
+        expected_user = workflow.pwd.getpwuid(os.getuid()).pw_name
+
+        def submit_line(
+            *,
+            name: str,
+            gpus: int,
+            cpus: int,
+            memory: str,
+            time_limit: str,
+            dependency: str,
+            script: Path,
+            script_args: list[str],
+        ) -> str:
+            scheduler = workflow._expected_scheduler_tokens(
+                job_name=name,
+                gpus=gpus,
+                cpus=cpus,
+                memory=memory,
+                time_limit=time_limit,
+                dependency=dependency,
+                partition="batch",
+                account="coreai_chef_posttrain",
+                qos="normal",
+                log_dir=prior_log_dir,
+            )
+            return shlex.join([*scheduler, str(script), *script_args])
+
+        gate_line = submit_line(
+            name="vjepa2-frontier-u1000-gate",
+            gpus=1,
+            cpus=16,
+            memory="64G",
+            time_limit="01:00:00",
+            dependency="afterok:481132",
+            script=prior_controller
+            / "tools/slurm/vjepa2_frontier_final_gate.sbatch",
+            script_args=[
+                "--repo-root",
+                str(prior_controller),
+                "--study-root",
+                str(study_root),
+                "--training-commit",
+                "9" * 40,
+                "--evaluator-commit",
+                prior_commit,
+                "--scientific-repo-root",
+                str(scientific_repo),
+                "--scientific-evaluator-commit",
+                "8" * 40,
+                "--python",
+                "/env/lacwm/bin/python",
+            ],
+        )
+
+        def validation_line(arm: str) -> str:
+            return submit_line(
+                name=f"vjepa2-frontier-val-{arm.lower()}",
+                gpus=8,
+                cpus=160,
+                memory="1000G",
+                time_limit="04:00:00",
+                dependency="afterok:481556:481577",
+                script=scientific_repo
+                / "tools/slurm/vjepa2_frontier_quality.sbatch",
+                script_args=[
+                    "--repo-root",
+                    str(scientific_repo),
+                    "--study-root",
+                    str(study_root),
+                    "--training-commit",
+                    "9" * 40,
+                    "--evaluator-commit",
+                    "8" * 40,
+                    "--python",
+                    "/env/lacwm/bin/python",
+                    "--wan-dir",
+                    "/assets/wan",
+                    "--videox-home",
+                    "/src/videox",
+                    "--split",
+                    "validation",
+                    "--arm",
+                    arm,
+                ],
+            )
+
+        selection_line = submit_line(
+            name="vjepa2-frontier-select",
+            gpus=1,
+            cpus=16,
+            memory="64G",
+            time_limit="01:00:00",
+            dependency="afterok:481578:481579",
+            script=prior_controller
+            / "tools/slurm/vjepa2_frontier_select_and_submit.sbatch",
+            script_args=[
+                "--repo-root",
+                str(prior_controller),
+                "--study-root",
+                str(study_root),
+                "--training-commit",
+                "9" * 40,
+                "--evaluator-commit",
+                prior_commit,
+                "--scientific-repo-root",
+                str(scientific_repo),
+                "--scientific-evaluator-commit",
+                "8" * 40,
+                "--python",
+                "/env/lacwm/bin/python",
+                "--wan-dir",
+                "/assets/wan",
+                "--videox-home",
+                "/src/videox",
+                "--partition",
+                "batch",
+                "--quality-time",
+                "04:00:00",
+                "--control-time",
+                "01:00:00",
+                "--timing-time",
+                "04:00:00",
+                "--quality-cpus",
+                "160",
+                "--quality-mem",
+                "1000G",
+                "--control-cpus",
+                "16",
+                "--control-mem",
+                "64G",
+                "--timing-cpus",
+                "32",
+                "--timing-mem",
+                "256G",
+                "--account",
+                "coreai_chef_posttrain",
+                "--qos",
+                "normal",
+                "--log-dir",
+                str(prior_log_dir),
+            ],
+        )
+
+        def row(
+            job_id: str,
+            name: str,
+            state: str,
+            exit_code: str,
+            gpus: int,
+            cpus: int,
+            memory: str,
+            time_limit: str,
+            submitted: str,
+        ) -> str:
+            return "|".join(
+                [
+                    job_id,
+                    name,
+                    expected_user,
+                    state,
+                    exit_code,
+                    "coreai_chef_posttrain",
+                    "normal",
+                    "batch",
+                    (
+                        f"billing=8,cpu={cpus},gres/gpu={gpus},"
+                        f"mem={memory},node=1"
+                    ),
+                    str(cpus),
+                    f"{memory}n",
+                    time_limit,
+                    submitted,
+                ]
+            )
+
+        rows = [
+            row(
+                "481556",
+                "vjepa2-frontier-cache",
+                "COMPLETED",
+                "0:0",
+                1,
+                32,
+                "256G",
+                "01:00:00",
+                cache_submit_line,
+            ),
+            row(
+                "481577",
+                "vjepa2-frontier-u1000-gate",
+                "FAILED",
+                "2:0",
+                1,
+                16,
+                "64G",
+                "01:00:00",
+                gate_line,
+            ),
+            row(
+                "481578",
+                "vjepa2-frontier-val-vpm",
+                "CANCELLED",
+                "0:0",
+                8,
+                160,
+                "1000G",
+                "04:00:00",
+                validation_line("VPM"),
+            ),
+            row(
+                "481579",
+                "vjepa2-frontier-val-j1",
+                "CANCELLED",
+                "0:0",
+                8,
+                160,
+                "1000G",
+                "04:00:00",
+                validation_line("J1"),
+            ),
+            row(
+                "481580",
+                "vjepa2-frontier-select",
+                "CANCELLED",
+                "0:0",
+                1,
+                16,
+                "64G",
+                "01:00:00",
+                selection_line,
+            ),
+        ]
+        return (
+            args,
+            rows,
+            study,
+            submission,
+            prior_controller,
+            prior_log_dir,
+            scientific_repo,
+        )
+
+    def test_completed_recovery_binds_exact_failed_and_cancelled_dag(self) -> None:
+        (
+            args,
+            rows,
+            study,
+            submission,
+            prior_controller,
+            prior_log_dir,
+            scientific_repo,
+        ) = self._completed_recovery_rows_fixture()
+        evidence = workflow.validate_completed_recovery_rows(
+            args,
+            rows,
+            study=study,
+            submission=submission,
+            prior_controller=prior_controller,
+            prior_controller_commit="b" * 40,
+            prior_log_dir=prior_log_dir,
+            scientific_repo=scientific_repo,
+        )
+        self.assertEqual(evidence["481556"]["state"], "COMPLETED")
+        self.assertEqual(evidence["481577"]["exit_code"], "2:0")
+        self.assertEqual(evidence["481578"]["state"], "CANCELLED")
+        self.assertEqual(evidence["481579"]["state"], "CANCELLED")
+        self.assertEqual(evidence["481580"]["state"], "CANCELLED")
+
+    def test_completed_recovery_rejects_job_and_submitline_drift(self) -> None:
+        (
+            args,
+            rows,
+            study,
+            submission,
+            prior_controller,
+            prior_log_dir,
+            scientific_repo,
+        ) = self._completed_recovery_rows_fixture()
+        kwargs = {
+            "study": study,
+            "submission": submission,
+            "prior_controller": prior_controller,
+            "prior_controller_commit": "b" * 40,
+            "prior_log_dir": prior_log_dir,
+            "scientific_repo": scientific_repo,
+        }
+        with self.assertRaisesRegex(workflow.WorkflowError, "job set differs"):
+            workflow.validate_completed_recovery_rows(args, rows[:-1], **kwargs)
+        with self.assertRaisesRegex(workflow.WorkflowError, "accounting state differs"):
+            workflow.validate_completed_recovery_rows(
+                args,
+                [line.replace("|FAILED|", "|COMPLETED|", 1) for line in rows],
+                **kwargs,
+            )
+        with self.assertRaisesRegex(workflow.WorkflowError, "SubmitLine differs"):
+            workflow.validate_completed_recovery_rows(
+                args,
+                [
+                    line.replace(
+                        "--dependency=afterok:481556:481577",
+                        "--dependency=afterok:481556",
+                        1,
+                    )
+                    for line in rows
+                ],
+                **kwargs,
+            )
+        bad_submission = json.loads(json.dumps(submission))
+        bad_submission["cache_adoption_evidence"]["submit_line_sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+            workflow.WorkflowError, "completed cache SubmitLine differs"
+        ):
+            workflow.validate_completed_recovery_rows(
+                args,
+                rows,
+                **{**kwargs, "submission": bad_submission},
+            )
+
+    def test_recovery_predecessor_receipt_binds_all_exact_job_ids(self) -> None:
+        (
+            args,
+            _rows,
+            _study,
+            _submission,
+            prior_controller,
+            _prior_log_dir,
+            scientific_repo,
+        ) = self._completed_recovery_rows_fixture()
+        path = self.root / "study" / "_frontier_slurm" / "submission.json"
+        payload = {
+            "kind": "vjepa2_nfe_frontier_slurm_submission",
+            "schema_version": 1,
+            "study_root": args.study_root,
+            "training_git_commit": args.training_commit,
+            "final_update_1000_job_id": args.final_job_id,
+            "evaluator_git_commit": args.scientific_commit,
+            "scientific_evaluator_repo_root": str(scientific_repo),
+            "controller_repo_root": str(prior_controller),
+            "controller_git_commit": "b" * 40,
+            "cache_job_id": args.cache_job_id,
+            "cache_job_adopted": True,
+            "cache_adoption_evidence": {
+                "job_id": args.cache_job_id,
+                "state": "PENDING",
+                "exit_code": "0:0",
+                "producer_repo_root": str(scientific_repo),
+                "producer_evaluator_commit": args.scientific_commit,
+                "submit_line_exact_match": True,
+                "submit_line_sha256": "1" * 64,
+            },
+            "final_artifact_gate_job_id": args.failed_gate_job_id,
+            "validation_job_ids": {
+                "J1": args.cancelled_j1_job_id,
+                "VPM": args.cancelled_vpm_job_id,
+            },
+            "selection_gate_job_id": args.cancelled_selection_job_id,
+            "dependencies": {
+                "cache": f"afterok:{args.final_job_id} (adopted pending cache)",
+                "final_artifact_gate": f"afterok:{args.final_job_id}",
+                "selection": (
+                    f"afterok:{args.cancelled_vpm_job_id}:"
+                    f"{args.cancelled_j1_job_id}"
+                ),
+                "validation": (
+                    f"afterok:{args.cache_job_id}:{args.failed_gate_job_id}"
+                ),
+            },
+            "lockbox_jobs_submitted_at_initial_submission": False,
+            "lockbox_submission_requires_confirmatory_eligible": True,
+        }
+        _write_json(path, payload)
+        validated, controller, _logs, commit = (
+            workflow._validate_recovery_submission(
+                path=path,
+                study_root=Path(args.study_root),
+                training_commit=args.training_commit,
+                cache_job_id=args.cache_job_id,
+                failed_gate_job_id=args.failed_gate_job_id,
+                cancelled_vpm_job_id=args.cancelled_vpm_job_id,
+                cancelled_j1_job_id=args.cancelled_j1_job_id,
+                cancelled_selection_job_id=args.cancelled_selection_job_id,
+                final_job_id=args.final_job_id,
+                scientific_repo=scientific_repo,
+                scientific_commit=args.scientific_commit,
+            )
+        )
+        self.assertEqual(validated["cache_job_id"], "481556")
+        self.assertEqual(controller, prior_controller)
+        self.assertEqual(commit, "b" * 40)
+
+        payload["final_update_1000_job_id"] = "999999"
+        path.unlink()
+        _write_json(path, payload)
+        with self.assertRaisesRegex(
+            workflow.WorkflowError, "final_update_1000_job_id differs"
+        ):
+            workflow._validate_recovery_submission(
+                path=path,
+                study_root=Path(args.study_root),
+                training_commit=args.training_commit,
+                cache_job_id=args.cache_job_id,
+                failed_gate_job_id=args.failed_gate_job_id,
+                cancelled_vpm_job_id=args.cancelled_vpm_job_id,
+                cancelled_j1_job_id=args.cancelled_j1_job_id,
+                cancelled_selection_job_id=args.cancelled_selection_job_id,
+                final_job_id=args.final_job_id,
+                scientific_repo=scientific_repo,
+                scientific_commit=args.scientific_commit,
+            )
+
+    def test_completed_recovery_command_rehashes_registered_cache(self) -> None:
+        study_root = self.root / "study"
+        controller = self.root / "controller"
+        scientific = self.root / "scientific"
+        prior_controller = self.root / "prior-controller"
+        prior_root = study_root / "_frontier_slurm"
+        prior_logs = prior_root / "logs"
+        for directory in (
+            controller,
+            scientific,
+            prior_controller,
+            prior_logs,
+            study_root / "frontier_lockbox",
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+        prior_submission = _write_json(
+            prior_root / "submission.json", {"prior": True}
+        )
+        failed_stderr = (
+            prior_logs / "vjepa2-frontier-u1000-gate-481577.err"
+        )
+        failed_stderr.write_text(
+            "ERROR: VPM final evidence is invalid: "
+            "VPM final provenance/snapshot identity differs\n",
+            encoding="utf-8",
+        )
+        registration = {
+            "registration_git_commit": "8" * 40,
+            "identity_sha256": "1" * 64,
+        }
+        _write_json(
+            study_root / "frontier_lockbox" / "registration.json",
+            registration,
+        )
+        study = {"identity_sha256": "2" * 64}
+        args = argparse.Namespace(
+            study_root=str(study_root),
+            training_commit="9" * 40,
+            controller_repo_root=str(controller),
+            controller_commit="c" * 40,
+            scientific_repo_root=str(scientific),
+            scientific_commit="8" * 40,
+            prior_submission=str(prior_submission),
+            cache_job_id="481556",
+            failed_gate_job_id="481577",
+            cancelled_vpm_job_id="481578",
+            cancelled_j1_job_id="481579",
+            cancelled_selection_job_id="481580",
+            final_job_id="481132",
+            partition="batch",
+            account="coreai_chef_posttrain",
+            qos="normal",
+        )
+
+        def git_result(repo: Path, *arguments: str) -> str:
+            if arguments == ("rev-parse", "--show-toplevel"):
+                return str(repo)
+            if arguments == ("rev-parse", "HEAD"):
+                if repo == controller:
+                    return "c" * 40
+                if repo == scientific:
+                    return "8" * 40
+                return "b" * 40
+            if arguments[:2] == ("status", "--porcelain"):
+                return ""
+            if arguments[:2] == ("diff", "--name-only"):
+                return "tools/slurm/vjepa2_frontier_workflow.py"
+            if arguments[:1] == ("rev-parse",) and ":" in arguments[1]:
+                return "a" * 40
+            raise AssertionError((repo, arguments))
+
+        completed = [
+            subprocess.CompletedProcess(args=(), returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=(), returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(
+                args=(), returncode=0, stdout="accounting\n", stderr=""
+            ),
+        ]
+        cache_validation = {
+            "full_array_hashes_rechecked": True,
+            "deterministic_construction_reverified": True,
+            "episode_isolation_verified": True,
+        }
+        with (
+            mock.patch.object(
+                workflow, "_load_study", return_value=(study_root, study)
+            ),
+            mock.patch.object(workflow, "_git", side_effect=git_result),
+            mock.patch.object(
+                workflow.subprocess, "run", side_effect=completed
+            ) as runner,
+            mock.patch.object(
+                workflow,
+                "_validate_recovery_submission",
+                return_value=(
+                    {"cache_adoption_evidence": {}},
+                    prior_controller,
+                    prior_logs,
+                    "b" * 40,
+                ),
+            ),
+            mock.patch.object(
+                workflow,
+                "validate_completed_recovery_rows",
+                return_value={"481556": {"state": "COMPLETED"}},
+            ),
+            mock.patch.object(
+                workflow.frontier.lockbox,
+                "validate_registration",
+                return_value=cache_validation,
+            ) as cache_validator,
+        ):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = workflow.command_validate_completed_recovery(args)
+        self.assertEqual(status, 0)
+        self.assertTrue(json.loads(output.getvalue())["full_cache_hashes_rechecked"])
+        cache_validator.assert_called_once_with(
+            registration,
+            study=study,
+            rehash_arrays=True,
+            verify_construction=True,
+        )
+        accounting_command = runner.call_args_list[2].args[0]
+        self.assertIn("--duplicates", accounting_command)
+        self.assertIn("481556,481577,481578,481579,481580", accounting_command)
+        self.assertIn("SubmitLine%4096", " ".join(accounting_command))
+
     def test_adopted_cache_repository_diff_is_orchestration_only(self) -> None:
         current = self.root / "current"
         producer = self.root / "producer"
@@ -969,6 +1558,75 @@ class FrontierSlurmContractTest(unittest.TestCase):
             '[[ "$TRAINING_REPO_ROOT" != "$REPO_ROOT" ]]', source
         )
         self.assertIn("rev-parse --show-toplevel", source)
+
+    def test_completed_cache_recovery_is_unique_and_never_submits_cache(
+        self,
+    ) -> None:
+        source = RECOVERY_LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn(
+            '_frontier_slurm_recovery_${CACHE_JOB_ID}_${FAILED_GATE_JOB_ID}',
+            source,
+        )
+        self.assertIn(
+            '[[ "$RECOVERY_ROOT" == "$EXPECTED_RECOVERY_ROOT" ]]',
+            source,
+        )
+        self.assertIn('[[ ! -e "$RECOVERY_ROOT" ]]', source)
+        self.assertNotIn("vjepa2_frontier_cache.sbatch", source)
+        self.assertNotIn("CACHE_SBATCH", source)
+        self.assertIn('"cache_job_submitted_by_recovery": False', source)
+        self.assertIn("completed_cache_reused", source)
+        self.assertNotIn("\nrm ", source)
+        self.assertNotIn("\nmv ", source)
+
+    def test_recovery_dag_uses_new_gate_and_frozen_scientific_jobs(self) -> None:
+        source = RECOVERY_LAUNCHER.read_text(encoding="utf-8")
+        gate = source.index('GATE_JOB_ID="$(sbatch')
+        validation = source.index("submit_validation()")
+        selection = source.index('SELECTION_JOB_ID="$(sbatch')
+        self.assertLess(gate, validation)
+        self.assertLess(validation, selection)
+        self.assertIn('--dependency="afterok:$GATE_DEPENDENCY"', source)
+        self.assertIn(
+            'QUALITY_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/'
+            'vjepa2_frontier_quality.sbatch"',
+            source,
+        )
+        self.assertIn(
+            '--scientific-evaluator-commit "$SCIENTIFIC_COMMIT"',
+            source,
+        )
+        self.assertIn(
+            'SCIENTIFIC_COMMIT="${VJEPA_FRONTIER_SCIENTIFIC_COMMIT:-'
+            '87f3f8f969e160c86f5a8149b3ee8d0b32758f99}"',
+            source,
+        )
+        self.assertIn("accepted_gate.json", source.replace("${label}", "gate"))
+        self.assertIn("submit_line_tokens", source)
+        self.assertIn("submit_line_sha256", source)
+        self.assertIn("predecessor_evidence.json", source)
+        self.assertIn('SUBMISSION_RECORD="$RECOVERY_ROOT/submission.json"', source)
+
+    def test_final_gate_uses_controller_validator_and_verifies_science(self) -> None:
+        source = (
+            SLURM / "vjepa2_frontier_final_gate.sbatch"
+        ).read_text(encoding="utf-8")
+        check_final = source.index("check-final")
+        prefix = source[max(0, check_final - 180) : check_final]
+        self.assertIn(
+            '"$REPO_ROOT/tools/slurm/vjepa2_frontier_workflow.py"',
+            prefix,
+        )
+        self.assertNotIn(
+            '"$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_workflow.py"',
+            prefix,
+        )
+        self.assertIn(
+            '"$(git -C "$SCIENTIFIC_REPO_ROOT" rev-parse HEAD)"',
+            source,
+        )
+        self.assertIn("scientific evaluator worktree is dirty", source)
+        self.assertIn("validate-completed-recovery", source)
 
 
 if __name__ == "__main__":

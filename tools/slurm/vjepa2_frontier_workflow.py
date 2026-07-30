@@ -61,6 +61,29 @@ ADOPTED_RECOVERY_ALLOWED_PATHS = frozenset(
         "tools/slurm/vjepa2_frontier_workflow.py",
     }
 )
+COMPLETED_RECOVERY_CONTROLLER_ALLOWED_PATHS = frozenset(
+    {
+        "docs/experiments/VJEPA2_NFE_FRONTIER_PROTOCOL.md",
+        "robot_wm/tests/test_analyze_vjepa2_controlled_study.py",
+        "robot_wm/tests/test_benchmark_vjepa2_paired_latency.py",
+        "robot_wm/tests/test_vjepa2_frontier_slurm.py",
+        "robot_wm/tests/test_vjepa2_lockbox_causality.py",
+        "tools/analyze_vjepa2_controlled_study.py",
+        "tools/benchmark_vjepa2_paired_latency.py",
+        "tools/evaluate_vjepa2_quality.py",
+        "tools/slurm/README.md",
+        "tools/slurm/recover_vjepa2_frontier_workflow.sh",
+        "tools/slurm/submit_vjepa2_frontier_causality.sh",
+        "tools/slurm/submit_vjepa2_frontier_workflow.sh",
+        "tools/slurm/vjepa2_frontier_causality_confirm.sbatch",
+        "tools/slurm/vjepa2_frontier_causality_quality.sbatch",
+        "tools/slurm/vjepa2_frontier_confirm.sbatch",
+        "tools/slurm/vjepa2_frontier_final_gate.sbatch",
+        "tools/slurm/vjepa2_frontier_select_and_submit.sbatch",
+        "tools/slurm/vjepa2_frontier_workflow.py",
+        "tools/vjepa2_lockbox_causality.py",
+    }
+)
 ACTIVE_SLURM_STATES = {
     "CONFIGURING",
     "COMPLETING",
@@ -997,6 +1020,793 @@ def command_validate_adopted_cache(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _file_evidence(path: Path, *, identity: str | None = None) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "path": str(path),
+        "sha256": _sha256_file(path),
+        "bytes": path.stat().st_size,
+    }
+    if identity is not None:
+        evidence["identity_sha256"] = identity
+    return evidence
+
+
+def _allocation_row(line: str) -> dict[str, Any]:
+    fields = line.rstrip("\n").split("|")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) != 13:
+        raise WorkflowError("recovery accounting row has the wrong schema")
+    (
+        job_id,
+        job_name,
+        user,
+        raw_state,
+        exit_code,
+        account,
+        qos,
+        partition,
+        req_tres,
+        req_cpus,
+        req_mem,
+        time_limit,
+        submit_line,
+    ) = (value.strip() for value in fields)
+    if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
+        raise WorkflowError("recovery accounting JobID is malformed")
+    state = raw_state.split("+", 1)[0].split(maxsplit=1)[0].upper()
+    return {
+        "job_id": job_id,
+        "job_name": job_name,
+        "user": user,
+        "state": state,
+        "exit_code": exit_code,
+        "account": account,
+        "qos": qos,
+        "partition": partition,
+        "requested_tres": _requested_tres(req_tres),
+        "requested_cpus": req_cpus,
+        "requested_memory": req_mem,
+        "time_limit": time_limit,
+        "submit_line": submit_line,
+        "submit_line_sha256": hashlib.sha256(
+            submit_line.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _expected_scheduler_tokens(
+    *,
+    job_name: str,
+    gpus: int,
+    cpus: int,
+    memory: str,
+    time_limit: str,
+    dependency: str,
+    partition: str,
+    account: str,
+    qos: str,
+    log_dir: Path,
+) -> list[str]:
+    return [
+        "sbatch",
+        "--parsable",
+        "--nodes=1",
+        "--ntasks=1",
+        "--ntasks-per-node=1",
+        f"--gpus-per-node={gpus}",
+        f"--cpus-per-task={cpus}",
+        f"--mem={memory}",
+        f"--time={time_limit}",
+        f"--partition={partition}",
+        f"--dependency={dependency}",
+        "--no-requeue",
+        "--open-mode=append",
+        "--export=ALL",
+        f"--job-name={job_name}",
+        f"--output={log_dir}/%x-%j.out",
+        f"--error={log_dir}/%x-%j.err",
+        f"--account={account}",
+        f"--qos={qos}",
+    ]
+
+
+def _require_exact_submit_line(
+    record: Mapping[str, Any],
+    *,
+    scheduler_tokens: Sequence[str],
+    script: Path,
+    script_arguments: Sequence[str],
+) -> None:
+    tokens = _submit_line_tokens(str(record.get("submit_line", "")))
+    expected = [*scheduler_tokens, str(script), *script_arguments]
+    if tokens != expected:
+        raise WorkflowError(
+            f"{record.get('job_id')} SubmitLine differs from the recorded DAG"
+        )
+
+
+def _require_allocation(
+    record: Mapping[str, Any],
+    *,
+    job_id: str,
+    job_name: str,
+    state: str,
+    exit_code: str,
+    gpus: int,
+    cpus: int,
+    memory: str,
+    time_limit: str,
+    partition: str,
+    account: str,
+    qos: str,
+) -> None:
+    expected_user = pwd.getpwuid(os.getuid()).pw_name
+    expected = {
+        "job_id": job_id,
+        "job_name": job_name,
+        "user": expected_user,
+        "state": state,
+        "exit_code": exit_code,
+        "account": account,
+        "qos": qos,
+        "partition": partition,
+        "requested_cpus": str(cpus),
+        "time_limit": time_limit,
+    }
+    for field, value in expected.items():
+        if record.get(field) != value:
+            raise WorkflowError(
+                f"{job_id} accounting {field} differs: "
+                f"{record.get(field)!r} != {value!r}"
+            )
+    if _memory_value(str(record.get("requested_memory", ""))) != _memory_value(
+        memory
+    ):
+        raise WorkflowError(f"{job_id} accounting requested memory differs")
+    tres = record.get("requested_tres")
+    if not isinstance(tres, Mapping):
+        raise WorkflowError(f"{job_id} accounting requested TRES are missing")
+    gpu_values = [
+        value
+        for key, value in tres.items()
+        if key == "gres/gpu" or key.startswith("gres/gpu:")
+    ]
+    if (
+        tres.get("node") != "1"
+        or tres.get("cpu") != str(cpus)
+        or _memory_value(str(tres.get("mem", ""))) != _memory_value(memory)
+        or any(re.fullmatch(r"[1-9][0-9]*", value) is None for value in gpu_values)
+        or sum(int(value) for value in gpu_values) != gpus
+    ):
+        raise WorkflowError(f"{job_id} accounting requested TRES differ")
+
+
+def _validate_recovery_submission(
+    *,
+    path: Path,
+    study_root: Path,
+    training_commit: str,
+    cache_job_id: str,
+    failed_gate_job_id: str,
+    cancelled_vpm_job_id: str,
+    cancelled_j1_job_id: str,
+    cancelled_selection_job_id: str,
+    final_job_id: str,
+    scientific_repo: Path,
+    scientific_commit: str,
+) -> tuple[dict[str, Any], Path, Path, str]:
+    expected_path = study_root / "_frontier_slurm" / "submission.json"
+    if path != expected_path:
+        raise WorkflowError("recovery predecessor submission path differs")
+    submission = _read_json(path, "frontier predecessor submission")
+    prior_controller_value = submission.get("controller_repo_root")
+    prior_controller_commit = submission.get("controller_git_commit")
+    if not isinstance(prior_controller_value, str):
+        raise WorkflowError("predecessor controller repository is missing")
+    prior_controller = _canonical_directory(
+        prior_controller_value, "predecessor controller repository"
+    )
+    expected = {
+        "kind": "vjepa2_nfe_frontier_slurm_submission",
+        "schema_version": 1,
+        "study_root": str(study_root),
+        "training_git_commit": training_commit,
+        "final_update_1000_job_id": final_job_id,
+        "evaluator_git_commit": scientific_commit,
+        "scientific_evaluator_repo_root": str(scientific_repo),
+        "cache_job_id": cache_job_id,
+        "cache_job_adopted": True,
+        "final_artifact_gate_job_id": failed_gate_job_id,
+        "selection_gate_job_id": cancelled_selection_job_id,
+        "lockbox_jobs_submitted_at_initial_submission": False,
+        "lockbox_submission_requires_confirmatory_eligible": True,
+    }
+    for field, value in expected.items():
+        if submission.get(field) != value:
+            raise WorkflowError(
+                f"predecessor submission {field} differs: "
+                f"{submission.get(field)!r} != {value!r}"
+            )
+    if (
+        not isinstance(prior_controller_commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}", prior_controller_commit) is None
+        or submission.get("validation_job_ids")
+        != {"J1": cancelled_j1_job_id, "VPM": cancelled_vpm_job_id}
+        or submission.get("dependencies")
+        != {
+            "cache": f"afterok:{final_job_id} (adopted pending cache)",
+            "final_artifact_gate": f"afterok:{final_job_id}",
+            "selection": (
+                f"afterok:{cancelled_vpm_job_id}:{cancelled_j1_job_id}"
+            ),
+            "validation": f"afterok:{cache_job_id}:{failed_gate_job_id}",
+        }
+    ):
+        raise WorkflowError("predecessor submission DAG identities differ")
+    adoption = submission.get("cache_adoption_evidence")
+    if (
+        not isinstance(adoption, Mapping)
+        or adoption.get("job_id") != cache_job_id
+        or adoption.get("state") != "PENDING"
+        or adoption.get("exit_code") != "0:0"
+        or adoption.get("producer_repo_root") != str(scientific_repo)
+        or adoption.get("producer_evaluator_commit") != scientific_commit
+        or adoption.get("submit_line_exact_match") is not True
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(adoption.get("submit_line_sha256", ""))
+        )
+        is None
+    ):
+        raise WorkflowError("predecessor cache-adoption evidence differs")
+    prior_log_dir = _canonical_directory(
+        path.parent / "logs", "predecessor Slurm log directory"
+    )
+    return (
+        submission,
+        prior_controller,
+        prior_log_dir,
+        prior_controller_commit,
+    )
+
+
+def validate_completed_recovery_rows(
+    args: argparse.Namespace,
+    rows: Sequence[str],
+    *,
+    study: Mapping[str, Any],
+    submission: Mapping[str, Any],
+    prior_controller: Path,
+    prior_controller_commit: str,
+    prior_log_dir: Path,
+    scientific_repo: Path,
+) -> dict[str, Any]:
+    records: dict[str, dict[str, Any]] = {}
+    for line in rows:
+        if not line.strip():
+            continue
+        record = _allocation_row(line)
+        job_id = record["job_id"]
+        if job_id in records:
+            raise WorkflowError(f"recovery accounting duplicates job {job_id}")
+        records[job_id] = record
+    expected_ids = {
+        args.cache_job_id,
+        args.failed_gate_job_id,
+        args.cancelled_vpm_job_id,
+        args.cancelled_j1_job_id,
+        args.cancelled_selection_job_id,
+    }
+    if set(records) != expected_ids:
+        raise WorkflowError(
+            "recovery accounting job set differs: "
+            f"missing={sorted(expected_ids - set(records))}, "
+            f"extra={sorted(set(records) - expected_ids)}"
+        )
+    job_specs = {
+        args.cache_job_id: (
+            "vjepa2-frontier-cache",
+            "COMPLETED",
+            "0:0",
+            1,
+            32,
+            "256G",
+            "01:00:00",
+        ),
+        args.failed_gate_job_id: (
+            "vjepa2-frontier-u1000-gate",
+            "FAILED",
+            "2:0",
+            1,
+            16,
+            "64G",
+            "01:00:00",
+        ),
+        args.cancelled_vpm_job_id: (
+            "vjepa2-frontier-val-vpm",
+            "CANCELLED",
+            "0:0",
+            8,
+            160,
+            "1000G",
+            "04:00:00",
+        ),
+        args.cancelled_j1_job_id: (
+            "vjepa2-frontier-val-j1",
+            "CANCELLED",
+            "0:0",
+            8,
+            160,
+            "1000G",
+            "04:00:00",
+        ),
+        args.cancelled_selection_job_id: (
+            "vjepa2-frontier-select",
+            "CANCELLED",
+            "0:0",
+            1,
+            16,
+            "64G",
+            "01:00:00",
+        ),
+    }
+    for job_id, spec in job_specs.items():
+        name, state, exit_code, gpus, cpus, memory, time_limit = spec
+        _require_allocation(
+            records[job_id],
+            job_id=job_id,
+            job_name=name,
+            state=state,
+            exit_code=exit_code,
+            gpus=gpus,
+            cpus=cpus,
+            memory=memory,
+            time_limit=time_limit,
+            partition=args.partition,
+            account=args.account,
+            qos=args.qos,
+        )
+
+    adoption = submission["cache_adoption_evidence"]
+    cache_record = records[args.cache_job_id]
+    if cache_record["submit_line_sha256"] != adoption["submit_line_sha256"]:
+        raise WorkflowError("completed cache SubmitLine differs from adopted job")
+
+    runtime = study.get("inputs", {}).get("runtime", {})
+    python = _require_line_safe(runtime.get("python"), "study LACWM Python")
+    wan_dir = _require_line_safe(runtime.get("wan_dir"), "study Wan directory")
+    videox_home = _require_line_safe(
+        runtime.get("videox_home"), "study VideoX checkout"
+    )
+    common = {
+        "partition": args.partition,
+        "account": args.account,
+        "qos": args.qos,
+        "log_dir": prior_log_dir,
+    }
+    gate_scheduler = _expected_scheduler_tokens(
+        job_name="vjepa2-frontier-u1000-gate",
+        gpus=1,
+        cpus=16,
+        memory="64G",
+        time_limit="01:00:00",
+        dependency=f"afterok:{args.final_job_id}",
+        **common,
+    )
+    _require_exact_submit_line(
+        records[args.failed_gate_job_id],
+        scheduler_tokens=gate_scheduler,
+        script=prior_controller / "tools/slurm/vjepa2_frontier_final_gate.sbatch",
+        script_arguments=[
+            "--repo-root",
+            str(prior_controller),
+            "--study-root",
+            args.study_root,
+            "--training-commit",
+            args.training_commit,
+            "--evaluator-commit",
+            prior_controller_commit,
+            "--scientific-repo-root",
+            str(scientific_repo),
+            "--scientific-evaluator-commit",
+            args.scientific_commit,
+            "--python",
+            python,
+        ],
+    )
+
+    validation_dependency = (
+        f"afterok:{args.cache_job_id}:{args.failed_gate_job_id}"
+    )
+    for arm, job_id in (
+        ("VPM", args.cancelled_vpm_job_id),
+        ("J1", args.cancelled_j1_job_id),
+    ):
+        scheduler = _expected_scheduler_tokens(
+            job_name=f"vjepa2-frontier-val-{arm.lower()}",
+            gpus=8,
+            cpus=160,
+            memory="1000G",
+            time_limit="04:00:00",
+            dependency=validation_dependency,
+            **common,
+        )
+        _require_exact_submit_line(
+            records[job_id],
+            scheduler_tokens=scheduler,
+            script=scientific_repo / "tools/slurm/vjepa2_frontier_quality.sbatch",
+            script_arguments=[
+                "--repo-root",
+                str(scientific_repo),
+                "--study-root",
+                args.study_root,
+                "--training-commit",
+                args.training_commit,
+                "--evaluator-commit",
+                args.scientific_commit,
+                "--python",
+                python,
+                "--wan-dir",
+                wan_dir,
+                "--videox-home",
+                videox_home,
+                "--split",
+                "validation",
+                "--arm",
+                arm,
+            ],
+        )
+
+    selection_scheduler = _expected_scheduler_tokens(
+        job_name="vjepa2-frontier-select",
+        gpus=1,
+        cpus=16,
+        memory="64G",
+        time_limit="01:00:00",
+        dependency=(
+            f"afterok:{args.cancelled_vpm_job_id}:"
+            f"{args.cancelled_j1_job_id}"
+        ),
+        **common,
+    )
+    _require_exact_submit_line(
+        records[args.cancelled_selection_job_id],
+        scheduler_tokens=selection_scheduler,
+        script=(
+            prior_controller
+            / "tools/slurm/vjepa2_frontier_select_and_submit.sbatch"
+        ),
+        script_arguments=[
+            "--repo-root",
+            str(prior_controller),
+            "--study-root",
+            args.study_root,
+            "--training-commit",
+            args.training_commit,
+            "--evaluator-commit",
+            prior_controller_commit,
+            "--scientific-repo-root",
+            str(scientific_repo),
+            "--scientific-evaluator-commit",
+            args.scientific_commit,
+            "--python",
+            python,
+            "--wan-dir",
+            wan_dir,
+            "--videox-home",
+            videox_home,
+            "--partition",
+            args.partition,
+            "--quality-time",
+            "04:00:00",
+            "--control-time",
+            "01:00:00",
+            "--timing-time",
+            "04:00:00",
+            "--quality-cpus",
+            "160",
+            "--quality-mem",
+            "1000G",
+            "--control-cpus",
+            "16",
+            "--control-mem",
+            "64G",
+            "--timing-cpus",
+            "32",
+            "--timing-mem",
+            "256G",
+            "--account",
+            args.account,
+            "--qos",
+            args.qos,
+            "--log-dir",
+            str(prior_log_dir),
+        ],
+    )
+    return {
+        job_id: {
+            key: record[key]
+            for key in (
+                "job_name",
+                "state",
+                "exit_code",
+                "account",
+                "qos",
+                "partition",
+                "requested_tres",
+                "requested_cpus",
+                "requested_memory",
+                "time_limit",
+                "submit_line_sha256",
+            )
+        }
+        for job_id, record in sorted(records.items())
+    }
+
+
+def _require_recovery_outputs_absent(study_root: Path) -> list[str]:
+    paths = [
+        study_root / "vpm_parameter_matched_video" / "frontier_quality",
+        study_root / "j1_joint_auxiliary_leads" / "frontier_quality",
+        study_root / "frontier_selection.json",
+        study_root / "frontier_continuation.json",
+        study_root / "frontier_lockbox_confirmation.json",
+        study_root / "frontier_latency",
+        study_root / "frontier_final_report.json",
+    ]
+    existing = [str(path) for path in paths if path.exists() or path.is_symlink()]
+    if existing:
+        raise WorkflowError(
+            f"recovery refuses pre-existing validation/selection outputs: {existing}"
+        )
+    return [str(path) for path in paths]
+
+
+def command_validate_completed_recovery(args: argparse.Namespace) -> int:
+    """Validate one failed frontier DAG and its completed immutable cache."""
+
+    study_root, study = _load_study(
+        args.study_root, training_commit=args.training_commit
+    )
+    controller_repo = _canonical_directory(
+        args.controller_repo_root, "recovery controller repository"
+    )
+    scientific_repo = _canonical_directory(
+        args.scientific_repo_root, "scientific evaluator repository"
+    )
+    for repo, commit, label in (
+        (controller_repo, args.controller_commit, "recovery controller"),
+        (scientific_repo, args.scientific_commit, "scientific evaluator"),
+    ):
+        if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+            raise WorkflowError(f"{label} commit is invalid")
+        if _git(repo, "rev-parse", "--show-toplevel") != str(repo):
+            raise WorkflowError(f"{label} is not a worktree root")
+        if _git(repo, "rev-parse", "HEAD") != commit:
+            raise WorkflowError(f"{label} worktree HEAD changed")
+        if _git(repo, "status", "--porcelain", "--untracked-files=all"):
+            raise WorkflowError(f"{label} worktree is dirty")
+    if controller_repo == scientific_repo:
+        raise WorkflowError("controller and scientific evaluator must be distinct")
+    descendant = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(controller_repo),
+            "merge-base",
+            "--is-ancestor",
+            args.scientific_commit,
+            args.controller_commit,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if descendant.returncode:
+        raise WorkflowError(
+            "recovery controller is not a scientific-evaluator descendant"
+        )
+    controller_changed_paths = {
+        value
+        for value in _git(
+            controller_repo,
+            "diff",
+            "--name-only",
+            args.scientific_commit,
+            args.controller_commit,
+            "--",
+        ).splitlines()
+        if value
+    }
+    unexpected_controller_changes = sorted(
+        controller_changed_paths - COMPLETED_RECOVERY_CONTROLLER_ALLOWED_PATHS
+    )
+    if unexpected_controller_changes:
+        raise WorkflowError(
+            "recovery controller changes non-allowlisted paths: "
+            f"{unexpected_controller_changes}"
+        )
+    scientific_code_objects: dict[str, str] = {}
+    for path in ADOPTED_CACHE_CODE_PATHS:
+        recorded_object = _git(
+            scientific_repo, "rev-parse", f"{args.scientific_commit}:{path}"
+        )
+        live_object = _git(scientific_repo, "rev-parse", f"HEAD:{path}")
+        if live_object != recorded_object:
+            raise WorkflowError(
+                f"frozen scientific evaluator object changed: {path}"
+            )
+        scientific_code_objects[path] = recorded_object
+    selection_diff = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(controller_repo),
+            "diff",
+            "--quiet",
+            args.scientific_commit,
+            args.controller_commit,
+            "--",
+            "tools/vjepa2_nfe_frontier.py",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if selection_diff.returncode:
+        raise WorkflowError(
+            "controller and frozen scientific selection implementations differ"
+        )
+
+    prior_path = _canonical_file(
+        args.prior_submission, "frontier predecessor submission"
+    )
+    (
+        submission,
+        prior_controller,
+        prior_log_dir,
+        prior_controller_commit,
+    ) = _validate_recovery_submission(
+        path=prior_path,
+        study_root=study_root,
+        training_commit=args.training_commit,
+        cache_job_id=args.cache_job_id,
+        failed_gate_job_id=args.failed_gate_job_id,
+        cancelled_vpm_job_id=args.cancelled_vpm_job_id,
+        cancelled_j1_job_id=args.cancelled_j1_job_id,
+        cancelled_selection_job_id=args.cancelled_selection_job_id,
+        final_job_id=args.final_job_id,
+        scientific_repo=scientific_repo,
+        scientific_commit=args.scientific_commit,
+    )
+    if (
+        _git(prior_controller, "rev-parse", "--show-toplevel")
+        != str(prior_controller)
+        or _git(prior_controller, "rev-parse", "HEAD")
+        != prior_controller_commit
+        or _git(prior_controller, "status", "--porcelain", "--untracked-files=all")
+    ):
+        raise WorkflowError("predecessor controller worktree changed")
+
+    accounting = subprocess.run(
+        [
+            "sacct",
+            "--noheader",
+            "--parsable2",
+            "--allocations",
+            "--duplicates",
+            "--jobs",
+            ",".join(
+                (
+                    args.cache_job_id,
+                    args.failed_gate_job_id,
+                    args.cancelled_vpm_job_id,
+                    args.cancelled_j1_job_id,
+                    args.cancelled_selection_job_id,
+                )
+            ),
+            "--format="
+            "JobID%64,JobName%64,User%64,State%32,ExitCode,Account%64,QOS%64,"
+            "Partition%64,ReqTRES%512,ReqCPUS,ReqMem,Timelimit,"
+            "SubmitLine%4096",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if accounting.returncode:
+        raise WorkflowError(
+            "could not query predecessor Slurm accounting: "
+            f"{accounting.stderr.strip() or accounting.stdout.strip()}"
+        )
+    jobs = validate_completed_recovery_rows(
+        args,
+        accounting.stdout.splitlines(),
+        study=study,
+        submission=submission,
+        prior_controller=prior_controller,
+        prior_controller_commit=prior_controller_commit,
+        prior_log_dir=prior_log_dir,
+        scientific_repo=scientific_repo,
+    )
+
+    failed_gate_stderr = _canonical_file(
+        prior_log_dir
+        / f"vjepa2-frontier-u1000-gate-{args.failed_gate_job_id}.err",
+        "failed frontier gate stderr",
+    )
+    expected_error = (
+        "ERROR: VPM final evidence is invalid: "
+        "VPM final provenance/snapshot identity differs\n"
+    )
+    if failed_gate_stderr.read_text(encoding="utf-8") != expected_error:
+        raise WorkflowError("failed frontier gate stderr differs")
+
+    registration_path = _canonical_file(
+        study_root / "frontier_lockbox" / "registration.json",
+        "completed lockbox registration",
+    )
+    registration = _read_json(registration_path, "completed lockbox registration")
+    if registration.get("registration_git_commit") != args.scientific_commit:
+        raise WorkflowError("lockbox registration commit differs")
+    try:
+        cache_validation = frontier.lockbox.validate_registration(
+            registration,
+            study=study,
+            rehash_arrays=True,
+            verify_construction=True,
+        )
+    except (frontier.lockbox.LockboxError, KeyError, TypeError, ValueError) as exc:
+        raise WorkflowError(
+            f"completed lockbox registration is invalid: {exc}"
+        ) from exc
+    absent_outputs = _require_recovery_outputs_absent(study_root)
+
+    evidence = {
+        "status": "completed_frontier_recovery_validated",
+        "study_identity_sha256": study["identity_sha256"],
+        "training_git_commit": args.training_commit,
+        "controller_repo_root": str(controller_repo),
+        "controller_git_commit": args.controller_commit,
+        "scientific_evaluator_repo_root": str(scientific_repo),
+        "scientific_evaluator_git_commit": args.scientific_commit,
+        "repository_evidence": {
+            "controller_descends_from_scientific_commit": True,
+            "controller_changed_paths": sorted(controller_changed_paths),
+            "controller_changes_allowlisted": True,
+            "selection_implementation_identical": True,
+            "frozen_scientific_code_objects": scientific_code_objects,
+        },
+        "predecessor_submission": _file_evidence(prior_path),
+        "predecessor_jobs": jobs,
+        "failed_gate_stderr": _file_evidence(failed_gate_stderr),
+        "completed_cache_reused": True,
+        "cache_job_id": args.cache_job_id,
+        "lockbox_registration": _file_evidence(
+            registration_path,
+            identity=str(registration["identity_sha256"]),
+        ),
+        "lockbox_validation": cache_validation,
+        "full_cache_hashes_rechecked": (
+            cache_validation.get("full_array_hashes_rechecked") is True
+        ),
+        "scientific_outputs_absent": absent_outputs,
+        "new_cache_submission_allowed": False,
+    }
+    if evidence["full_cache_hashes_rechecked"] is not True:
+        raise WorkflowError("completed lockbox cache was not fully rehashed")
+    print(json.dumps(evidence, sort_keys=True))
+    return 0
+
+
 def command_require_selection(args: argparse.Namespace) -> int:
     """Return 0 only for a reproducible confirmatory validation winner.
 
@@ -1102,6 +1912,25 @@ def build_parser() -> argparse.ArgumentParser:
     adoption.add_argument("--cache-memory", required=True)
     adoption.add_argument("--log-dir", required=True)
     adoption.set_defaults(handler=command_validate_adopted_cache)
+
+    recovery = commands.add_parser("validate-completed-recovery")
+    recovery.add_argument("--study-root", required=True)
+    recovery.add_argument("--training-commit", required=True)
+    recovery.add_argument("--controller-repo-root", required=True)
+    recovery.add_argument("--controller-commit", required=True)
+    recovery.add_argument("--scientific-repo-root", required=True)
+    recovery.add_argument("--scientific-commit", required=True)
+    recovery.add_argument("--prior-submission", required=True)
+    recovery.add_argument("--cache-job-id", required=True)
+    recovery.add_argument("--failed-gate-job-id", required=True)
+    recovery.add_argument("--cancelled-vpm-job-id", required=True)
+    recovery.add_argument("--cancelled-j1-job-id", required=True)
+    recovery.add_argument("--cancelled-selection-job-id", required=True)
+    recovery.add_argument("--final-job-id", required=True)
+    recovery.add_argument("--partition", required=True)
+    recovery.add_argument("--account", required=True)
+    recovery.add_argument("--qos", required=True)
+    recovery.set_defaults(handler=command_validate_completed_recovery)
 
     selection = commands.add_parser("require-selection")
     selection.add_argument("--selection", required=True)

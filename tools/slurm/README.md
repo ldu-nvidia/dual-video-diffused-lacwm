@@ -23,6 +23,18 @@ evaluator commit. All `batch` control submissions explicitly request one GPU.
 See `docs/experiments/VJEPA2_NFE_FRONTIER_PROTOCOL.md` for the fail-closed
 contract.
 
+If that adopted cache completed but the original final-artifact gate failed
+before validation, use `recover_vjepa2_frontier_workflow.sh` from a clean
+controller commit. This is a second, even narrower recovery path for the
+recorded `481556 -> 481577 -> {481578,481579} -> 481580` attempt. Its dry-run
+preflight proves the original submission, terminal Slurm rows and complete
+`SubmitLine` values, failed-gate stderr, full cache hashes/construction, and
+absence of scientific outputs. `--execute` creates a unique recovery control
+root with one immutable acceptance receipt per new job and submits only a
+fresh controller gate, the two validation jobs from the frozen scientific
+commit, and the conditional selection controller. It never submits or mutates
+the completed cache.
+
 These scripts run on one to 32 nodes with eight B200s per node. The latent default
 is a physical batch of 4 per GPU with four-way gradient accumulation. Node count,
 GPUs per node, world size, batching, and the minimum-memory B200 profile are bound
