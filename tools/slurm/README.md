@@ -2,13 +2,15 @@
 
 For the post-study V-JEPA validation-selected NFE-frontier workflow, use
 `submit_vjepa2_frontier_workflow.sh`. It has direct gcp-nrt defaults for the
-immutable v3 study and is dry-run-only until `--execute` is supplied. The
-launcher queues cache extraction, final-artifact validation, and the two
-validation arms. Its selection gate submits lockbox scoring only after a
-confirmatory-eligible candidate independently reproduces from raw validation
-rows; timing and finalization remain `afterok` descendants. Run the launcher
-from a clean evaluator clone/worktree distinct from the immutable training
-checkout recorded in the study.
+immutable v3 study, including partition `batch`, account
+`coreai_chef_posttrain`, and QOS `normal`, and is dry-run-only until `--execute`
+is supplied. These scheduler values remain CLI-overridable. The launcher queues
+cache extraction, final-artifact validation, and the two validation arms. Its
+selection gate submits lockbox scoring only after a confirmatory-eligible
+candidate independently reproduces from raw validation rows; timing and
+finalization remain `afterok` descendants. Run the launcher from a clean
+evaluator clone/worktree distinct from the immutable training checkout
+recorded in the study.
 
 These scripts run on one to 32 nodes with eight B200s per node. The latent default
 is a physical batch of 4 per GPU with four-way gradient accumulation. Node count,

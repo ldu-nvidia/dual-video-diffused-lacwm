@@ -457,6 +457,9 @@ class FrontierSlurmContractTest(unittest.TestCase):
         self.assertIn("VJEPA_FINAL_U1000_JOB_ID:-481132", source)
         self.assertIn("lacwm-b200-py310/bin/python", source)
         self.assertIn("vjepa2-extractor-py311/bin/python3.11", source)
+        self.assertIn('PARTITION="batch"', source)
+        self.assertIn('ACCOUNT="coreai_chef_posttrain"', source)
+        self.assertIn('QOS="normal"', source)
         self.assertIn(
             '[[ "$TRAINING_REPO_ROOT" != "$REPO_ROOT" ]]', source
         )

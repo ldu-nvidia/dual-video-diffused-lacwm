@@ -35,8 +35,8 @@ CONTROL_CPUS="16"
 CONTROL_MEMORY="64G"
 TIMING_CPUS="32"
 TIMING_MEMORY="256G"
-ACCOUNT=""
-QOS=""
+ACCOUNT="coreai_chef_posttrain"
+QOS="normal"
 EXECUTE=0
 
 die() {
@@ -94,8 +94,8 @@ Scheduler options:
   --quality-time HH:MM:SS      Default: 04:00:00
   --control-time HH:MM:SS      Default: 01:00:00
   --timing-time HH:MM:SS       Default: 04:00:00
-  --account NAME
-  --qos NAME
+  --account NAME               Default: coreai_chef_posttrain
+  --qos NAME                   Default: normal
   --execute                    Submit; otherwise run read-only preflight
   -h, --help
 

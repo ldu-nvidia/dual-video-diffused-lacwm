@@ -16,9 +16,11 @@ The complete cluster workflow is encoded in
 `tools/slurm/submit_vjepa2_frontier_workflow.sh`. Its checked-in defaults bind
 the v3 study, update-1000 array job `481132`, immutable cache build, LACWM
 Python, V-JEPA extractor Python, official source/checkpoint, and train-only
-PCA. Keep the active training checkout at `9cf8e69` while the original jobs
-run. Fetching the evaluator commit and creating a detached evaluator worktree
-does not change that checkout:
+PCA. Its scheduler defaults match the active study: partition `batch`, account
+`coreai_chef_posttrain`, and QOS `normal`; each remains CLI-overridable. Keep
+the active training checkout at `9cf8e69` while the original jobs run.
+Fetching the evaluator commit and creating a detached evaluator worktree does
+not change that checkout:
 
 ```bash
 BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
