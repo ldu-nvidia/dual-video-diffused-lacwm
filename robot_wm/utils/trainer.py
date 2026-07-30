@@ -277,6 +277,7 @@ class Trainer:
         self._data_loader_iter = None
         self._val_data_loader_iters = None
         self._viz_data_loader_iters = None
+        self._data_loaders_shutdown = False
 
     @staticmethod
     def _parse_gradient_accumulation_steps(config) -> int:
@@ -391,11 +392,98 @@ class Trainer:
         return {key: means[index] for index, key in enumerate(ordered_keys)}
 
     def start_data_loaders(self):
+        if getattr(self, "_data_loaders_shutdown", False):
+            raise RuntimeError("data loaders cannot be restarted after shutdown")
         if self._data_loader_iter is not None:
             raise RuntimeError("data-loader iterators have already been started")
         self._data_loader_iter = iter(self.data_loader)
         self._val_data_loader_iters = [iter(dl) for dl in self.val_data_loaders]
         self._viz_data_loader_iters = [iter(dl) for dl in self.viz_data_loaders]
+
+    def shutdown_data_loaders(self):
+        """Idempotently stop train, validation, and visualization workers.
+
+        ``StatefulDataLoader`` keeps its multiprocessing iterator on both the
+        caller and ``loader._iterator``. Explicitly close both references so
+        persistent workers are joined before W&B and the distributed process
+        group are torn down. This is deliberately a terminal lifecycle action:
+        it neither snapshots nor restores loader state, so the last atomic
+        training snapshot remains the sole exact-resume boundary.
+        """
+        if getattr(self, "_data_loaders_shutdown", False):
+            return
+        self._data_loaders_shutdown = True
+
+        val_loaders = getattr(self, "val_data_loaders", None)
+        viz_loaders = getattr(self, "viz_data_loaders", None)
+        loaders = [
+            ("train", getattr(self, "data_loader", None)),
+            *[
+                (f"validation[{index}]", loader)
+                for index, loader in enumerate(val_loaders or ())
+            ],
+            *[
+                (f"visualization[{index}]", loader)
+                for index, loader in enumerate(viz_loaders or ())
+            ],
+        ]
+
+        val_iters = getattr(self, "_val_data_loader_iters", None)
+        viz_iters = getattr(self, "_viz_data_loader_iters", None)
+        iterators = [
+            ("train", getattr(self, "_data_loader_iter", None)),
+            *[
+                (f"validation[{index}]", iterator)
+                for index, iterator in enumerate(val_iters or ())
+            ],
+            *[
+                (f"visualization[{index}]", iterator)
+                for index, iterator in enumerate(viz_iters or ())
+            ],
+        ]
+        iterators.extend(
+            (f"{role} loader", getattr(loader, "_iterator", None))
+            for role, loader in loaders
+            if loader is not None
+        )
+
+        failures = []
+        seen = set()
+        try:
+            for role, iterator in iterators:
+                if iterator is None or id(iterator) in seen:
+                    continue
+                seen.add(id(iterator))
+                shutdown = getattr(iterator, "_shutdown_workers", None)
+                if not callable(shutdown):
+                    continue
+                try:
+                    shutdown()
+                except BaseException as exc:
+                    failures.append((role, exc))
+                    logger.exception(
+                        "Failed to shut down %s data-loader iterator", role
+                    )
+        finally:
+            # Release every owner of an iterator after attempting all shutdowns.
+            # In particular, StatefulDataLoader otherwise retains its iterator
+            # until interpreter finalization.
+            self._data_loader_iter = None
+            self._val_data_loader_iters = None
+            self._viz_data_loader_iters = None
+            cleared_loaders = set()
+            for _role, loader in loaders:
+                if (
+                    loader is None
+                    or id(loader) in cleared_loaders
+                    or not hasattr(loader, "_iterator")
+                ):
+                    continue
+                cleared_loaders.add(id(loader))
+                loader._iterator = None
+
+        if failures:
+            raise failures[0][1]
 
     def _get_torch_dtype(self, dtype_str):
         if dtype_str == "float32":
