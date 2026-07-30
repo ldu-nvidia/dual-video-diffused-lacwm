@@ -94,6 +94,17 @@ EXPECTED_PHASE_RESET_PREFIXES = (
     "forward_model.tf_clock_embedding",
     "forward_model.tf_velocity_head",
 )
+# Independent consumer copy of the producer's exact-key warm-start contract.
+# Do not import this from vjepa2_phase_gate.py: the validator must be able to
+# reject a producer regression rather than sharing its mutable source of truth.
+EXPECTED_PHASE_WARMSTART_MISSING_KEYS = (
+    "action_encoder.net.0.bias",
+    "action_encoder.net.0.weight",
+    "action_encoder.net.2.bias",
+    "action_encoder.net.2.weight",
+    "action_encoder.net.4.bias",
+    "action_encoder.net.4.weight",
+)
 EXPECTED_PHASE_BATCH_SHAPES = {
     "rgb": [1, 13, 3, 180, 960],
     "actions": [1, 13, 5, 157],
@@ -1124,6 +1135,10 @@ def _validate_phase_rank_reports(
             not isinstance(warmstart_load, Mapping)
             or warmstart_load.get("reset_prefixes")
             != list(EXPECTED_PHASE_RESET_PREFIXES)
+            or warmstart_load.get("expected_missing_keys")
+            != list(EXPECTED_PHASE_WARMSTART_MISSING_KEYS)
+            or warmstart_load.get("non_prefix_missing_keys")
+            != list(EXPECTED_PHASE_WARMSTART_MISSING_KEYS)
             or not isinstance(warmstart_load.get("loaded_tensor_count"), int)
             or warmstart_load["loaded_tensor_count"] <= 0
             or not isinstance(warmstart_load.get("loaded_parameter_bytes"), int)
@@ -1343,6 +1358,9 @@ def _validate_phase_gate_report(
     if report.get("warmstart_policy") != {
         "mode": "strict allowlisted reset",
         "reset_prefixes": list(EXPECTED_PHASE_RESET_PREFIXES),
+        "expected_missing_keys": list(
+            EXPECTED_PHASE_WARMSTART_MISSING_KEYS
+        ),
     }:
         raise ContractError("V-JEPA phase-gate warm-start policy differs")
 

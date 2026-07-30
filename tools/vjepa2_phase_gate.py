@@ -57,6 +57,19 @@ EXPECTED_RESET_PREFIXES = (
     "forward_model.tf_clock_embedding",
     "forward_model.tf_velocity_head",
 )
+# The pinned legacy LACWM warm start predates the explicit three-layer action
+# encoder.  These six tensors are therefore newly initialized.  Keep this as
+# an exact-key contract rather than adding the broad ``action_encoder`` module
+# to EXPECTED_RESET_PREFIXES: any future action-encoder architecture drift must
+# fail the phase gate.
+EXPECTED_WARMSTART_MISSING_KEYS = (
+    "action_encoder.net.0.bias",
+    "action_encoder.net.0.weight",
+    "action_encoder.net.2.bias",
+    "action_encoder.net.2.weight",
+    "action_encoder.net.4.bias",
+    "action_encoder.net.4.weight",
+)
 EXPECTED_GRADIENT_PARAMETERS = {
     "auxiliary_state_gate": "forward_model.tf_token_adapter.gate",
     "auxiliary_state_projection": (
@@ -311,13 +324,16 @@ def strict_warmstart_load(
     model: Any,
     warmstart: Path,
     allowed_reset_prefixes: Sequence[str],
+    *,
+    expected_missing_keys: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Load every compatible warm-start key and permit only named resets.
 
     ``strict=False`` by itself is intentionally insufficient here: the returned
     incompatibility lists are checked against an exact, reviewable prefix
-    allowlist and every non-excluded checkpoint key must exist with the same
-    shape in the J0 model.
+    allowlist.  Non-prefix model keys may be absent only when the complete
+    observed set exactly equals ``expected_missing_keys``; this prevents a
+    broad module prefix from silently accepting later architecture drift.
     """
     import torch
 
@@ -334,6 +350,25 @@ def strict_warmstart_load(
 
     def is_reset(name: str) -> bool:
         return any(name.startswith(prefix) for prefix in allowed_reset_prefixes)
+
+    declared_missing = list(expected_missing_keys)
+    if any(not isinstance(name, str) or not name for name in declared_missing):
+        raise GateError("expected warm-start missing keys must be non-empty strings")
+    if len(set(declared_missing)) != len(declared_missing):
+        raise GateError("expected warm-start missing keys contain duplicates")
+    declared_missing = sorted(declared_missing)
+    non_model_declarations = sorted(set(declared_missing) - set(current_state))
+    if non_model_declarations:
+        raise GateError(
+            "expected warm-start missing keys are not exact model tensors: "
+            f"{non_model_declarations[:8]}"
+        )
+    prefix_declarations = [name for name in declared_missing if is_reset(name)]
+    if prefix_declarations:
+        raise GateError(
+            "expected warm-start missing keys overlap reset prefixes: "
+            f"{prefix_declarations[:8]}"
+        )
 
     accepted: dict[str, Any] = {}
     explicitly_reset_checkpoint_keys: list[str] = []
@@ -358,13 +393,27 @@ def strict_warmstart_load(
         accepted[name] = value
 
     missing = sorted(set(current_state) - set(accepted))
-    disallowed_missing = [name for name in missing if not is_reset(name)]
-    if unexpected or shape_mismatches or disallowed_missing:
+    reset_model_keys = [name for name in missing if is_reset(name)]
+    observed_non_prefix_missing = [
+        name for name in missing if not is_reset(name)
+    ]
+    disallowed_missing = sorted(
+        set(observed_non_prefix_missing) - set(declared_missing)
+    )
+    expected_but_not_missing = sorted(
+        set(declared_missing) - set(observed_non_prefix_missing)
+    )
+    if (
+        unexpected
+        or shape_mismatches
+        or observed_non_prefix_missing != declared_missing
+    ):
         raise GateError(
             "strict warm-start audit failed: "
             f"unexpected={unexpected[:8]}, "
             f"shape_mismatches={shape_mismatches[:8]}, "
-            f"disallowed_missing={disallowed_missing[:8]}"
+            f"disallowed_missing={disallowed_missing[:8]}, "
+            f"expected_but_not_missing={expected_but_not_missing[:8]}"
         )
     incompatible = model.load_state_dict(accepted, strict=False)
     if incompatible.unexpected_keys:
@@ -384,7 +433,9 @@ def strict_warmstart_load(
             for value in accepted.values()
         ),
         "reset_prefixes": list(allowed_reset_prefixes),
-        "reset_model_keys": missing,
+        "expected_missing_keys": declared_missing,
+        "non_prefix_missing_keys": observed_non_prefix_missing,
+        "reset_model_keys": reset_model_keys,
         "excluded_checkpoint_key_count": len(explicitly_reset_checkpoint_keys),
     }
 
@@ -1082,6 +1133,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             trainer.model.module,
             warmstart,
             EXPECTED_RESET_PREFIXES,
+            expected_missing_keys=EXPECTED_WARMSTART_MISSING_KEYS,
         )
         trainer.start_data_loaders()
         audit_batch = next(trainer._data_loader_iter)
@@ -1190,6 +1242,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "warmstart_policy": {
                     "mode": "strict allowlisted reset",
                     "reset_prefixes": list(EXPECTED_RESET_PREFIXES),
+                    "expected_missing_keys": list(
+                        EXPECTED_WARMSTART_MISSING_KEYS
+                    ),
                 },
                 "training": {
                     "ddp": True,

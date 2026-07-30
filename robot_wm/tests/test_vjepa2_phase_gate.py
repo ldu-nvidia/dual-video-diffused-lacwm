@@ -25,6 +25,35 @@ class _ToyModel(nn.Module):
         self.reset = nn.Linear(2, 1)
 
 
+class _ExplicitActionWarmstartModel(nn.Module):
+    def __init__(self, *, extra_layer: bool = False):
+        super().__init__()
+        self.backbone = nn.Linear(3, 2)
+        layers = [
+            nn.Linear(4, 3),
+            nn.SiLU(),
+            nn.Linear(3, 3),
+            nn.SiLU(),
+            nn.Linear(3, 2),
+        ]
+        if extra_layer:
+            layers.extend((nn.SiLU(), nn.Linear(2, 1)))
+        self.action_encoder = nn.Module()
+        self.action_encoder.net = nn.Sequential(*layers)
+
+
+def _snapshot_without_action_encoder(
+    model: nn.Module,
+) -> dict[str, dict[str, torch.Tensor]]:
+    return {
+        "model": {
+            name: value.detach().clone()
+            for name, value in model.state_dict().items()
+            if not name.startswith("action_encoder.")
+        }
+    }
+
+
 class _FutureOnlyAuditModel:
     num_history_frames = 5
     num_future_frames = 8
@@ -148,6 +177,90 @@ class VJEPA2PhaseGateTest(unittest.TestCase):
             torch.save({"model": {"loaded.weight": model.loaded.weight}}, path)
             with self.assertRaisesRegex(gate.GateError, "disallowed_missing"):
                 gate.strict_warmstart_load(model, path, ("reset",))
+
+    def test_strict_warmstart_accepts_exact_action_encoder_missing_keys(self):
+        model = _ExplicitActionWarmstartModel()
+        snapshot = _snapshot_without_action_encoder(model)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "snapshot.pt"
+            torch.save(snapshot, path)
+            result = gate.strict_warmstart_load(
+                model,
+                path,
+                (),
+                expected_missing_keys=gate.EXPECTED_WARMSTART_MISSING_KEYS,
+            )
+
+        expected = list(gate.EXPECTED_WARMSTART_MISSING_KEYS)
+        self.assertEqual(result["expected_missing_keys"], expected)
+        self.assertEqual(result["non_prefix_missing_keys"], expected)
+        self.assertEqual(result["reset_model_keys"], [])
+        self.assertEqual(result["loaded_tensor_count"], 2)
+
+    def test_strict_warmstart_rejects_inexact_missing_key_declarations(self):
+        model = _ExplicitActionWarmstartModel()
+        snapshot = _snapshot_without_action_encoder(model)
+        exact = gate.EXPECTED_WARMSTART_MISSING_KEYS
+        declarations = {
+            "incomplete": exact[:-1],
+            "duplicate": exact + (exact[0],),
+            "broad": ("action_encoder",),
+            "non_model": exact + ("action_encoder.net.6.weight",),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "snapshot.pt"
+            torch.save(snapshot, path)
+            for name, declaration in declarations.items():
+                with self.subTest(name=name):
+                    with self.assertRaises(gate.GateError):
+                        gate.strict_warmstart_load(
+                            model,
+                            path,
+                            (),
+                            expected_missing_keys=declaration,
+                        )
+
+    def test_strict_warmstart_rejects_action_encoder_architecture_drift(self):
+        model = _ExplicitActionWarmstartModel(extra_layer=True)
+        snapshot = _snapshot_without_action_encoder(model)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "snapshot.pt"
+            torch.save(snapshot, path)
+            with self.assertRaisesRegex(
+                gate.GateError, "action_encoder.net.6"
+            ):
+                gate.strict_warmstart_load(
+                    model,
+                    path,
+                    (),
+                    expected_missing_keys=gate.EXPECTED_WARMSTART_MISSING_KEYS,
+                )
+
+    def test_strict_warmstart_still_rejects_action_encoder_checkpoint_drift(self):
+        model = _ExplicitActionWarmstartModel()
+        exact = gate.EXPECTED_WARMSTART_MISSING_KEYS
+        cases = {}
+
+        unexpected = _snapshot_without_action_encoder(model)
+        unexpected["model"]["action_encoder.legacy.weight"] = torch.ones(1)
+        cases["unexpected"] = unexpected
+
+        shape_mismatch = _snapshot_without_action_encoder(model)
+        shape_mismatch["model"][exact[0]] = torch.ones(17)
+        cases["shape_mismatch"] = shape_mismatch
+
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, snapshot in cases.items():
+                with self.subTest(name=name):
+                    path = Path(temporary) / f"{name}.pt"
+                    torch.save(snapshot, path)
+                    with self.assertRaises(gate.GateError):
+                        gate.strict_warmstart_load(
+                            model,
+                            path,
+                            (),
+                            expected_missing_keys=exact,
+                        )
 
     def test_batch_shape_contract(self):
         batch = {

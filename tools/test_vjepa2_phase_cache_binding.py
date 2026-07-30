@@ -324,6 +324,12 @@ class PhaseReportSemanticBindingTest(unittest.TestCase):
                     "reset_prefixes": list(
                         study.EXPECTED_PHASE_RESET_PREFIXES
                     ),
+                    "expected_missing_keys": list(
+                        study.EXPECTED_PHASE_WARMSTART_MISSING_KEYS
+                    ),
+                    "non_prefix_missing_keys": list(
+                        study.EXPECTED_PHASE_WARMSTART_MISSING_KEYS
+                    ),
                     "loaded_tensor_count": 1,
                     "loaded_parameter_bytes": 4,
                 },
@@ -421,6 +427,9 @@ class PhaseReportSemanticBindingTest(unittest.TestCase):
                     "reset_prefixes": list(
                         study.EXPECTED_PHASE_RESET_PREFIXES
                     ),
+                    "expected_missing_keys": list(
+                        study.EXPECTED_PHASE_WARMSTART_MISSING_KEYS
+                    ),
                 },
                 "training": {
                     "ddp": True,
@@ -509,6 +518,20 @@ class PhaseReportSemanticBindingTest(unittest.TestCase):
             rank["future_free_nfe1"]["ordinary_full_clip_audit"][
                 "ground_truth_used_as_condition"
             ] = True
+            report["rank_reports"][0] = _reidentify(rank)
+
+        def mutate_rank_expected_missing(report: dict[str, object]) -> None:
+            rank = report["rank_reports"][0]
+            rank["warmstart_load"]["expected_missing_keys"] = [
+                "action_encoder"
+            ]
+            report["rank_reports"][0] = _reidentify(rank)
+
+        def mutate_rank_observed_missing(report: dict[str, object]) -> None:
+            rank = report["rank_reports"][0]
+            rank["warmstart_load"]["non_prefix_missing_keys"] = list(
+                study.EXPECTED_PHASE_WARMSTART_MISSING_KEYS[:-1]
+            )
             report["rank_reports"][0] = _reidentify(rank)
 
         mutations = {
@@ -636,6 +659,9 @@ class PhaseReportSemanticBindingTest(unittest.TestCase):
             "warmstart_policy": lambda report: report[
                 "warmstart_policy"
             ].__setitem__("mode", "permissive"),
+            "warmstart_policy_expected_missing": lambda report: report[
+                "warmstart_policy"
+            ].__setitem__("expected_missing_keys", ["action_encoder"]),
             "full_cache_undercount": lambda report: report[
                 "full_cache_validation"
             ].__setitem__("clip_count", 511),
@@ -647,6 +673,8 @@ class PhaseReportSemanticBindingTest(unittest.TestCase):
             "rank_gradient": mutate_rank_gradient,
             "rank_call_key": mutate_rank_call_key,
             "rank_scoring_ground_truth": mutate_rank_scoring_ground_truth,
+            "rank_expected_missing": mutate_rank_expected_missing,
+            "rank_observed_missing": mutate_rank_observed_missing,
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name):
