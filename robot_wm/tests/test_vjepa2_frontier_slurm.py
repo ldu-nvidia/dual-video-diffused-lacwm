@@ -34,6 +34,7 @@ SHELL_SCRIPTS = (
     QUALITY,
     SELECTION_GATE,
     SLURM / "vjepa2_frontier_confirm.sbatch",
+    SLURM / "vjepa2_frontier_timing_gate.sbatch",
     TIMING,
 )
 
@@ -1570,6 +1571,9 @@ class FrontierSlurmContractTest(unittest.TestCase):
     def test_quality_and_timing_paths_are_fresh_only(self) -> None:
         quality = QUALITY.read_text(encoding="utf-8")
         timing = TIMING.read_text(encoding="utf-8")
+        timing_gate = (
+            SLURM / "vjepa2_frontier_timing_gate.sbatch"
+        ).read_text(encoding="utf-8")
         self.assertIn('[[ ! -e "$OUTPUT_DIR" ]]', quality)
         self.assertIn('--nproc_per_node=8', quality)
         self.assertIn('[[ ! -e "$LATENCY_PARENT" ]]', timing)
@@ -1579,6 +1583,276 @@ class FrontierSlurmContractTest(unittest.TestCase):
         )
         self.assertLess(mkdir_index, benchmark_index)
         self.assertIn('--benchmark-commit "$EVALUATOR_COMMIT"', timing)
+        outcome_index = timing_gate.index("finalize-quality-failure")
+        scientific_timing_index = timing_gate.index('exec "$SCIENTIFIC_TIMING"')
+        lock_index = timing_gate.index("flock -n 9")
+        self.assertLess(lock_index, outcome_index)
+        self.assertLess(outcome_index, scientific_timing_index)
+        self.assertIn('--study-root "$STUDY_ROOT"', timing_gate)
+        self.assertIn('--training-commit "$TRAINING_COMMIT"', timing_gate)
+        self.assertIn(
+            "Held-out quality gate failed; finalized without paired timing",
+            timing_gate,
+        )
+        self.assertIn('[[ ! -e "$LATENCY_PARENT" ]]', timing_gate)
+
+    def test_selection_submits_conditional_timing_gate_from_controller(
+        self,
+    ) -> None:
+        source = SELECTION_GATE.read_text(encoding="utf-8")
+        self.assertIn(
+            'TIMING_GATE_SBATCH="$REPO_ROOT/tools/slurm/'
+            'vjepa2_frontier_timing_gate.sbatch"',
+            source,
+        )
+        self.assertIn(
+            'SCIENTIFIC_TIMING_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/'
+            'vjepa2_frontier_latency.sbatch"',
+            source,
+        )
+        self.assertIn('--job-name="vjepa2-frontier-outcome"', source)
+        self.assertIn(
+            '"quality_failure_writes_negative_final_report_without_timing": True',
+            source,
+        )
+        self.assertIn(
+            '"outcome_uses_study_local_exclusive_lock": True', source
+        )
+        self.assertIn(
+            '"negative_report_publication_is_atomic_no_replace": True',
+            source,
+        )
+
+    def test_modified_outcome_tests_are_recovery_allowlisted(self) -> None:
+        path = "robot_wm/tests/test_vjepa2_nfe_frontier.py"
+        self.assertIn(path, workflow.ADOPTED_RECOVERY_ALLOWED_PATHS)
+        self.assertIn(
+            path, workflow.COMPLETED_RECOVERY_CONTROLLER_ALLOWED_PATHS
+        )
+
+    def test_quality_failure_gate_exits_cleanly_without_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            controller = root / "controller"
+            scientific = root / "scientific"
+            study = root / "study"
+            bin_dir = root / "bin"
+            for directory in (controller, scientific, study, bin_dir):
+                directory.mkdir()
+            _write_json(study / "frontier_selection.json", {"selection": True})
+            _write_json(
+                study / "frontier_lockbox_confirmation.json",
+                {"quality_gate_passed": False},
+            )
+            controller_commit = "c" * 40
+            scientific_commit = "d" * 40
+            git = bin_dir / "git"
+            git.write_text(
+                "#!/usr/bin/env bash\n"
+                "repo=''\n"
+                "if [[ \"$1\" == -C ]]; then repo=\"$2\"; shift 2; fi\n"
+                "if [[ \"$1 $2\" == 'rev-parse --show-toplevel' ]]; then\n"
+                "  printf '%s\\n' \"$repo\"\n"
+                "elif [[ \"$1 $2\" == 'rev-parse HEAD' ]]; then\n"
+                f"  if [[ \"$repo\" == {str(controller)!r} ]]; then\n"
+                f"    echo {controller_commit}\n"
+                "  else\n"
+                f"    echo {scientific_commit}\n"
+                "  fi\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            python = bin_dir / "python"
+            python.write_text(
+                "#!/usr/bin/env bash\n"
+                "output=''\n"
+                "while (($#)); do\n"
+                "  if [[ \"$1\" == --output ]]; then output=\"$2\"; shift 2; "
+                "else shift; fi\n"
+                "done\n"
+                "printf '%s\\n' "
+                "'{\"status\":\"NOT_DEMONSTRATED\","
+                "\"timing_performed\":false}' > \"$output\"\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            git.chmod(0o755)
+            python.chmod(0o755)
+            env = dict(os.environ)
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "SLURM_JOB_ID": "12345",
+                    "SLURM_RESTART_COUNT": "0",
+                    "SLURM_JOB_NUM_NODES": "1",
+                }
+            )
+
+            completed = subprocess.run(
+                [
+                    "bash",
+                    str(SLURM / "vjepa2_frontier_timing_gate.sbatch"),
+                    "--repo-root",
+                    str(controller),
+                    "--controller-commit",
+                    controller_commit,
+                    "--scientific-repo-root",
+                    str(scientific),
+                    "--scientific-evaluator-commit",
+                    scientific_commit,
+                    "--study-root",
+                    str(study),
+                    "--training-commit",
+                    "9" * 40,
+                    "--python",
+                    str(python),
+                    "--wan-dir",
+                    str(root / "unused-wan"),
+                    "--videox-home",
+                    str(root / "unused-videox"),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("finalized without paired timing", completed.stdout)
+            self.assertTrue((study / "frontier_final_report.json").is_file())
+            self.assertFalse((study / "frontier_latency").exists())
+
+    def test_quality_pass_delegates_exact_args_with_lock_held(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            controller = root / "controller"
+            scientific = root / "scientific"
+            study = root / "study"
+            bin_dir = root / "bin"
+            timing_dir = scientific / "tools" / "slurm"
+            for directory in (
+                controller,
+                study,
+                bin_dir,
+                timing_dir,
+            ):
+                directory.mkdir(parents=True)
+            _write_json(study / "frontier_selection.json", {"selection": True})
+            _write_json(
+                study / "frontier_lockbox_confirmation.json",
+                {"quality_gate_passed": True},
+            )
+            controller_commit = "c" * 40
+            scientific_commit = "d" * 40
+            git = bin_dir / "git"
+            git.write_text(
+                "#!/usr/bin/env bash\n"
+                "repo=''\n"
+                "if [[ \"$1\" == -C ]]; then repo=\"$2\"; shift 2; fi\n"
+                "if [[ \"$1 $2\" == 'rev-parse --show-toplevel' ]]; then\n"
+                "  printf '%s\\n' \"$repo\"\n"
+                "elif [[ \"$1 $2\" == 'rev-parse HEAD' ]]; then\n"
+                f"  if [[ \"$repo\" == {str(controller)!r} ]]; then\n"
+                f"    echo {controller_commit}\n"
+                "  else\n"
+                f"    echo {scientific_commit}\n"
+                "  fi\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            python = bin_dir / "python"
+            python.write_text(
+                "#!/usr/bin/env bash\nexit 4\n",
+                encoding="utf-8",
+            )
+            timing_args = root / "timing-args.txt"
+            lock_observation = root / "lock-observation.txt"
+            scientific_timing = timing_dir / "vjepa2_frontier_latency.sbatch"
+            scientific_timing.write_text(
+                "#!/usr/bin/env bash\n"
+                "if flock -n \"$LOCK_PROBE_PATH\" -c true; then\n"
+                "  echo unlocked > \"$LOCK_OBSERVATION\"\n"
+                "  exit 9\n"
+                "fi\n"
+                "echo locked > \"$LOCK_OBSERVATION\"\n"
+                "printf '%s\\n' \"$@\" > \"$TIMING_ARGS_MARKER\"\n",
+                encoding="utf-8",
+            )
+            for executable in (git, python, scientific_timing):
+                executable.chmod(0o755)
+            wan = root / "wan"
+            videox = root / "videox"
+            env = dict(os.environ)
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "SLURM_JOB_ID": "12346",
+                    "SLURM_RESTART_COUNT": "0",
+                    "SLURM_JOB_NUM_NODES": "1",
+                    "LOCK_PROBE_PATH": str(
+                        study / ".vjepa2_frontier_outcome.lock"
+                    ),
+                    "LOCK_OBSERVATION": str(lock_observation),
+                    "TIMING_ARGS_MARKER": str(timing_args),
+                }
+            )
+
+            completed = subprocess.run(
+                [
+                    "bash",
+                    str(SLURM / "vjepa2_frontier_timing_gate.sbatch"),
+                    "--repo-root",
+                    str(controller),
+                    "--controller-commit",
+                    controller_commit,
+                    "--scientific-repo-root",
+                    str(scientific),
+                    "--scientific-evaluator-commit",
+                    scientific_commit,
+                    "--study-root",
+                    str(study),
+                    "--training-commit",
+                    "9" * 40,
+                    "--python",
+                    str(python),
+                    "--wan-dir",
+                    str(wan),
+                    "--videox-home",
+                    str(videox),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                timing_args.read_text(encoding="utf-8").splitlines(),
+                [
+                    "--repo-root",
+                    str(scientific),
+                    "--study-root",
+                    str(study),
+                    "--training-commit",
+                    "9" * 40,
+                    "--evaluator-commit",
+                    scientific_commit,
+                    "--python",
+                    str(python),
+                    "--wan-dir",
+                    str(wan),
+                    "--videox-home",
+                    str(videox),
+                ],
+            )
+            self.assertEqual(
+                lock_observation.read_text(encoding="utf-8").strip(),
+                "locked",
+            )
+            self.assertFalse((study / "frontier_final_report.json").exists())
 
     def test_launcher_defaults_bind_existing_v3_study(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")

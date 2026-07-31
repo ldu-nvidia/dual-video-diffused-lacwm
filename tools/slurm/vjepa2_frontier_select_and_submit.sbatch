@@ -168,8 +168,11 @@ esac
 
 QUALITY_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_quality.sbatch"
 CONFIRM_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_confirm.sbatch"
-TIMING_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_latency.sbatch"
-for path in "$QUALITY_SBATCH" "$CONFIRM_SBATCH" "$TIMING_SBATCH"; do
+TIMING_GATE_SBATCH="$REPO_ROOT/tools/slurm/vjepa2_frontier_timing_gate.sbatch"
+SCIENTIFIC_TIMING_SBATCH="$SCIENTIFIC_REPO_ROOT/tools/slurm/vjepa2_frontier_latency.sbatch"
+for path in \
+  "$QUALITY_SBATCH" "$CONFIRM_SBATCH" "$TIMING_GATE_SBATCH" \
+  "$SCIENTIFIC_TIMING_SBATCH"; do
   [[ -x "$path" ]] || die "workflow entrypoint is not executable: $path"
 done
 
@@ -265,13 +268,21 @@ TIMING_JOB_ID="$(
     --no-requeue \
     --open-mode=append \
     --export=ALL \
-    --job-name="vjepa2-frontier-timing" \
+    --job-name="vjepa2-frontier-outcome" \
     --output="$LOG_DIR/%x-%j.out" \
     --error="$LOG_DIR/%x-%j.err" \
     "${SCHEDULER_OPTIONAL[@]}" \
-    "$TIMING_SBATCH" \
-    "${COMMON_JOB_ARGS[@]}"
-)" || die "Slurm rejected frontier timing/finalization job"
+    "$TIMING_GATE_SBATCH" \
+    --repo-root "$REPO_ROOT" \
+    --controller-commit "$EVALUATOR_COMMIT" \
+    --scientific-repo-root "$SCIENTIFIC_REPO_ROOT" \
+    --scientific-evaluator-commit "$SCIENTIFIC_EVALUATOR_COMMIT" \
+    --study-root "$STUDY_ROOT" \
+    --training-commit "$TRAINING_COMMIT" \
+    --python "$PYTHON_BIN" \
+    --wan-dir "$WAN_DIR_VALUE" \
+    --videox-home "$VIDEOX_HOME_VALUE"
+)" || die "Slurm rejected quality-outcome/conditional-timing job"
 normalize_job_id "$TIMING_JOB_ID" >/dev/null
 
 "$PYTHON_BIN" - \
@@ -320,6 +331,10 @@ payload = {
     "confirmation_dependency": f"afterok:{lockbox_job.split(';', 1)[0].split('_', 1)[0]}",
     "timing_and_finalization_job_id": timing_job,
     "timing_dependency": f"afterok:{confirmation_job.split(';', 1)[0].split('_', 1)[0]}",
+    "paired_timing_requires_held_out_quality_gate_pass": True,
+    "quality_failure_writes_negative_final_report_without_timing": True,
+    "outcome_uses_study_local_exclusive_lock": True,
+    "negative_report_publication_is_atomic_no_replace": True,
     "lockbox_jobs_created_only_after_confirmatory_eligibility": True,
 }
 with Path(output).open("x", encoding="utf-8") as handle:
@@ -330,4 +345,4 @@ PY
 echo "Confirmatory selection passed; downstream afterok chain submitted."
 echo "Lockbox quality array: $LOCKBOX_JOB_ID"
 echo "Confirmation: $CONFIRM_JOB_ID"
-echo "Timing/finalization: $TIMING_JOB_ID"
+echo "Quality outcome / conditional timing / finalization: $TIMING_JOB_ID"

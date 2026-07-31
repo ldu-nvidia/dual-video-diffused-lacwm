@@ -45,7 +45,16 @@ the raw-row selection. It does not submit or even create pending lockbox-scoring
 jobs when
 `confirmatory_eligible=false`. An eligible selection dynamically creates the
 remaining `afterok` chain: a two-task VPM/J1 lockbox array, confirmation,
-one-B200 timing, and finalization.
+and a one-B200 outcome gate. The outcome gate first reproduces the authoritative
+lockbox confirmation from its hashed raw rows. If the held-out quality gate
+fails, it writes an explicit `NOT_DEMONSTRATED` final report and exits without
+running or claiming paired timing. Only a passed quality gate delegates to the
+frozen scientific timing entrypoint and positive-path finalization.
+The controller holds one study-local exclusive lock from evidence validation
+through negative publication or through the delegated timing process. Selection,
+confirmation, and output must be the exact canonical files under the identity-
+validated study root and must bind its training commit, study identity, frozen
+scientific commit, and VideoX runtime identity.
 
 At execution, the launcher combines Slurm's two views of the recorded u1000
 array. While it is active, a current-user `squeue -r` inventory, filtered
@@ -178,11 +187,14 @@ recorded in the study. The timing entrypoint creates the fresh
 5. Evaluate only J1@k, VPM@k, and VPM@m on all 128 lockbox clips. Every row
    binds both the selection and lockbox identities. No lockbox metric may alter
    the selected pair.
-6. Confirm paired reconstruction gates, then benchmark J1@k, VPM@k, and VPM@m
-   in one process with both models resident on one B200.
-7. Finalize only after recomputing endpoint, quality, timing, lockbox, stage,
-   and Git-provenance bindings. Selection and confirmation JSONL inputs are
-   reloaded and fully rehashed; the validation winner and both lockbox
+6. Recompute the paired held-out reconstruction gates from the hashed raw
+   lockbox rows. A failed gate terminates with an explicit negative final
+   report, with `timing_performed=false` and no latency artifact.
+7. Only after the held-out quality gate passes, benchmark J1@k, VPM@k, and
+   VPM@m in one process with both models resident on one B200.
+8. Positive-path finalization recomputes endpoint, quality, timing, lockbox,
+   stage, and Git-provenance bindings. Selection and confirmation JSONL inputs
+   are reloaded and fully rehashed; the validation winner and both lockbox
    comparisons are reproduced from those raw rows. A self-rehashed posthoc or
    aggregate-only artifact cannot be promoted to a confirmatory result.
 
@@ -384,7 +396,21 @@ python tools/vjepa2_nfe_frontier.py confirm \
   --output STUDY_ROOT/frontier_lockbox_confirmation.json
 ```
 
-## 4. Same-B200 timing and finalization
+## 4. Quality-outcome gate, conditional timing, and finalization
+
+The checked-in outcome gate reproduces the confirmation before any benchmark
+setup. A valid held-out `quality_gate_passed=false` produces
+`frontier_final_report.json` with status `NOT_DEMONSTRATED`, a
+`HELD_OUT_LOCKBOX_QUALITY_GATE_FAILED` termination reason, and explicit null
+latency fields; `frontier_latency/` remains absent. Invalid or non-reproducible
+evidence fails closed without a final report. Negative publication uses a
+fully written and file-synced same-directory temporary file, an atomic
+no-replace link, and directory syncs, so a partial final report is never
+published. A retried outcome job accepts an existing report only after proving
+that its canonical bytes and self-identity exactly reproduce from the current
+study, selection, and raw confirmation evidence; it never replaces a foreign
+or partial report. The following timing commands run only when the authoritative
+held-out quality gate passed.
 
 Inside a one-GPU B200 Slurm allocation:
 

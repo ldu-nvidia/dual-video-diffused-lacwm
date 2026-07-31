@@ -10,6 +10,7 @@ evaluators.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,7 @@ from tools import vjepa2_nfe_frontier as frontier  # noqa: E402
 
 
 WELL_FORMED_INELIGIBLE = 3
+HELD_OUT_QUALITY_PASSED = 4
 FINAL_ARRAY_TASK_IDS = frozenset(range(5))
 ADOPTED_CACHE_CODE_PATHS = (
     "projects/latent_action_models/lam",
@@ -53,11 +56,13 @@ ADOPTED_RECOVERY_ALLOWED_PATHS = frozenset(
     {
         "docs/experiments/VJEPA2_NFE_FRONTIER_PROTOCOL.md",
         "robot_wm/tests/test_vjepa2_frontier_slurm.py",
+        "robot_wm/tests/test_vjepa2_nfe_frontier.py",
         "tools/slurm/README.md",
         "tools/slurm/submit_vjepa2_frontier_workflow.sh",
         "tools/slurm/vjepa2_frontier_confirm.sbatch",
         "tools/slurm/vjepa2_frontier_final_gate.sbatch",
         "tools/slurm/vjepa2_frontier_select_and_submit.sbatch",
+        "tools/slurm/vjepa2_frontier_timing_gate.sbatch",
         "tools/slurm/vjepa2_frontier_workflow.py",
     }
 )
@@ -68,6 +73,7 @@ COMPLETED_RECOVERY_CONTROLLER_ALLOWED_PATHS = frozenset(
         "robot_wm/tests/test_benchmark_vjepa2_paired_latency.py",
         "robot_wm/tests/test_vjepa2_frontier_slurm.py",
         "robot_wm/tests/test_vjepa2_lockbox_causality.py",
+        "robot_wm/tests/test_vjepa2_nfe_frontier.py",
         "tools/analyze_vjepa2_controlled_study.py",
         "tools/benchmark_vjepa2_paired_latency.py",
         "tools/evaluate_vjepa2_quality.py",
@@ -80,6 +86,7 @@ COMPLETED_RECOVERY_CONTROLLER_ALLOWED_PATHS = frozenset(
         "tools/slurm/vjepa2_frontier_confirm.sbatch",
         "tools/slurm/vjepa2_frontier_final_gate.sbatch",
         "tools/slurm/vjepa2_frontier_select_and_submit.sbatch",
+        "tools/slurm/vjepa2_frontier_timing_gate.sbatch",
         "tools/slurm/vjepa2_frontier_workflow.py",
         "tools/vjepa2_lockbox_causality.py",
     }
@@ -1924,6 +1931,445 @@ def command_require_selection(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validated_lockbox_confirmation(
+    selection: Mapping[str, Any],
+    confirmation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reproduce one authoritative held-out confirmation from raw rows."""
+
+    if (
+        not frontier.identity_valid(selection)
+        or selection.get("kind") != frontier.KIND_SELECTION
+    ):
+        raise WorkflowError("frontier selection identity/kind is invalid")
+    if (
+        not frontier.identity_valid(confirmation)
+        or confirmation.get("kind") != frontier.KIND_CONFIRMATION
+    ):
+        raise WorkflowError("lockbox confirmation identity/kind is invalid")
+    evidence = confirmation.get("input_evidence")
+    if (
+        not isinstance(evidence, Mapping)
+        or set(evidence) != {"J1", "VPM"}
+        or confirmation.get("posthoc_exploratory") is not False
+        or confirmation.get("confirmatory_evidence") is not True
+        or not isinstance(confirmation.get("created_at_utc"), str)
+        or not confirmation["created_at_utc"]
+    ):
+        raise WorkflowError(
+            "lockbox confirmation is posthoc or lacks raw confirmatory evidence"
+        )
+    try:
+        frontier.validate_confirmatory_selection(selection)
+        raw_j1_rows, raw_j1_inputs = frontier._validated_jsonl_evidence(
+            evidence["J1"], label="confirmation J1 rows"
+        )
+        raw_vpm_rows, raw_vpm_inputs = frontier._validated_jsonl_evidence(
+            evidence["VPM"], label="confirmation VPM rows"
+        )
+        recomputed = frontier.build_confirmation(
+            selection=selection,
+            j1_rows=raw_j1_rows,
+            vpm_rows=raw_vpm_rows,
+            expected_clips=128,
+            allow_posthoc=False,
+            j1_inputs=raw_j1_inputs,
+            vpm_inputs=raw_vpm_inputs,
+            created_at_utc=confirmation["created_at_utc"],
+        )
+    except (
+        frontier.FrontierError,
+        KeyError,
+        TypeError,
+        ValueError,
+        OSError,
+    ) as exc:
+        raise WorkflowError(
+            f"lockbox confirmation does not reproduce: {exc}"
+        ) from exc
+    if dict(confirmation) != recomputed:
+        raise WorkflowError(
+            "lockbox confirmation differs from recomputed raw evidence"
+        )
+    if not isinstance(recomputed.get("quality_gate_passed"), bool):
+        raise WorkflowError("lockbox confirmation quality gate is malformed")
+    return recomputed
+
+
+def _validated_study_bound_confirmation(
+    *,
+    study: Mapping[str, Any],
+    training_commit: str,
+    selection: Mapping[str, Any],
+    confirmation: Mapping[str, Any],
+    scientific_commit: str,
+) -> dict[str, Any]:
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", training_commit) is None
+        or re.fullmatch(r"[0-9a-f]{40}", scientific_commit) is None
+        or not paired._identity_valid(study)
+        or study.get("kind") != "vjepa2_controlled_video_diffusion_study"
+        or study.get("inputs", {})
+        .get("repository", {})
+        .get("git_commit")
+        != training_commit
+    ):
+        raise WorkflowError("study/training identity is invalid")
+    recomputed = _validated_lockbox_confirmation(selection, confirmation)
+    if selection.get("evaluator_git_commit") != scientific_commit:
+        raise WorkflowError(
+            "selection evaluator commit differs from frozen scientific commit"
+        )
+    if recomputed.get("evaluator_git_commit") != scientific_commit:
+        raise WorkflowError(
+            "confirmation evaluator commit differs from frozen scientific commit"
+        )
+    study_identity = study["identity_sha256"]
+    videox_identity = selection.get("videox_runtime_identity_sha256")
+    selected_confirmation = recomputed.get("selection")
+    registration = selection.get("lockbox_registration")
+    if (
+        selection.get("study_identity_sha256") != study_identity
+        or recomputed.get("study_identity_sha256") != study_identity
+        or selection.get("training_git_commit") != training_commit
+        or recomputed.get("training_git_commit") != training_commit
+        or not isinstance(videox_identity, str)
+        or re.fullmatch(r"[0-9a-f]{64}", videox_identity) is None
+        or recomputed.get("videox_runtime_identity_sha256") != videox_identity
+        or not isinstance(selected_confirmation, Mapping)
+        or selected_confirmation.get("identity_sha256")
+        != selection["identity_sha256"]
+        or not isinstance(registration, Mapping)
+        or recomputed.get("lockbox_registration_identity_sha256")
+        != registration.get("identity_sha256")
+    ):
+        raise WorkflowError(
+            "selection/confirmation does not bind the requested study"
+        )
+    return recomputed
+
+
+def build_quality_failure_final_report(
+    *,
+    study: Mapping[str, Any],
+    training_commit: str,
+    selection: Mapping[str, Any],
+    confirmation: Mapping[str, Any],
+    controller_commit: str,
+    scientific_commit: str,
+    created_at_utc: str | None = None,
+) -> dict[str, Any]:
+    """Build an explicit negative result without inventing timing evidence."""
+
+    if re.fullmatch(r"[0-9a-f]{40}", controller_commit) is None:
+        raise WorkflowError("controller/scientific commits are invalid")
+    recomputed = _validated_study_bound_confirmation(
+        study=study,
+        training_commit=training_commit,
+        selection=selection,
+        confirmation=confirmation,
+        scientific_commit=scientific_commit,
+    )
+    study_identity = study["identity_sha256"]
+    videox_identity = selection.get("videox_runtime_identity_sha256")
+    registration = selection.get("lockbox_registration")
+    if recomputed["quality_gate_passed"] is not False:
+        raise WorkflowError(
+            "held-out quality passed; paired timing remains required"
+        )
+    selected_pair = selection.get("selected_pair")
+    if not isinstance(selected_pair, Mapping):
+        raise WorkflowError("selection pair/lockbox registration is missing")
+    return frontier.identity_payload(
+        {
+            "schema_version": frontier.SCHEMA_VERSION,
+            "kind": frontier.KIND_FINAL,
+            "created_at_utc": created_at_utc
+            or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "selection_identity_sha256": selection["identity_sha256"],
+            "confirmation_identity_sha256": recomputed["identity_sha256"],
+            "latency_identity_sha256": None,
+            "lockbox_registration_identity_sha256": registration[
+                "identity_sha256"
+            ],
+            "study_identity_sha256": study_identity,
+            "study_id": study.get("study_id"),
+            "training_git_commit": training_commit,
+            "evaluator_git_commit": scientific_commit,
+            "reporting_controller_git_commit": controller_commit,
+            "benchmark_git_commit": None,
+            "videox_runtime_identity_sha256": videox_identity,
+            "selection_status": selection.get("status"),
+            "selected_pair": dict(selected_pair),
+            "confirmatory_evidence": True,
+            "quality_gate_passed": False,
+            "frontier_quality_gate_passed": recomputed.get(
+                "frontier_quality_gate_passed"
+            ),
+            "same_nfe_quality_attribution_gate_passed": recomputed.get(
+                "same_nfe_quality_attribution_gate_passed"
+            ),
+            "timing_performed": False,
+            "timing_gate_passed": None,
+            "timing_protocol_confirmatory": False,
+            "faster_with_better_held_out_reconstruction_demonstrated": False,
+            "status": "NOT_DEMONSTRATED",
+            "termination_reason": "HELD_OUT_LOCKBOX_QUALITY_GATE_FAILED",
+            "quality": recomputed["frontier_quality_comparison"],
+            "same_nfe_quality_attribution": recomputed[
+                "same_nfe_quality_attribution"
+            ],
+            "frontier_acceleration": None,
+            "same_nfe_latency_overhead": None,
+            "device": None,
+            "endpoint_accounting": None,
+            "timing": {
+                "performed": False,
+                "claim_permitted": False,
+                "reason": (
+                    "authoritative held-out lockbox quality gate failed; "
+                    "paired timing was not run"
+                ),
+            },
+            "claim_scope": (
+                "authoritative paired held-out latent/RGB reconstruction and "
+                "temporal-difference errors for one seed-1234 checkpoint pair; "
+                "the prerequisite quality gate failed, so no latency or "
+                "faster-with-better-quality claim is made"
+            ),
+        }
+    )
+
+
+def _exact_study_input_file(
+    value: str | Path,
+    *,
+    expected: Path,
+    label: str,
+) -> Path:
+    path = _canonical_file(value, label)
+    if path != expected:
+        raise WorkflowError(f"{label} must be the exact study artifact {expected}")
+    return path
+
+
+def _exact_study_output_path(
+    value: str | Path,
+    *,
+    expected: Path,
+    label: str,
+) -> Path:
+    requested = Path(value).expanduser()
+    if not requested.is_absolute() or requested != expected:
+        raise WorkflowError(f"{label} must be the exact study artifact {expected}")
+    if requested.parent.resolve(strict=True) != expected.parent:
+        raise WorkflowError(f"{label} parent is not the canonical study root")
+    if requested.is_symlink():
+        raise WorkflowError(f"{label} must not be a symlink")
+    return requested
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_publish_no_replace(
+    output: Path,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Publish complete canonical JSON atomically; never replace an output."""
+
+    content = frontier._canonical_json(payload) + b"\n"
+    descriptor, temporary_value = tempfile.mkstemp(
+        dir=output.parent,
+        prefix=f".{output.name}.tmp.",
+    )
+    temporary = Path(temporary_value)
+    published = False
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, output)
+        except FileExistsError:
+            return False
+        published = True
+        _fsync_directory(output.parent)
+        return True
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        if published:
+            _fsync_directory(output.parent)
+
+
+def _validated_existing_negative_report(
+    output: Path,
+    *,
+    study: Mapping[str, Any],
+    training_commit: str,
+    selection: Mapping[str, Any],
+    confirmation: Mapping[str, Any],
+    controller_commit: str,
+    scientific_commit: str,
+) -> dict[str, Any]:
+    path = _canonical_file(output, "existing negative final report")
+    payload = _read_json(path, "existing negative final report")
+    created_at = payload.get("created_at_utc")
+    if (
+        not frontier.identity_valid(payload)
+        or payload.get("kind") != frontier.KIND_FINAL
+        or not isinstance(created_at, str)
+        or not created_at
+    ):
+        raise WorkflowError("existing negative final report identity is invalid")
+    expected = build_quality_failure_final_report(
+        study=study,
+        training_commit=training_commit,
+        selection=selection,
+        confirmation=confirmation,
+        controller_commit=controller_commit,
+        scientific_commit=scientific_commit,
+        created_at_utc=created_at,
+    )
+    expected_bytes = frontier._canonical_json(expected) + b"\n"
+    try:
+        actual_bytes = path.read_bytes()
+    except OSError as exc:
+        raise WorkflowError(
+            "existing negative final report could not be reread"
+        ) from exc
+    if payload != expected or actual_bytes != expected_bytes:
+        raise WorkflowError(
+            "existing negative final report is not byte/identity-equivalent"
+        )
+    return payload
+
+
+def command_finalize_quality_failure(args: argparse.Namespace) -> int:
+    """Finalize a valid quality failure, or authorize timing after a pass."""
+
+    study_root, study = _load_study(
+        args.study_root, training_commit=args.training_commit
+    )
+    selection_path = _exact_study_input_file(
+        args.selection,
+        expected=study_root / "frontier_selection.json",
+        label="frontier selection",
+    )
+    confirmation_path = _exact_study_input_file(
+        args.confirmation,
+        expected=study_root / "frontier_lockbox_confirmation.json",
+        label="lockbox confirmation",
+    )
+    output = _exact_study_output_path(
+        args.output,
+        expected=study_root / "frontier_final_report.json",
+        label="frontier final report",
+    )
+    selection = _read_json(selection_path, "frontier selection")
+    confirmation = _read_json(confirmation_path, "lockbox confirmation")
+    recomputed = _validated_study_bound_confirmation(
+        study=study,
+        training_commit=args.training_commit,
+        selection=selection,
+        confirmation=confirmation,
+        scientific_commit=args.scientific_commit,
+    )
+    if recomputed["quality_gate_passed"] is True:
+        if output.exists() or output.is_symlink():
+            raise WorkflowError(
+                "quality passed but a final report already exists"
+            )
+        print(
+            json.dumps(
+                {
+                    "status": "held_out_quality_passed",
+                    "selection_identity_sha256": selection["identity_sha256"],
+                    "confirmation_identity_sha256": recomputed[
+                        "identity_sha256"
+                    ],
+                    "paired_timing_required": True,
+                    "final_report_written": False,
+                },
+                sort_keys=True,
+            )
+        )
+        return HELD_OUT_QUALITY_PASSED
+    payload = build_quality_failure_final_report(
+        study=study,
+        training_commit=args.training_commit,
+        selection=selection,
+        confirmation=recomputed,
+        controller_commit=args.controller_commit,
+        scientific_commit=args.scientific_commit,
+    )
+    if output.exists() or output.is_symlink():
+        recovered = _validated_existing_negative_report(
+            output,
+            study=study,
+            training_commit=args.training_commit,
+            selection=selection,
+            confirmation=recomputed,
+            controller_commit=args.controller_commit,
+            scientific_commit=args.scientific_commit,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": recovered["status"],
+                    "termination_reason": recovered["termination_reason"],
+                    "paired_timing_performed": False,
+                    "idempotent_recovery": True,
+                    "output": str(output),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    try:
+        published = _atomic_publish_no_replace(output, payload)
+    except OSError as exc:
+        raise WorkflowError(
+            f"could not publish negative final report: {exc}"
+        ) from exc
+    if not published:
+        _validated_existing_negative_report(
+            output,
+            study=study,
+            training_commit=args.training_commit,
+            selection=selection,
+            confirmation=recomputed,
+            controller_commit=args.controller_commit,
+            scientific_commit=args.scientific_commit,
+        )
+    print(
+        json.dumps(
+            {
+                "status": payload["status"],
+                "termination_reason": payload["termination_reason"],
+                "paired_timing_performed": False,
+                "output": str(output),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1994,6 +2440,16 @@ def build_parser() -> argparse.ArgumentParser:
     selection = commands.add_parser("require-selection")
     selection.add_argument("--selection", required=True)
     selection.set_defaults(handler=command_require_selection)
+
+    quality_failure = commands.add_parser("finalize-quality-failure")
+    quality_failure.add_argument("--study-root", required=True)
+    quality_failure.add_argument("--training-commit", required=True)
+    quality_failure.add_argument("--selection", required=True)
+    quality_failure.add_argument("--confirmation", required=True)
+    quality_failure.add_argument("--output", required=True)
+    quality_failure.add_argument("--controller-commit", required=True)
+    quality_failure.add_argument("--scientific-commit", required=True)
+    quality_failure.set_defaults(handler=command_finalize_quality_failure)
     return parser
 
 

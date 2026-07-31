@@ -7,10 +7,16 @@ immutable v3 study, including partition `batch`, account
 is supplied. These scheduler values remain CLI-overridable. The launcher queues
 cache extraction, final-artifact validation, and the two validation arms. Its
 selection gate submits lockbox scoring only after a confirmatory-eligible
-candidate independently reproduces from raw validation rows; timing and
-finalization remain `afterok` descendants. Run the launcher from a clean
-evaluator clone/worktree distinct from the immutable training checkout
-recorded in the study.
+candidate independently reproduces from raw validation rows. After lockbox
+confirmation, a controller outcome gate fully reproduces the hashed raw
+confirmation evidence: held-out quality failure writes an explicit negative
+final report without running timing, while held-out quality success delegates
+to the frozen scientific paired-timing and finalization entrypoint. A
+study-local lock spans either publication or delegated timing. Negative reports
+are atomically published without replacement; retry accepts only a byte- and
+identity-equivalent complete report. Run the launcher from a clean evaluator
+clone/worktree distinct from the immutable training checkout recorded in the
+study.
 
 The frontier launcher also supports the exact cache-only partial-submission
 case with `--adopt-cache-job-id ID`. This is not a general resume flag. It

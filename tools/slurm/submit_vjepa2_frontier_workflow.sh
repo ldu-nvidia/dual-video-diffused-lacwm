@@ -71,7 +71,9 @@ Initial DAG:
 The selection gate creates no lockbox jobs unless the exclusively written
 selection independently reproduces with confirmatory_eligible=true.  If it
 does, it submits an afterok chain: VPM/J1 lockbox array (two separate 8-B200
-allocations), confirmation, one-B200 paired timing, and finalization.
+allocations), confirmation, and a one-B200 outcome gate. A held-out quality
+failure writes an explicit negative final report without timing; only a passed
+quality gate runs paired timing and positive-path finalization.
 
 Path/provenance options:
   --study-root PATH
