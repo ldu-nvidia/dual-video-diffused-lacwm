@@ -272,6 +272,21 @@ class VideoLatentForcingModel(nn.Module):
         nn.init.trunc_normal_(self.history_position_embedding, std=0.02)
         nn.init.trunc_normal_(self.action_position_embedding, std=0.02)
 
+        # Match the released Latent Forcing/DiT initialization: every residual
+        # branch starts as an exact no-op, and both clean-state prediction heads
+        # start at zero.  Unlike the released image model, this compact model
+        # shares one adaptive modulation across its transformer blocks, so
+        # zeroing this final modulation projection is the corresponding
+        # operation for all block shifts, scales, and gates.  Keep positional
+        # and causal-context projections at their ordinary non-zero
+        # initialization so training can immediately learn the output heads.
+        nn.init.zeros_(self.clock_modulation[-1].weight)
+        nn.init.zeros_(self.clock_modulation[-1].bias)
+        nn.init.zeros_(self.video_output_head.weight)
+        nn.init.zeros_(self.video_output_head.bias)
+        nn.init.zeros_(self.auxiliary_output_head.weight)
+        nn.init.zeros_(self.auxiliary_output_head.bias)
+
     def _validate_inputs(
         self,
         noisy_video: Tensor,

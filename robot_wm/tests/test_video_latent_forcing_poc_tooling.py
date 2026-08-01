@@ -14,6 +14,7 @@ from tools.video_latent_forcing_poc import (
     GATE_SCHEMA,
     FROZEN_CLEAN_TIME_EPS,
     FROZEN_EMA_DECAY,
+    FROZEN_EMA_SCHEDULE,
     FROZEN_GLOBAL_BATCH_SIZE,
     FROZEN_LEARNING_RATE,
     FROZEN_WARMUP_UPDATES,
@@ -138,6 +139,7 @@ def test_cli_width_maps_to_hidden_size_and_never_image_width():
     assert config["hidden_size"] == 16
     assert config["width"] == 112
     assert config["height"] == 64
+    assert config["initialization"] == "latent-forcing-zero-adaln-and-output-heads-v1"
     assert model.config.future_shape == (3, 8, 64, 112)
     assert model.config.auxiliary_shape == (48, 8, 8, 14)
 
@@ -363,14 +365,31 @@ def test_auxiliary_cosine_is_mean_of_aligned_token_cosines():
     torch.testing.assert_close(metrics["auxiliary_cosine"], torch.tensor([0.5]))
 
 
+def test_short_run_ema_warmup_reaches_the_model_without_initialization_bias():
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.zero_()
+    ema = ModelEMA(model)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+    for _ in range(5_000):
+        ema.update(model)
+    assert ema.decay_at_update(1) == pytest.approx(2 / 11)
+    assert ema.decay_at_update(5_000) == pytest.approx(5_001 / 5_010)
+    assert ema.shadow["weight"].item() == pytest.approx(1.0, abs=1e-6)
+    assert ema.state_dict()["schedule"] == FROZEN_EMA_SCHEDULE
+    assert ema.state_dict()["num_updates"] == 5_000
+
+
 def test_ema_checkpoint_roundtrip_and_resume_log_reconciliation(tmp_path):
     model = torch.nn.Linear(2, 2)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
     ema = ModelEMA(model)
-    with torch.no_grad():
-        model.weight.add_(1.0)
-    ema.update(model)
+    for _ in range(3):
+        with torch.no_grad():
+            model.weight.add_(1.0)
+        ema.update(model)
     expected = {name: value.clone() for name, value in ema.shadow.items()}
     context = DistributedContext(0, 1, 0, torch.device("cpu"))
     checkpoint = tmp_path / "update_000003.pt"
@@ -392,6 +411,8 @@ def test_ema_checkpoint_roundtrip_and_resume_log_reconciliation(tmp_path):
     saved = torch.load(checkpoint, weights_only=False)
     assert saved["schema"] == CHECKPOINT_SCHEMA
     assert saved["cumulative_optimizer_wall_seconds"] == 12.5
+    assert saved["ema"]["schedule"] == FROZEN_EMA_SCHEDULE
+    assert saved["ema"]["num_updates"] == 3
     with torch.no_grad():
         model.weight.zero_()
     ema.shadow["weight"].zero_()
@@ -406,6 +427,21 @@ def test_ema_checkpoint_roundtrip_and_resume_log_reconciliation(tmp_path):
     )
     for name, value in expected.items():
         torch.testing.assert_close(ema.shadow[name], value)
+    assert ema.num_updates == 3
+
+    corrupted = tmp_path / "update_000003_bad_ema.pt"
+    saved["ema"]["num_updates"] = 2
+    torch.save(saved, corrupted)
+    with pytest.raises(PocError, match="EMA update count differs"):
+        load_checkpoint(
+            corrupted,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            ema=ema,
+            expected_config_sha256="a" * 64,
+            context=context,
+        )
 
     run_dir = tmp_path / "run"
     (run_dir / "checkpoints").mkdir(parents=True)
@@ -430,7 +466,12 @@ def test_phase1_gate_handoff_recomputes_raw_evidence_and_rejects_resigned_edit(
             "schema": CHECKPOINT_SCHEMA,
             "arm": "phase1",
             "completed_updates": 5_000,
-            "ema": {"decay": FROZEN_EMA_DECAY, "shadow": {"w": torch.ones(1)}},
+            "ema": {
+                "decay": FROZEN_EMA_DECAY,
+                "schedule": FROZEN_EMA_SCHEDULE,
+                "num_updates": 5_000,
+                "shadow": {"w": torch.ones(1)},
+            },
         },
         checkpoint_path,
     )

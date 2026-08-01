@@ -34,6 +34,8 @@ CLIPS = 890
 BOOTSTRAP_SAMPLES = 10_000
 BOOTSTRAP_CONFIDENCE = 0.95
 BOOTSTRAP_BASE_SEED = 20260801
+EMA_SCHEDULE = "min(target_decay,(1+completed_updates)/(10+completed_updates))-v1"
+INITIALIZATION_SCHEME = "latent-forcing-zero-adaln-and-output-heads-v1"
 APPROVED_ROOTS = (Path("/lustre"), Path("/mnt/data1"), Path("/mnt/data2"))
 ELIGIBLE_INVENTORY_SHA256 = (
     "3bc6f2c06abe74f1a60ddc4f9a44ce734fb8fa85f9ec94ac99e7bcc954993651"
@@ -401,6 +403,8 @@ def analyze_phase1_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
         or not isinstance(weights, Mapping)
         or weights.get("kind") != "ema"
         or weights.get("decay") != 0.9999
+        or weights.get("schedule") != EMA_SCHEDULE
+        or weights.get("num_updates") != 5_000
         or not isinstance(source, Mapping)
         or source.get("dirty") is not False
         or summary.get("schema") != EVALUATION_SCHEMA
@@ -410,6 +414,8 @@ def analyze_phase1_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
         or summary.get("record_count") != CLIPS * len(CONTROLS) * len(NFE_GRID)
         or summary.get("reported_weight_source") != "ema"
         or summary.get("ema_decay") != 0.9999
+        or summary.get("ema_schedule") != EMA_SCHEDULE
+        or summary.get("ema_updates") != 5_000
         or summary.get("quality_metric_suite_complete") is not True
     ):
         raise GateError("evaluation does not match the frozen update-5000 Phase-1 frontier")
@@ -425,6 +431,7 @@ def analyze_phase1_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
     )
     training_source = training_config.get("source")
     training_ema = training_config.get("ema")
+    training_model = training_config.get("model")
     if (
         training_config.get("schema") != RUN_SCHEMA
         or training_config.get("command") != "train"
@@ -433,10 +440,14 @@ def analyze_phase1_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
         or training_config.get("updates") != 5_000
         or training_config.get("checkpoint_updates") != [500, 1_000, 2_000, 5_000]
         or training_config.get("model") != config.get("model")
+        or not isinstance(training_model, Mapping)
+        or training_model.get("initialization") != INITIALIZATION_SCHEME
         or not isinstance(training_source, Mapping)
         or training_source != source
         or not isinstance(training_ema, Mapping)
         or training_ema.get("decay") != 0.9999
+        or training_ema.get("schedule") != EMA_SCHEDULE
+        or training_ema.get("short_run_initialization_bias_corrected") is not True
         or training_ema.get("reported_samples_use") is not True
     ):
         raise GateError("checkpoint training configuration violates the frozen Phase-1 contract")
@@ -455,6 +466,8 @@ def analyze_phase1_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
         or checkpoint.get("model_config") != config.get("model")
         or not isinstance(checkpoint_ema, Mapping)
         or checkpoint_ema.get("decay") != 0.9999
+        or checkpoint_ema.get("schedule") != EMA_SCHEDULE
+        or checkpoint_ema.get("num_updates") != 5_000
         or not isinstance(checkpoint_ema.get("shadow"), Mapping)
     ):
         raise GateError("checkpoint payload is not the frozen update-5000 Phase-1 EMA model")
@@ -568,6 +581,8 @@ def analyze_phase1_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
             or row.get("evaluation_seed") != BOOTSTRAP_BASE_SEED
             or row.get("optimizer_seed") != 1234
             or row.get("ema_decay") != 0.9999
+            or row.get("ema_schedule") != EMA_SCHEDULE
+            or row.get("ema_updates") != 5_000
             or row.get("teacher_model_calls") != 0
             or row.get("clean_future_used_as_condition") != (control == "oracle_clean")
             or row.get("deployable") != (control != "oracle_clean")

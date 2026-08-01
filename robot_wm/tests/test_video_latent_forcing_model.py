@@ -39,6 +39,84 @@ def _inputs(config, batch_size=1):
     )
 
 
+def _activate_conditioned_path(model):
+    """Give dependency/no-op tests a trained-like, non-zero prediction path."""
+    with torch.no_grad():
+        torch.nn.init.xavier_uniform_(model.clock_modulation[-1].weight)
+        torch.nn.init.zeros_(model.clock_modulation[-1].bias)
+        torch.nn.init.xavier_uniform_(model.video_output_head.weight)
+        torch.nn.init.zeros_(model.video_output_head.bias)
+        torch.nn.init.xavier_uniform_(model.auxiliary_output_head.weight)
+        torch.nn.init.zeros_(model.auxiliary_output_head.bias)
+
+
+def test_released_latent_forcing_zero_initialization_preserves_context_init():
+    torch.manual_seed(20260801)
+    config = _tiny_config()
+    model = VideoLatentForcingModel(config).eval()
+
+    for parameter in (
+        model.clock_modulation[-1].weight,
+        model.clock_modulation[-1].bias,
+        model.video_output_head.weight,
+        model.video_output_head.bias,
+        model.auxiliary_output_head.weight,
+        model.auxiliary_output_head.bias,
+    ):
+        assert torch.count_nonzero(parameter) == 0
+
+    # Zero initialization is intentionally limited to adaptive modulation and
+    # the two final prediction projections.  Spatial/temporal position and
+    # causal-context parameters must retain signal at initialization.
+    for parameter in (
+        model.position_embedding,
+        model.history_position_embedding,
+        model.action_position_embedding,
+        model.history_projection.weight,
+        model.action_projection[0].weight,
+        model.video_time_embedding.mlp[0].weight,
+        model.auxiliary_time_embedding.mlp[0].weight,
+    ):
+        assert torch.count_nonzero(parameter) > 0
+
+    with torch.no_grad():
+        output = model(*_inputs(config))
+    assert torch.count_nonzero(output.video_x) == 0
+    assert torch.count_nonzero(output.auxiliary_x) == 0
+
+
+def test_zero_initialized_heads_wake_modulation_on_the_second_optimizer_step():
+    torch.manual_seed(20260801)
+    config = _tiny_config()
+    model = VideoLatentForcingModel(config).train()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+    inputs = _inputs(config, batch_size=2)
+    target_video = torch.randn(2, *config.future_shape)
+    target_auxiliary = torch.randn(2, *config.auxiliary_shape)
+
+    first = model(*inputs)
+    first_loss = (first.video_x - target_video).square().mean() + (
+        first.auxiliary_x - target_auxiliary
+    ).square().mean()
+    first_loss.backward()
+    assert torch.count_nonzero(model.video_output_head.weight.grad) > 0
+    assert torch.count_nonzero(model.auxiliary_output_head.weight.grad) > 0
+    assert torch.count_nonzero(model.clock_modulation[-1].weight.grad) == 0
+    optimizer.step()
+
+    optimizer.zero_grad(set_to_none=True)
+    second = model(*inputs)
+    assert torch.count_nonzero(second.video_x) > 0
+    assert torch.count_nonzero(second.auxiliary_x) > 0
+    second_loss = (second.video_x - target_video).square().mean() + (
+        second.auxiliary_x - target_auxiliary
+    ).square().mean()
+    second_loss.backward()
+    assert torch.count_nonzero(model.clock_modulation[-1].weight.grad) > 0
+    optimizer.step()
+    assert torch.count_nonzero(model.clock_modulation[-1].weight) > 0
+
+
 def test_frozen_default_and_temporal_patch_two_grids():
     default = VideoLatentForcingConfig()
     assert default.future_shape == (3, 8, 64, 112)
@@ -99,6 +177,7 @@ def test_per_example_fusion_mask_is_exact_noop_and_both_clocks_condition():
     torch.manual_seed(20260801)
     config = _tiny_config()
     model = VideoLatentForcingModel(config).eval()
+    _activate_conditioned_path(model)
     inputs = list(_inputs(config, batch_size=2))
     inputs[2] = torch.zeros(2)
     inputs[3] = torch.zeros(2)
@@ -152,6 +231,7 @@ def test_ordered_action_and_spatial_history_tokens_are_causal_conditions():
     torch.manual_seed(17)
     config = _tiny_config()
     model = VideoLatentForcingModel(config).eval()
+    _activate_conditioned_path(model)
     inputs = list(_inputs(config))
 
     with torch.no_grad():
@@ -172,6 +252,7 @@ def test_parameter_matched_video_only_has_equal_schema_and_strict_aux_noop():
     baseline_config = _tiny_config(parameter_matched_video_only=True)
     dual = VideoLatentForcingModel(dual_config)
     baseline = VideoLatentForcingModel(baseline_config).eval()
+    _activate_conditioned_path(baseline)
     assert sum(parameter.numel() for parameter in dual.parameters()) == sum(
         parameter.numel() for parameter in baseline.parameters()
     )

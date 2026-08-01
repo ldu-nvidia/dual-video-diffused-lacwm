@@ -2,7 +2,19 @@
 
 Date preregistered: 2026-08-01
 
-Status: frozen before any new quality result is inspected
+Status: amended and refrozen before any generated-quality result was produced
+
+Pre-quality amendment (2026-08-01): an independent source audit found that a
+fixed `0.9999` EMA would retain `0.9999^5000 = 60.65%` of initialization at the
+Phase-1 endpoint, and that the first implementation had not copied the released
+Latent Forcing zero initialization.  Before any training-quality sample or
+metric existed, the model was changed to zero-initialize adaptive modulation
+and both output heads, and EMA was changed to the deterministic warm-start
+schedule `min(0.9999,(1+u)/(10+u))` after completed update `u`. Slurm job
+`486176`, run `phase1-calibration-seed1234`, was already submitted from obsolete
+commit `ce965305110eab95c47ea111b69509786a18b1be`; it remains systems-only and
+cannot authorize training under the amended source. An exact-commit calibration
+is required.
 
 Latent Forcing implementation audited: `AlanBaade/LatentForcing` commit
 `fde8fc40377eaeeea49e6043e01c999b69779a53`.
@@ -94,9 +106,10 @@ s \in \mathbb{R}^{48\times8\times8\times14}.
 
 This mapping is deterministic and exactly invertible back to the `32 x 56`
 low-resolution clip after resizing.  It is a coarse future video, not a
-semantic representation.  That is useful for the first test: if this easiest,
-visually aligned scratchpad cannot help autonomously, a harder transformed
-feature should not be promoted based on oracle conditioning.
+semantic representation.  That is useful for the first mechanism test, but it
+does not dominate semantic features: low-resolution RGB retains unpredictable
+appearance detail that DINOv2 or V-JEPA may discard.  A failure therefore
+rejects only this scratchpad arm, not the broader video-forcing hypothesis.
 
 ## Model frozen for the primary comparison
 
@@ -109,6 +122,10 @@ feature should not be promoted based on oracle conditioning.
   no learned near-zero gate.
 - Both clean-time clocks enter every transformer block through adaptive layer
   normalization.
+- Matching the released Latent Forcing/DiT initialization, the adaptive
+  modulation projection and both clean-state output projections start at
+  exactly zero. Positional and causal-context projections retain ordinary
+  nonzero initialization.
 - History RGB and the aligned 16 future-transition action commands are explicit
   conditions.
 - One shared transformer trunk and separate video and scratchpad clean-state
@@ -153,8 +170,8 @@ The screen passes only if, at NFE at most 12:
    generation, preventing an unconditional low-resolution-video model from
    satisfying the gate.
 
-The formal gate uses only the update-5,000 EMA checkpoint and selects the
-smallest passing NFE in `{1,2,4,8,12}`. For a lower-is-better metric, relative
+The formal gate uses only the update-5,000 warm-started-EMA checkpoint and
+selects the smallest passing NFE in `{1,2,4,8,12}`. For a lower-is-better metric, relative
 improvement of generated `G` over reference `R` is
 `(mean(R)-mean(G))/mean(R)`. Each required 5% comparison must also have a
 strictly positive paired-bootstrap 95% confidence-interval lower bound.
@@ -167,8 +184,13 @@ advantage. Retained utility is
 `(mean(off)-mean(G))/(mean(off)-mean(oracle_clean))`; a nonpositive denominator
 fails the gate rather than being silently divided.
 
-If this gate fails, the dual-video run stops.  Oracle-clean evidence cannot
-override the stop.
+This is deliberately a paired predictability gate against the one recorded
+future, not a complete conditional-distribution test. A plausible alternative
+future can score poorly against that realization. If the gate fails, the
+low-resolution-RGB Phase-2 run stops and its result is reported as arm-specific.
+Oracle-clean evidence cannot override the stop. The causal semantic/V-JEPA
+screen remains independently eligible because semantic features can remove
+unpredictable appearance entropy.
 
 ### Phase 2: faithful dual-video screen
 
@@ -210,7 +232,8 @@ Train each arm for 20,000 optimizer updates after calibration, with global
 batch 256 (32 per B200 on eight GPUs), bf16, and seed 1234.  Optimization is
 AdamW with betas `(0.9,0.95)`, weight decay 0, learning rate `5e-5`, 500-update
 linear warmup followed by a constant rate, and global gradient-norm clipping
-at 1.0.  Track EMA decay 0.9999 and use that EMA for every reported sample;
+at 1.0.  Track target EMA decay 0.9999 with the frozen short-run warm-start
+`min(0.9999,(1+u)/(10+u))`, and use that EMA for every reported sample;
 raw-weight diagnostics are labelled separately.  If the identical 200-update
 systems calibration proves batch 256 infeasible, use gradient accumulation to
 preserve global batch 256 rather than changing the optimizer contract.  Evaluate
@@ -235,8 +258,11 @@ For every L1 checkpoint, use the identical generated auxiliary trajectory for:
 
 ### Phase 3: representation extension
 
-Only after L1 passes, repeat the scratchpad screen with temporally aligned,
-train-statistics-only normalized features:
+After the low-resolution result is frozen, repeat the representation screen
+with temporally aligned, train-statistics-only normalized features. A passed
+L1 arm provides the direct comparison; a failed low-resolution gate does not
+block the semantic screen because it is not evidence that semantic targets are
+equally unpredictable:
 
 - per-frame DINOv2, if the local checkpoint is content-hashed and its license
   and preprocessing are pinned; and

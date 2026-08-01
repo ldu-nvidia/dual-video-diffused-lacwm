@@ -98,6 +98,8 @@ FROZEN_WARMUP_UPDATES = 500
 FROZEN_WEIGHT_DECAY = 0.0
 FROZEN_GRADIENT_CLIP_NORM = 1.0
 FROZEN_EMA_DECAY = 0.9999
+FROZEN_EMA_SCHEDULE = "min(target_decay,(1+completed_updates)/(10+completed_updates))-v1"
+FROZEN_INITIALIZATION = "latent-forcing-zero-adaln-and-output-heads-v1"
 FROZEN_CLEAN_TIME_EPS = 0.05
 FROZEN_MODEL_WIDTH = 512
 FROZEN_MODEL_DEPTH = 12
@@ -581,6 +583,7 @@ def model_config_payload(config: Any) -> dict[str, Any]:
     payload = _jsonable(config)
     if not isinstance(payload, dict):
         raise PocError("model config must resolve to a mapping")
+    payload["initialization"] = FROZEN_INITIALIZATION
     return payload
 
 
@@ -729,12 +732,19 @@ def optimizer_and_scheduler(model: nn.Module, args: argparse.Namespace, total_up
 
 
 class ModelEMA:
-    """Full-state EMA kept in fp32 and used for every reported sample."""
+    """Warm-started full-state fp32 EMA used for every reported sample.
+
+    A fixed 0.9999 decay is appropriate for the released Latent Forcing run's
+    roughly 250k updates, but would retain about 61% of random initialization
+    after this screen's 5k updates.  The deterministic warm-up below preserves
+    the registered target decay while preventing that short-run bias.
+    """
 
     def __init__(self, model: nn.Module, decay: float = FROZEN_EMA_DECAY) -> None:
         if not 0.0 < decay < 1.0:
             raise ValueError("EMA decay must lie in (0, 1)")
         self.decay = float(decay)
+        self.num_updates = 0
         self.shadow: dict[str, Tensor] = {}
         for name, value in unwrap_model(model).state_dict().items():
             clone = value.detach().clone()
@@ -742,25 +752,45 @@ class ModelEMA:
                 clone = clone.float()
             self.shadow[name] = clone
 
+    def decay_at_update(self, completed_updates: int) -> float:
+        if completed_updates < 1:
+            raise ValueError("EMA decay requires at least one completed update")
+        warmup_decay = (1.0 + completed_updates) / (10.0 + completed_updates)
+        return min(self.decay, warmup_decay)
+
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
         current = unwrap_model(model).state_dict()
         if current.keys() != self.shadow.keys():
             raise PocError("EMA/model state keys diverged")
+        self.num_updates += 1
+        update_decay = self.decay_at_update(self.num_updates)
         for name, value in current.items():
             target = self.shadow[name]
             source = value.detach().to(device=target.device)
             if target.is_floating_point():
-                target.mul_(self.decay).add_(source.float(), alpha=1.0 - self.decay)
+                target.mul_(update_decay).add_(source.float(), alpha=1.0 - update_decay)
             else:
                 target.copy_(source)
 
     def state_dict(self) -> dict[str, Any]:
-        return {"decay": self.decay, "shadow": self.shadow}
+        return {
+            "decay": self.decay,
+            "schedule": FROZEN_EMA_SCHEDULE,
+            "num_updates": self.num_updates,
+            "shadow": self.shadow,
+        }
 
     def load_state_dict(self, payload: Mapping[str, Any]) -> None:
-        if float(payload.get("decay", -1.0)) != self.decay:
-            raise PocError("checkpoint EMA decay differs from resolved config")
+        updates = payload.get("num_updates")
+        if (
+            float(payload.get("decay", -1.0)) != self.decay
+            or payload.get("schedule") != FROZEN_EMA_SCHEDULE
+            or isinstance(updates, bool)
+            or not isinstance(updates, int)
+            or updates < 0
+        ):
+            raise PocError("checkpoint EMA schedule differs from resolved config")
         shadow = payload.get("shadow")
         if not isinstance(shadow, Mapping) or shadow.keys() != self.shadow.keys():
             raise PocError("checkpoint EMA state is incomplete")
@@ -768,6 +798,7 @@ class ModelEMA:
             if not isinstance(value, Tensor) or value.shape != self.shadow[name].shape:
                 raise PocError(f"checkpoint EMA tensor mismatch: {name}")
             self.shadow[name].copy_(value.to(device=self.shadow[name].device))
+        self.num_updates = updates
 
     def copy_to(self, model: nn.Module) -> None:
         target = unwrap_model(model)
@@ -869,6 +900,8 @@ def validate_phase1_gate_record(path: str | Path, *, expected_commit: str) -> di
         or checkpoint.get("completed_updates") != PHASE1_UPDATES
         or not isinstance(checkpoint_ema, Mapping)
         or checkpoint_ema.get("decay") != FROZEN_EMA_DECAY
+        or checkpoint_ema.get("schedule") != FROZEN_EMA_SCHEDULE
+        or checkpoint_ema.get("num_updates") != PHASE1_UPDATES
         or not isinstance(checkpoint_ema.get("shadow"), Mapping)
     ):
         raise PocError("Phase-1 gate checkpoint is not a Phase-1 model")
@@ -924,12 +957,17 @@ def validate_calibration_record(
     ):
         raise PocError("calibration is not bound to this exact experiment identity")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint_ema = checkpoint.get("ema")
     if (
         checkpoint.get("schema") != CHECKPOINT_SCHEMA
         or checkpoint.get("arm") != arm
         or checkpoint.get("completed_updates") != CALIBRATION_UPDATES
         or checkpoint.get("config_sha256") != sha256_json(config)
         or checkpoint.get("model_config") != config.get("model")
+        or not isinstance(checkpoint_ema, Mapping)
+        or checkpoint_ema.get("decay") != FROZEN_EMA_DECAY
+        or checkpoint_ema.get("schedule") != FROZEN_EMA_SCHEDULE
+        or checkpoint_ema.get("num_updates") != CALIBRATION_UPDATES
     ):
         raise PocError("calibration checkpoint does not match its resolved config")
     return payload
@@ -1060,7 +1098,12 @@ def resolved_training_config(
             "weight_decay": args.weight_decay,
             "gradient_clip_norm": args.gradient_clip_norm,
         },
-        "ema": {"decay": args.ema_decay, "reported_samples_use": True},
+        "ema": {
+            "decay": args.ema_decay,
+            "schedule": FROZEN_EMA_SCHEDULE,
+            "reported_samples_use": True,
+            "short_run_initialization_bias_corrected": True,
+        },
         "schedule": {
             "auxiliary_branch_probability": 0.4,
             "auxiliary_logit_normal_mean": -1.2,
@@ -1140,8 +1183,9 @@ class LocalAndOptionalWandbLogger:
             project=args.wandb_project,
             name=args.run_id,
             group=None,
+            dir=str(run_dir),
             config=_jsonable(config),
-            settings=wandb.Settings(start_method="thread"),
+            settings=wandb.Settings(start_method="thread", save_code=False),
         )
         self._wandb = wandb
 
@@ -1194,6 +1238,10 @@ def save_checkpoint(
     context: DistributedContext,
     cumulative_optimizer_wall_seconds: float = 0.0,
 ) -> None:
+    if ema.num_updates != update:
+        raise PocError(
+            f"EMA update count {ema.num_updates} differs from checkpoint update {update}"
+        )
     rng_by_rank = context.gather_objects(capture_rng_state())
     if context.is_primary:
         atomic_torch_save(
@@ -1235,6 +1283,13 @@ def load_checkpoint(
         raise PocError(f"cannot load checkpoint {resolved}: {exc}") from exc
     if payload.get("schema") != CHECKPOINT_SCHEMA:
         raise PocError("checkpoint schema mismatch")
+    completed_updates = payload.get("completed_updates")
+    if (
+        isinstance(completed_updates, bool)
+        or not isinstance(completed_updates, int)
+        or completed_updates < 0
+    ):
+        raise PocError("checkpoint completed-update count is invalid")
     if expected_config_sha256 is not None and payload.get("config_sha256") != expected_config_sha256:
         raise PocError("checkpoint resolved-config identity mismatch")
     unwrap_model(model).load_state_dict(payload["model"], strict=True)
@@ -1246,6 +1301,10 @@ def load_checkpoint(
         if "ema" not in payload:
             raise PocError("checkpoint is missing required EMA state")
         ema.load_state_dict(payload["ema"])
+        if ema.num_updates != completed_updates:
+            raise PocError(
+                "checkpoint EMA update count differs from completed updates"
+            )
     states = payload.get("rng_by_rank")
     if not isinstance(states, list) or len(states) != context.world_size:
         raise PocError("checkpoint RNG state does not match current world size")
@@ -2339,6 +2398,11 @@ def evaluation_command(args: argparse.Namespace) -> int:
             raise PocError("reported evaluation requires checkpoint EMA weights")
         if float(ema_payload.get("decay", -1.0)) != FROZEN_EMA_DECAY:
             raise PocError("checkpoint EMA decay violates the frozen protocol")
+        if (
+            ema_payload.get("schedule") != FROZEN_EMA_SCHEDULE
+            or ema_payload.get("num_updates") != payload.get("completed_updates")
+        ):
+            raise PocError("checkpoint EMA warm-up state violates the frozen protocol")
         ema_shadow = ema_payload.get("shadow")
         if not isinstance(ema_shadow, Mapping):
             raise PocError("checkpoint EMA shadow state is missing")
@@ -2386,7 +2450,12 @@ def evaluation_command(args: argparse.Namespace) -> int:
             "checkpoint": checkpoint_file_record,
             "training_config": training_config_file_record,
             "checkpoint_update": int(payload["completed_updates"]),
-            "weights": {"kind": "ema", "decay": FROZEN_EMA_DECAY},
+            "weights": {
+                "kind": "ema",
+                "decay": FROZEN_EMA_DECAY,
+                "schedule": FROZEN_EMA_SCHEDULE,
+                "num_updates": int(ema_payload["num_updates"]),
+            },
             "manifest": manifest_record,
             "data_root": str(Path(args.data_root).expanduser().resolve()),
             "seed": args.seed,
@@ -2650,6 +2719,8 @@ def evaluation_command(args: argparse.Namespace) -> int:
                             "checkpoint_sha256": checkpoint_file_record["sha256"],
                             "training_config_sha256": training_config_file_record["sha256"],
                             "ema_decay": FROZEN_EMA_DECAY,
+                            "ema_schedule": FROZEN_EMA_SCHEDULE,
+                            "ema_updates": int(ema_payload["num_updates"]),
                             # Shared auxiliary generation is counted once in
                             # actual evaluator work, but every deployable path
                             # pays for it once.
@@ -2859,6 +2930,8 @@ def evaluation_command(args: argparse.Namespace) -> int:
                 "sample_artifact_count": len(media_records),
                 "reported_weight_source": "ema",
                 "ema_decay": FROZEN_EMA_DECAY,
+                "ema_schedule": FROZEN_EMA_SCHEDULE,
+                "ema_updates": int(ema_payload["num_updates"]),
                 "phase_boundary_shared_across_controls": (
                     "autonomous/off/shuffled/oracle_clean share the aligned generated "
                     "boundary; context_shuffled intentionally regenerates from shuffled conditions"
