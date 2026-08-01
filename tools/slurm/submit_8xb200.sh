@@ -55,7 +55,7 @@ Slurm resources:
   --partition NAME                Optional partition
   --account NAME                  Optional account
   --qos NAME                      Optional QOS
-  --constraint VALUE              Optional node constraint, e.g. b200
+  --constraint VALUE              Optional node constraint, e.g. B200
   --time VALUE                    Slot wall time (default: 24:00:00)
   --cpus N                        CPUs assigned to each node agent (default: 160)
   --mem VALUE                     Node memory request (default: 1000G)

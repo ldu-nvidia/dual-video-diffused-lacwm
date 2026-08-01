@@ -72,6 +72,22 @@ def _training_cli(command: str = "calibrate") -> list[str]:
     return values
 
 
+def test_cluster_launchers_use_the_case_sensitive_b200_feature_name():
+    repo_root = Path(__file__).resolve().parents[2]
+    launcher_paths = (
+        "tools/slurm/build_video_latent_forcing_droid.sbatch",
+        "tools/slurm/submit_build_video_latent_forcing_droid.sh",
+        "tools/slurm/submit_video_latent_forcing_poc.sh",
+        "tools/slurm/submit_video_latent_forcing_eval.sh",
+    )
+    for relative_path in launcher_paths:
+        launcher_text = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert "B200" in launcher_text, relative_path
+        assert "CONSTRAINT=\"b200\"" not in launcher_text, relative_path
+        assert "--constraint=b200" not in launcher_text, relative_path
+        assert "Default: b200" not in launcher_text, relative_path
+
+
 def test_parser_locks_frozen_optimizer_defaults_and_exact_calibration_length():
     args = build_parser().parse_args(_training_cli())
     validate_args(args)
