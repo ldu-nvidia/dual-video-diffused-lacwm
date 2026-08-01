@@ -59,7 +59,7 @@ case "$OUTPUT_ROOT/" in /lustre/*|/mnt/data1/*|/mnt/data2/*) ;; *) die "unapprov
 SBATCH_ARGS=(--job-name vlf-droid-cache --partition "$PARTITION" --constraint "$CONSTRAINT" --time "$TIME_LIMIT" --cpus-per-task "$CPUS" --mem "$MEMORY" --output "$(dirname "$OUTPUT_ROOT")/_slurm/vlf-droid-cache-%j.out" --error "$(dirname "$OUTPUT_ROOT")/_slurm/vlf-droid-cache-%j.err")
 [[ -n "$ACCOUNT" ]] && SBATCH_ARGS+=(--account "$ACCOUNT")
 [[ -n "$QOS" ]] && SBATCH_ARGS+=(--qos "$QOS")
-COMMAND=(sbatch --parsable "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" --python "$PYTHON_BIN" --expected-commit "$EXPECTED_COMMIT" --data-root "$DATA_ROOT" --output-root "$OUTPUT_ROOT")
+COMMAND=(sbatch --parsable "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" --repo-root "$REPO_ROOT" --python "$PYTHON_BIN" --expected-commit "$EXPECTED_COMMIT" --data-root "$DATA_ROOT" --output-root "$OUTPUT_ROOT")
 printf 'Resolved command (dry-run unless --execute):\n'
 printf ' %q' "${COMMAND[@]}"
 printf '\n'

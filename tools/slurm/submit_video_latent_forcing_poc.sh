@@ -199,7 +199,7 @@ SBATCH_ARGS=(
 [[ -n "$QOS" ]] && SBATCH_ARGS+=(--qos "$QOS")
 
 printf 'Resolved command (dry-run unless --execute):\n'
-printf ' %q' sbatch "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" --python "$PYTHON_BIN" --expected-commit "$EXPECTED_COMMIT" -- "${TOOL_ARGS[@]}"
+printf ' %q' sbatch "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" --repo-root "$REPO_ROOT" --python "$PYTHON_BIN" --expected-commit "$EXPECTED_COMMIT" -- "${TOOL_ARGS[@]}"
 printf '\n'
 
 if ((EXECUTE == 0)); then
@@ -215,6 +215,6 @@ if squeue --noheader --user "$(id -un)" --name "$JOB_NAME" | grep -q .; then
   die "an active job already has the exact run job name"
 fi
 mkdir -p "$ARTIFACT_ROOT/_slurm"
-JOB_ID="$(sbatch --parsable "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" --python "$PYTHON_BIN" --expected-commit "$EXPECTED_COMMIT" -- "${TOOL_ARGS[@]}")"
+JOB_ID="$(sbatch --parsable "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" --repo-root "$REPO_ROOT" --python "$PYTHON_BIN" --expected-commit "$EXPECTED_COMMIT" -- "${TOOL_ARGS[@]}")"
 [[ "$JOB_ID" =~ ^[0-9]+([.;][A-Za-z0-9._-]+)?$ ]] || die "unexpected sbatch response: $JOB_ID"
 printf 'Submitted %s\n' "$JOB_ID"

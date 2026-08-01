@@ -88,6 +88,26 @@ def test_cluster_launchers_use_the_case_sensitive_b200_feature_name():
         assert "Default: b200" not in launcher_text, relative_path
 
 
+def test_slurm_launchers_pass_repository_root_instead_of_using_spool_source():
+    repo_root = Path(__file__).resolve().parents[2]
+    submitters = (
+        "tools/slurm/submit_build_video_latent_forcing_droid.sh",
+        "tools/slurm/submit_video_latent_forcing_poc.sh",
+        "tools/slurm/submit_video_latent_forcing_eval.sh",
+    )
+    batch_scripts = (
+        "tools/slurm/build_video_latent_forcing_droid.sbatch",
+        "tools/slurm/video_latent_forcing_poc.sbatch",
+    )
+    for relative_path in submitters:
+        launcher_text = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert '--repo-root "$REPO_ROOT"' in launcher_text, relative_path
+    for relative_path in batch_scripts:
+        batch_text = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert '"--repo-root"' in batch_text, relative_path
+        assert 'dirname "${BASH_SOURCE[0]}"' not in batch_text, relative_path
+
+
 def test_parser_locks_frozen_optimizer_defaults_and_exact_calibration_length():
     args = build_parser().parse_args(_training_cli())
     validate_args(args)

@@ -13,16 +13,16 @@
 set -euo pipefail
 umask 077
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TOOL="$REPO_ROOT/tools/video_latent_forcing_poc.py"
-
 die() {
   echo "ERROR: $*" >&2
   exit 2
 }
 
-[[ "${1:-}" == "--python" && $# -ge 6 ]] || \
-  die "usage: video_latent_forcing_poc.sbatch --python PATH --expected-commit SHA -- calibrate|train|eval ARGS..."
+[[ "${1:-}" == "--repo-root" && $# -ge 8 ]] || \
+  die "usage: video_latent_forcing_poc.sbatch --repo-root PATH --python PATH --expected-commit SHA -- calibrate|train|eval ARGS..."
+REPO_ROOT="$2"
+shift 2
+[[ "${1:-}" == "--python" && $# -ge 6 ]] || die "missing --python"
 PYTHON_BIN="$2"
 shift 2
 [[ "${1:-}" == "--expected-commit" && $# -ge 4 ]] || die "missing --expected-commit"
@@ -32,6 +32,10 @@ shift 2
 shift
 [[ "$1" == "calibrate" || "$1" == "train" || "$1" == "eval" ]] || \
   die "tool command must be calibrate, train, or eval"
+[[ "$REPO_ROOT" == /* && -d "$REPO_ROOT" && ! -L "$REPO_ROOT" ]] || \
+  die "--repo-root must resolve to an absolute, non-symlinked directory"
+REPO_ROOT="$(readlink -f "$REPO_ROOT")"
+TOOL="$REPO_ROOT/tools/video_latent_forcing_poc.py"
 [[ "$PYTHON_BIN" == /* && -f "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || \
   die "--python must resolve to an absolute executable"
 [[ -f "$TOOL" && ! -L "$TOOL" ]] || die "tool entrypoint is missing or symlinked"

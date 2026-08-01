@@ -84,7 +84,7 @@ JOB_NAME="vlf-eval-${ARM}-${RUN_ID}"
 SBATCH_ARGS=(--job-name "$JOB_NAME" --partition "$PARTITION" --constraint "$CONSTRAINT" --time "$TIME_LIMIT" --cpus-per-task "$CPUS" --mem "$MEMORY" --output "$ARTIFACT_ROOT/_slurm/%x-%j.out" --error "$ARTIFACT_ROOT/_slurm/%x-%j.err")
 [[ -n "$ACCOUNT" ]] && SBATCH_ARGS+=(--account "$ACCOUNT")
 [[ -n "$QOS" ]] && SBATCH_ARGS+=(--qos "$QOS")
-COMMAND=(sbatch --parsable "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" --python "$PYTHON_BIN" --expected-commit "$EXPECTED_COMMIT" -- "${TOOL_ARGS[@]}")
+COMMAND=(sbatch --parsable "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" --repo-root "$REPO_ROOT" --python "$PYTHON_BIN" --expected-commit "$EXPECTED_COMMIT" -- "${TOOL_ARGS[@]}")
 printf 'Resolved command (dry-run unless --execute):\n'; printf ' %q' "${COMMAND[@]}"; printf '\n'
 ((EXECUTE == 1)) || exit 0
 command -v sbatch >/dev/null || die "sbatch unavailable"; command -v squeue >/dev/null || die "squeue unavailable"
