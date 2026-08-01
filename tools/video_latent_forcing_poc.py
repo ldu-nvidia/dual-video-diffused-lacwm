@@ -1707,6 +1707,20 @@ class CascadeResult:
     phase_boundary_sha256: str | None
 
 
+def auxiliary_freeze_assertion_executed(
+    result: CascadeResult,
+    *,
+    video_steps: int,
+) -> bool:
+    """Whether sampling actually exercised the dual-state freeze assertion.
+
+    B0 has no auxiliary state, so a successful video phase is not evidence that
+    an auxiliary tensor remained frozen.  Dual arms do carry such a tensor and
+    ``sample_video_phase`` checks it after every Euler step.
+    """
+    return video_steps > 0 and result.conditioning_auxiliary is not None
+
+
 def tensor_sha256(tensor: Tensor) -> str:
     contiguous = tensor.detach().cpu().contiguous()
     return hashlib.sha256(contiguous.numpy().tobytes()).hexdigest()
@@ -2729,11 +2743,23 @@ def evaluation_command(args: argparse.Namespace) -> int:
                             "conditioning_auxiliary_sha256": conditioning_auxiliary_sha256,
                             "pre_video_auxiliary_sha256": conditioning_auxiliary_sha256,
                             "post_video_auxiliary_sha256": conditioning_auxiliary_sha256,
+                            # Hash the raw generated tensor before canonical
+                            # metric clamping so A1's fusion-off no-op can be
+                            # audited bit-for-bit rather than inferred from
+                            # coincident scalar metrics.
+                            "generated_video_sha256": tensor_sha256(
+                                result.video[item_index]
+                            ),
                             "target_auxiliary_sha256": target_auxiliary_sha256,
                             "zero_auxiliary_sha256": tensor_sha256(
                                 torch.zeros_like(zero_reference)
                             ),
-                            "auxiliary_frozen_assertion_executed": video_steps > 0,
+                            "auxiliary_frozen_assertion_executed": (
+                                auxiliary_freeze_assertion_executed(
+                                    result,
+                                    video_steps=video_steps,
+                                )
+                            ),
                             "shuffle_mapping_sha256": derangement_sha256,
                             "conditioning_source_clip_id": (
                                 shuffled_source_ids[item_index]

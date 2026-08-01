@@ -24,6 +24,7 @@ from tools.video_latent_forcing_poc import (
     DeterministicDistributedBatchSampler,
     DistributedContext,
     build_parser,
+    auxiliary_freeze_assertion_executed,
     canonical_quality_video,
     clean_time_euler_from_x,
     corrupt_clean_time,
@@ -277,6 +278,7 @@ def test_shared_boundary_exact_calls_shuffle_and_b0_no_auxiliary_input():
     assert shuffled.model_calls == 2
     assert source_ids == ["clip-a", "clip-b"]
     torch.testing.assert_close(shuffled.conditioning_auxiliary, generated[indexes])
+    assert auxiliary_freeze_assertion_executed(shuffled, video_steps=2) is True
 
     b0_model = _FusionRecordingModel()
     b0 = sample_control(
@@ -293,7 +295,9 @@ def test_shared_boundary_exact_calls_shuffle_and_b0_no_auxiliary_input():
     )
     assert b0.model_calls == 4
     assert b0.generated_auxiliary is None
+    assert b0.conditioning_auxiliary is None
     assert b0.initial_auxiliary_noise is None
+    assert auxiliary_freeze_assertion_executed(b0, video_steps=4) is False
     assert all(mask is False for mask in b0_model.masks)
 
 

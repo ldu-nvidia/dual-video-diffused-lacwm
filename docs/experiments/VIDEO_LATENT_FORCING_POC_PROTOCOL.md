@@ -16,6 +16,22 @@ commit `ce965305110eab95c47ea111b69509786a18b1be`; it remains systems-only and
 cannot authorize training under the amended source. An exact-commit calibration
 is required.
 
+Phase-2 gate-definition amendment (2026-08-01): before any Phase-2 training,
+generated sample, or quality metric existed, the previously qualitative
+phrases "reaches quality," "LPIPS or the temporal metric," and "same budget"
+were replaced below by executable numerical rules. The amendment also fixes
+the full 3-arm/7-checkpoint evaluation inventory, primary control/NFE cells,
+evaluator world/batch size, metric-provenance audit, target-feature identity,
+and explicit mechanism/leakage evidence. B0's freeze-assertion field is now
+correctly false because B0 has no auxiliary tensor; dual rows must be true.
+Raw generated-video hashes were added so A1's fusion-off no-op is tested
+bit-for-bit. These changes require a new exact-commit Phase-1 handoff and
+calibration; no earlier cache or result can satisfy the amended gate.
+Slurm job `486235`, run `phase1-calibration-seed1234`, completed successfully
+at source `230fdc6ca0864e15636d6b0bef7fbce51f474958` with exit status `0:0` before
+this amendment. It remains valid numerical systems evidence, but it cannot
+authorize training under the post-amendment source.
+
 Latent Forcing implementation audited: `AlanBaade/LatentForcing` commit
 `fde8fc40377eaeeea49e6043e01c999b69779a53`.
 
@@ -247,6 +263,17 @@ state, then generate video while auxiliary remains bit-identical.  Report
 solver; a higher-order solver is a new experiment and cannot silently change
 NFE accounting.
 
+Every checkpoint is evaluated as one complete immutable frontier with eight
+ranks and evaluation batch size eight. B0 uses
+`{0+1,0+2,0+4,0+8,0+12,0+20,0+25,0+50}` with only `off`; A1 and L1 use
+`{1+1,2+2,4+4,6+6,10+10,25+25}` with
+`{autonomous,off,shuffled,oracle_clean}`. The primary cells are B0 `off 0+50`,
+A1 `off 25+25`, and L1 `autonomous 25+25`. A1 is a schedule/multitask
+attribution control: because its auxiliary fusion is disabled, its 25
+auxiliary inference calls are intentionally wasted and it is not a competitive
+deployment baseline. B0 `0+50` is the practical equal-call video-only
+baseline.
+
 For every L1 checkpoint, use the identical generated auxiliary trajectory for:
 
 - `autonomous`: aligned generated auxiliary injected during video generation;
@@ -313,28 +340,65 @@ RGB MSE, PSNR, SSIM, token NMSE/cosine, losses, gradient norms, activation
 ratios, memory, throughput, and per-phase latency are secondary or mechanism
 telemetry.  Paired bootstrap intervals and raw per-clip records are saved.
 
-The one-seed L1 screen passes only if all are true:
+The gate analyzer requires every cell in the complete 3-arm by 7-checkpoint
+matrix above; a partial, duplicate, differently batched, or differently
+controlled frontier fails closed. The four primary quality metrics are
+R3D18-Frechet, frame LPIPS-Alex, temporal-difference LPIPS-Alex, and
+temporal-difference MSE. It verifies exact pinned extractor versions,
+preprocessing, and weight hashes, recomputes every Frechet value used by a gate
+from saved 890-by-512 features, and requires one bit-identical real-target
+feature matrix across all gate cells.
 
-1. **Training efficiency:** L1 reaches B0's update-20,000 primary validation
-   quality by update 16,000 or earlier and in less cumulative wall time.
-2. **Same-budget quality:** at update 20,000, L1 improves the pinned Frechet
-   metric by at least 10% versus B0 while LPIPS and temporal quality do not
-   regress by more than 1%.
-3. **Attribution:** L1 beats A1, and its `autonomous` mode beats both its own
-   `off` and `shuffled` controls.  The paired confidence interval must favor
-   autonomous for LPIPS or the temporal metric, while neither other primary
-   metric regresses by more than 1%.
-4. **Auxiliary mechanism:** the auxiliary tensor is bit-identical across
-   autonomous/off/shuffled at the phase boundary and is bit-identical while
-   the video phase runs.
+The one-seed L1 screen passes only if all five criteria are true:
+
+1. **Training efficiency:** among L1 checkpoints
+   `{500,1000,2000,5000,10000,16000}`, select the earliest whose primary
+   `autonomous 25+25` cell is no worse than B0 update 20,000 `off 0+50` on all
+   four primary metrics and whose recorded cumulative optimizer wall time is
+   strictly lower than B0 update 20,000. All three arms must expose positive,
+   finite, strictly increasing cumulative wall times at every registered
+   checkpoint.
+2. **Same-update/sample/NFE quality:** L1 update 20,000 `autonomous 25+25`
+   must improve R3D18-Frechet by at least 10% relative to B0 update 20,000
+   `off 0+50`; each of frame LPIPS, temporal-difference LPIPS, and
+   temporal-difference MSE must be at most `1.01` times B0. This matches 20,000
+   updates, 5.12 million examples, and 50 inference transformer calls. It does
+   **not** match training FLOPs: L1 trains an auxiliary prediction head, so
+   this criterion is a quality/sample-efficiency screen and never a speed
+   claim.
+3. **Attribution:** each comparison must pass separately: L1 `autonomous`
+   versus A1 `off`, L1 `autonomous` versus its own `off`, and L1 `autonomous`
+   versus its own `shuffled`, all at update 20,000 and 25+25. For each, at
+   least one of the three clip-paired metrics above must have a 10,000-resample
+   candidate-minus-reference percentile-bootstrap 95% interval with upper
+   bound strictly below zero. All three paired metric means and
+   distribution-level R3D18-Frechet must independently regress by no more than
+   1% relative to the reference; a nonpositive denominator fails.
+4. **Auxiliary mechanism:** B0 is a strict auxiliary-state no-op. In every dual
+   row, the generated phase-boundary tensor is shared bit-for-bit across
+   controls, each control is bound to its registered aligned/donor/oracle
+   tensor, and the conditioning tensor remains bit-identical after every video
+   step. The shuffled donor mapping is manifest-global and content-hashed. A1
+   raw generated video must be bit-identical across all four controls.
 5. **No inference leakage:** the explicitly documented L1 training branch may
    condition on a corrupted clean-target auxiliary, matching Latent Forcing.
-   Validation/test deployable sampling receives only history, actions, and its
-   two clip-keyed noise states and executes without a feature teacher or any
-   target-derived condition. `oracle_clean` is nondeployable and cannot satisfy
-   this gate.
+   Every deployable validation/test row must receive only history, actions,
+   and its clip-keyed video/auxiliary noise, execute with zero teacher calls,
+   and bind its video phase only to an autonomously generated aligned or donor
+   auxiliary. Clean-future conditioning is permitted only for explicitly
+   nondeployable `oracle_clean` rows and can never satisfy this gate.
 
-An "obvious advantage" is claimed only after the frozen one-seed gate passes,
+The analyzer emits schema `video-latent-forcing-poc-phase2-gate-v1`, the exact
+decision rules and cells, paired statistics, checkpoint-wall provenance,
+R3D-target digest, extractor/weight evidence, and explicit mechanism/leakage
+counts. Any nonfinite metric, nonpositive relative-comparison denominator,
+missing file/hash, source/data/noise mismatch, dirty source, or mutable output
+fails closed.
+
+The one-seed result is only a preregistered screen: its repeated
+checkpoint/metric looks use nominal paired intervals without familywise error
+control, and R3D18-Frechet has no uncertainty interval. An "obvious advantage"
+is claimed only after the frozen one-seed gate passes,
 the selected configuration is repeated with optimizer seeds
 `{1234,2234,3234}` paired respectively with evaluation-noise seeds
 `{20260801,20260802,20260803}`, and the three-seed result is confirmed once on
@@ -364,3 +428,8 @@ claims.
 Production LACWM runs and checkpoints remain immutable.  Legacy
 `dual_diffusion.enabled` remains `false`; this standalone proof uses a new,
 isolated package and artifact root.
+
+No independent action-conditioned evaluator is currently implemented.
+Therefore this proof cannot support a controllability, policy-quality,
+real-time, or DAgger claim. Those require a separately preregistered evaluator
+and measured end-to-end latency after the representation gate is confirmed.
