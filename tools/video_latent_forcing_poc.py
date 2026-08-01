@@ -112,10 +112,51 @@ FROZEN_OPTIMIZER_SEEDS = (1234, 2234, 3234)
 FROZEN_EVALUATION_SEEDS = (20260801, 20260802, 20260803)
 APPROVED_ARTIFACT_ROOTS = (Path("/lustre"), Path("/mnt/data1"), Path("/mnt/data2"))
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+DETERMINISTIC_EVALUATION_CONTRACT = {
+    "torch_deterministic_algorithms": True,
+    "cudnn_benchmark": False,
+    "cudnn_deterministic": True,
+    "cuda_matmul_allow_tf32": False,
+    "cudnn_allow_tf32": False,
+    "cublas_workspace_config": ":4096:8",
+    "nvidia_tf32_override": "0",
+    "torch_allow_tf32_cublas_override": "0",
+    "autocast": "cuda-bfloat16",
+    "r3d18_extraction_dtype": "float32",
+}
 
 
 class PocError(RuntimeError):
     """A fail-closed experiment or provenance contract was violated."""
+
+
+def configure_deterministic_evaluation_runtime() -> None:
+    """Install the exact CUDA determinism contract qualified for Phase 2."""
+    expected = DETERMINISTIC_EVALUATION_CONTRACT["cublas_workspace_config"]
+    existing = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if existing not in (None, expected):
+        raise PocError("CUBLAS_WORKSPACE_CONFIG differs from the qualified evaluator")
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = str(expected)
+    tf32_override = os.environ.get("NVIDIA_TF32_OVERRIDE")
+    if tf32_override != DETERMINISTIC_EVALUATION_CONTRACT["nvidia_tf32_override"]:
+        raise PocError(
+            "NVIDIA_TF32_OVERRIDE must be pinned before evaluator Python starts"
+        )
+    torch_tf32_override = os.environ.get("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE")
+    if (
+        torch_tf32_override
+        != DETERMINISTIC_EVALUATION_CONTRACT[
+            "torch_allow_tf32_cublas_override"
+        ]
+    ):
+        raise PocError(
+            "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE must be pinned before evaluator Python starts"
+        )
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
 
 
 def canonical_json(payload: Mapping[str, Any]) -> str:
@@ -923,6 +964,23 @@ def validate_phase1_gate_record(path: str | Path, *, expected_commit: str) -> di
     return payload
 
 
+def validate_determinism_qualification_record(
+    path: str | Path,
+    *,
+    expected_commit: str,
+) -> dict[str, Any]:
+    """Reproduce the independent two-job Phase-2 evaluator authorization."""
+    try:
+        from tools.qualify_video_latent_forcing_determinism import (
+            QualificationError,
+            load_and_validate_qualification,
+        )
+
+        return load_and_validate_qualification(path, expected_commit=expected_commit)
+    except (QualificationError, OSError, ValueError) as exc:
+        raise PocError(f"determinism qualification is invalid: {exc}") from exc
+
+
 def validate_calibration_record(
     path: str | Path,
     arm: str,
@@ -1129,6 +1187,11 @@ def resolved_training_config(
         "phase1_gate_record": (
             file_record(args.phase1_gate_record)
             if args.phase1_gate_record is not None
+            else None
+        ),
+        "determinism_qualification_record": (
+            file_record(args.determinism_qualification_record)
+            if args.determinism_qualification_record is not None
             else None
         ),
         "calibration_record": (
@@ -1434,10 +1497,21 @@ def training_command(args: argparse.Namespace) -> int:
                 gate_error: str | None = None
                 if context.is_primary:
                     try:
-                        validate_phase1_gate_record(
+                        phase1_gate = validate_phase1_gate_record(
                             args.phase1_gate_record,
                             expected_commit=source_record["commit"],
                         )
+                        qualification = validate_determinism_qualification_record(
+                            args.determinism_qualification_record,
+                            expected_commit=source_record["commit"],
+                        )
+                        if qualification.get("phase1_gate") != file_record(
+                            args.phase1_gate_record
+                        ):
+                            raise PocError(
+                                "determinism qualification is not bound to this Phase-1 gate"
+                            )
+                        del phase1_gate, qualification
                     except Exception as exc:  # broadcast one fail-closed verdict
                         gate_error = f"{type(exc).__name__}: {exc}"
                 if context.world_size > 1:
@@ -1445,7 +1519,10 @@ def training_command(args: argparse.Namespace) -> int:
                     torch_dist.broadcast_object_list(verdict, src=0)
                     gate_error = verdict[0]
                 if gate_error is not None:
-                    raise PocError(f"distributed Phase-1 gate validation failed: {gate_error}")
+                    raise PocError(
+                        "distributed Phase-1/determinism gate validation failed: "
+                        f"{gate_error}"
+                    )
         if args.resume is not None:
             existing = load_json(run_dir / "resolved_config.json", "resolved config")
             if sha256_json(existing) != config_sha256:
@@ -2339,6 +2416,32 @@ def validate_selection_record(
 
 
 def evaluation_command(args: argparse.Namespace) -> int:
+    evaluation_environment: dict[str, Any] | None = None
+    if args.arm in {"B0", "A1", "L1"}:
+        preflight_source = git_record()
+        if preflight_source.get("dirty") is not False:
+            raise PocError("evaluation preflight requires clean committed source")
+        try:
+            from tools.qualify_video_latent_forcing_determinism import (
+                QualificationError,
+                environment_record,
+                load_qualified_environment_preflight,
+            )
+
+            qualified_environment = load_qualified_environment_preflight(
+                args.determinism_qualification_record,
+                expected_commit=str(preflight_source["commit"]),
+            )
+            configure_deterministic_evaluation_runtime()
+            evaluation_environment = environment_record(
+                str(qualified_environment.get("requested_python", ""))
+            )
+            if evaluation_environment != qualified_environment:
+                raise QualificationError(
+                    "current evaluator Python/package/CUDA environment differs from qualification"
+                )
+        except (QualificationError, OSError, ValueError) as exc:
+            raise PocError(f"deterministic evaluator environment preflight failed: {exc}") from exc
     context = initialize_distributed()
     logger: LocalAndOptionalWandbLogger | None = None
     try:
@@ -2403,6 +2506,44 @@ def evaluation_command(args: argparse.Namespace) -> int:
             or training_config.get("seed") != expected_optimizer_seed
         ):
             raise PocError("checkpoint training identity differs from the frozen evaluation")
+        qualification_record = None
+        if args.arm in {"B0", "A1", "L1"}:
+            qualification_record = file_record(args.determinism_qualification_record)
+            qualification_error: str | None = None
+            if context.is_primary:
+                try:
+                    qualification = validate_determinism_qualification_record(
+                        args.determinism_qualification_record,
+                        expected_commit=source_record["commit"],
+                    )
+                    if (
+                        training_config.get("determinism_qualification_record")
+                        != qualification_record
+                    ):
+                        raise PocError(
+                            "evaluation qualification differs from the training configuration"
+                        )
+                    if qualification.get("phase1_gate") != training_config.get(
+                        "phase1_gate_record"
+                    ):
+                        raise PocError(
+                            "training and qualification use different Phase-1 gates"
+                        )
+                    if qualification.get("qualified_environment") != evaluation_environment:
+                        raise PocError(
+                            "current evaluation runtime differs from the bound qualification"
+                        )
+                except Exception as exc:  # broadcast one fail-closed verdict
+                    qualification_error = f"{type(exc).__name__}: {exc}"
+            if context.world_size > 1:
+                verdict: list[Any] = [qualification_error]
+                torch_dist.broadcast_object_list(verdict, src=0)
+                qualification_error = verdict[0]
+            if qualification_error is not None:
+                raise PocError(
+                    "distributed determinism qualification validation failed: "
+                    f"{qualification_error}"
+                )
         if payload.get("arm") != args.arm:
             raise PocError("checkpoint arm does not match requested evaluation arm")
         if payload.get("model_config") != model_config:
@@ -2485,6 +2626,13 @@ def evaluation_command(args: argparse.Namespace) -> int:
             "shuffle_mapping_sha256": derangement_sha256,
             "world_size": context.world_size,
             "eval_batch_size": args.eval_batch_size,
+            "determinism_qualification_record": qualification_record,
+            "evaluation_environment": evaluation_environment,
+            "deterministic_evaluation_contract": (
+                dict(DETERMINISTIC_EVALUATION_CONTRACT)
+                if args.arm in {"B0", "A1", "L1"}
+                else None
+            ),
             "media_clip_ids": [str(row["clip_id"]) for row in rows[: args.media_clips]],
             "media_clean_future_policy": (
                 "oracle-clean raw RGB/scratchpad/phase-boundary media are never persisted "
@@ -3043,6 +3191,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--resume")
         subparser.add_argument("--calibration-record", required=command == "train")
         subparser.add_argument("--phase1-gate-record")
+        subparser.add_argument("--determinism-qualification-record")
         subparser.add_argument("--wandb", action="store_true")
         subparser.add_argument("--wandb-entity")
         subparser.add_argument("--wandb-project")
@@ -3063,6 +3212,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--control", action="append", choices=CONTROLS)
     evaluate.add_argument("--allow-protected-test-after-selection", action="store_true")
     evaluate.add_argument("--selection-record")
+    evaluate.add_argument("--determinism-qualification-record")
     evaluate.add_argument("--quality-metrics", action="store_true")
     evaluate.add_argument("--lpips-linear-weight")
     evaluate.add_argument("--lpips-linear-sha256")
@@ -3124,8 +3274,16 @@ def validate_args(args: argparse.Namespace) -> None:
         if args.command == "train" and args.arm in {"B0", "A1", "L1"}:
             if not args.phase1_gate_record:
                 raise PocError("dual-arm training requires a passed frozen Phase-1 gate record")
+            if not args.determinism_qualification_record:
+                raise PocError(
+                    "dual-arm training requires a passed deterministic-evaluation qualification"
+                )
         elif args.phase1_gate_record is not None:
             raise PocError("a Phase-1 gate record is valid only for B0/A1/L1 full training")
+        elif args.determinism_qualification_record is not None:
+            raise PocError(
+                "a determinism qualification is valid only for B0/A1/L1 full training"
+            )
     else:
         if (
             args.workers < 0
@@ -3138,6 +3296,12 @@ def validate_args(args: argparse.Namespace) -> None:
             )
         if args.seed not in FROZEN_EVALUATION_SEEDS:
             raise PocError("evaluation seed must be one of 20260801/20260802/20260803")
+        if args.arm in {"B0", "A1", "L1"} and not args.determinism_qualification_record:
+            raise PocError(
+                "dual-arm evaluation requires a passed deterministic-evaluation qualification"
+            )
+        if args.arm == "phase1" and args.determinism_qualification_record is not None:
+            raise PocError("Phase-1 evaluation is not gated by the Phase-2 qualification")
         quality_values = (
             args.lpips_linear_weight,
             args.lpips_linear_sha256,

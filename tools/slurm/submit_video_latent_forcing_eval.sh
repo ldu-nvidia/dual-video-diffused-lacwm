@@ -8,6 +8,7 @@ PYTHON_BIN=""; ARM=""; DATA_ROOT=""; MANIFEST=""; CHECKPOINT=""
 ARTIFACT_ROOT=""; RUN_ID=""; EXPECTED_COMMIT=""
 LPIPS_LINEAR=""; LPIPS_LINEAR_SHA=""; ALEXNET=""; ALEXNET_SHA=""
 R3D18=""; R3D18_SHA=""; WANDB_ENTITY_VALUE=""; WANDB_PROJECT_VALUE=""
+DETERMINISM_QUALIFICATION_RECORD=""
 PARTITION="batch"; ACCOUNT=""; QOS=""; CONSTRAINT="B200"
 TIME_LIMIT="04:00:00"; CPUS="128"; MEMORY="900G"; EXECUTE=0
 EVALUATION_SEED="20260801"
@@ -25,6 +26,7 @@ while (($#)); do
     --lpips-linear-sha256) LPIPS_LINEAR_SHA="$2"; shift 2 ;;
     --alexnet-weight) ALEXNET="$2"; shift 2 ;; --alexnet-sha256) ALEXNET_SHA="$2"; shift 2 ;;
     --r3d18-weight) R3D18="$2"; shift 2 ;; --r3d18-sha256) R3D18_SHA="$2"; shift 2 ;;
+    --determinism-qualification-record) DETERMINISM_QUALIFICATION_RECORD="$2"; shift 2 ;;
     --wandb-entity) WANDB_ENTITY_VALUE="$2"; shift 2 ;;
     --wandb-project) WANDB_PROJECT_VALUE="$2"; shift 2 ;;
     --partition) PARTITION="$2"; shift 2 ;; --account) ACCOUNT="$2"; shift 2 ;;
@@ -32,7 +34,7 @@ while (($#)); do
     --time) TIME_LIMIT="$2"; shift 2 ;; --cpus) CPUS="$2"; shift 2 ;;
     --mem) MEMORY="$2"; shift 2 ;;
     --execute) EXECUTE=1; shift ;;
-    -h|--help) echo "usage: $0 --python PATH --arm ARM --data-root PATH --manifest PATH --checkpoint PATH --artifact-root PATH --run-id ID --expected-commit SHA --lpips-linear-weight PATH --lpips-linear-sha256 SHA --alexnet-weight PATH --alexnet-sha256 SHA --r3d18-weight PATH --r3d18-sha256 SHA [--wandb-entity E --wandb-project P] [--execute]"; exit 0 ;;
+    -h|--help) echo "usage: $0 --python PATH --arm ARM --data-root PATH --manifest PATH --checkpoint PATH --artifact-root PATH --run-id ID --expected-commit SHA --lpips-linear-weight PATH --lpips-linear-sha256 SHA --alexnet-weight PATH --alexnet-sha256 SHA --r3d18-weight PATH --r3d18-sha256 SHA [--determinism-qualification-record PATH for B0/A1/L1] [--wandb-entity E --wandb-project P] [--execute]"; exit 0 ;;
     *) die "unknown or incomplete argument: $1" ;;
   esac
 done
@@ -52,6 +54,13 @@ done
 for path in "$MANIFEST" "$CHECKPOINT" "$LPIPS_LINEAR" "$ALEXNET" "$R3D18"; do
   [[ -f "$path" && ! -L "$path" ]] || die "missing or symlinked input: $path"
 done
+if [[ "$ARM" == phase1 ]]; then
+  [[ -z "$DETERMINISM_QUALIFICATION_RECORD" ]] || die "Phase-1 evaluation does not accept the Phase-2 qualification"
+else
+  [[ "$DETERMINISM_QUALIFICATION_RECORD" == /* && -f "$DETERMINISM_QUALIFICATION_RECORD" && ! -L "$DETERMINISM_QUALIFICATION_RECORD" ]] || \
+    die "dual-arm evaluation requires an absolute, non-symlink determinism qualification"
+  DETERMINISM_QUALIFICATION_RECORD="$(readlink -f "$DETERMINISM_QUALIFICATION_RECORD")"
+fi
 DATA_ROOT="$(readlink -f "$DATA_ROOT")"
 MANIFEST="$(readlink -f "$MANIFEST")"
 CHECKPOINT="$(readlink -f "$CHECKPOINT")"
@@ -77,6 +86,8 @@ fi
 [[ "$TIME_LIMIT" =~ ^[0-9]{2}:[0-5][0-9]:[0-5][0-9]$ ]] || die "invalid --time"
 
 TOOL_ARGS=(eval --arm "$ARM" --data-root "$DATA_ROOT" --manifest "$MANIFEST" --checkpoint "$CHECKPOINT" --artifact-root "$ARTIFACT_ROOT" --run-id "$RUN_ID" --seed "$EVALUATION_SEED" --frontier --quality-metrics --lpips-linear-weight "$LPIPS_LINEAR" --lpips-linear-sha256 "$LPIPS_LINEAR_SHA" --alexnet-weight "$ALEXNET" --alexnet-sha256 "$ALEXNET_SHA" --r3d18-weight "$R3D18" --r3d18-sha256 "$R3D18_SHA")
+[[ -n "$DETERMINISM_QUALIFICATION_RECORD" ]] && \
+  TOOL_ARGS+=(--determinism-qualification-record "$DETERMINISM_QUALIFICATION_RECORD")
 if [[ -n "$WANDB_ENTITY_VALUE" ]]; then
   TOOL_ARGS+=(--wandb --wandb-entity "$WANDB_ENTITY_VALUE" --wandb-project "$WANDB_PROJECT_VALUE" --wandb-private-project-ack)
 fi

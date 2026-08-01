@@ -55,6 +55,16 @@ done
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export PYTHONUNBUFFERED=1
+if [[ "$1" == "eval" ]]; then
+  [[ "${2:-}" == "--arm" ]] || die "eval sbatch requires --arm as its first option"
+  if [[ "${3:-}" == "B0" || "${3:-}" == "A1" || "${3:-}" == "L1" ]]; then
+    export CUBLAS_WORKSPACE_CONFIG=:4096:8
+    export NVIDIA_TF32_OVERRIDE=0
+    export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
+  elif [[ "${3:-}" != "phase1" ]]; then
+    die "invalid eval arm"
+  fi
+fi
 
 cd "$REPO_ROOT"
 exec "$PYTHON_BIN" -m torch.distributed.run \

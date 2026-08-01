@@ -219,6 +219,27 @@ def test_phase2_checkpoint_walls_fail_closed_on_missing_or_nonmonotone():
         gate._validate_phase2_checkpoint_walls(nonmonotone)
 
 
+def test_phase2_checkpoint_wall_provenance_is_complete_and_embeds_metadata():
+    audits = {
+        (arm, update): {
+            "checkpoint_metadata": {"arm": arm, "completed_updates": update},
+            "checkpoint_wall_seconds": float(index + 1),
+        }
+        for arm in gate.DUAL_ARMS
+        for index, update in enumerate(gate.DUAL_CHECKPOINT_UPDATES)
+    }
+    provenance = gate._phase2_checkpoint_wall_provenance(audits)
+    assert len(provenance) == 21
+    assert provenance["L1@20000"] == {
+        "checkpoint_metadata": {"arm": "L1", "completed_updates": 20_000},
+        "cumulative_optimizer_wall_seconds": 7.0,
+    }
+    incomplete = dict(audits)
+    incomplete.pop(("B0", 500))
+    with pytest.raises(gate.GateError, match="complete 3x7"):
+        gate._phase2_checkpoint_wall_provenance(incomplete)
+
+
 def _complete_gate_cells(size: int = 2) -> dict:
     cells = {
         (arm, update, gate.PRIMARY_CONTROL[arm]): _phase2_cell(size, 10.0, 1.0)
@@ -241,6 +262,22 @@ def test_phase2_gate_cells_require_complete_inventory_and_shared_real_features()
     mismatched[("A1", 500, "off")]["real_feature_sha256"] = "c" * 64
     with pytest.raises(gate.GateError, match="bit-identical R3D target"):
         gate._validate_phase2_gate_cells(mismatched)
+
+
+def test_phase2_real_features_must_equal_qualification_matrix():
+    gate._require_qualified_real_feature_identity("a" * 64, "a" * 64)
+    with pytest.raises(gate.GateError, match="differs from deterministic qualification"):
+        gate._require_qualified_real_feature_identity("a" * 64, "b" * 64)
+
+
+def test_qualification_r3d_binding_uses_clip_id_sorted_not_manifest_digest():
+    qualification = {
+        "comparison": {
+            "r3d18_real_manifest_order_matrix_sha256": "a" * 64,
+            "r3d18_real_clip_id_sorted_matrix_sha256": "b" * 64,
+        }
+    }
+    assert gate._qualification_real_r3d_digest(qualification) == "b" * 64
 
 
 def test_phase2_matrix_index_rejects_missing_and_duplicate(monkeypatch):

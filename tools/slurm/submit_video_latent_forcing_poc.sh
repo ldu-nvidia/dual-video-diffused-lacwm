@@ -16,6 +16,7 @@ RUN_ID=""
 OPTIMIZER_SEED="1234"
 CALIBRATION_RECORD=""
 PHASE1_GATE_RECORD=""
+DETERMINISM_QUALIFICATION_RECORD=""
 RESUME=""
 MICRO_BATCH_SIZE=""
 WANDB_ENTITY_VALUE=""
@@ -56,6 +57,8 @@ Modes/options:
   --mode calibrate|train        Default: calibrate
   --calibration-record PATH     Required for train
   --phase1-gate-record PATH     Required for B0/A1/L1 train
+  --determinism-qualification-record PATH
+                                Required for B0/A1/L1 train
   --resume PATH                 Train-only checkpoint resume in the same run
   --micro-batch-size N          Per-GPU microbatch; accumulation keeps batch 256
   --seed N                      Frozen optimizer seed (default: 1234)
@@ -88,6 +91,7 @@ while (($#)); do
     --seed) [[ $# -ge 2 ]] || die "$1 requires a value"; OPTIMIZER_SEED="$2"; shift 2 ;;
     --calibration-record) [[ $# -ge 2 ]] || die "$1 requires a value"; CALIBRATION_RECORD="$2"; shift 2 ;;
     --phase1-gate-record) [[ $# -ge 2 ]] || die "$1 requires a value"; PHASE1_GATE_RECORD="$2"; shift 2 ;;
+    --determinism-qualification-record) [[ $# -ge 2 ]] || die "$1 requires a value"; DETERMINISM_QUALIFICATION_RECORD="$2"; shift 2 ;;
     --resume) [[ $# -ge 2 ]] || die "$1 requires a value"; RESUME="$2"; shift 2 ;;
     --micro-batch-size) [[ $# -ge 2 ]] || die "$1 requires a value"; MICRO_BATCH_SIZE="$2"; shift 2 ;;
     --wandb-entity) [[ $# -ge 2 ]] || die "$1 requires a value"; WANDB_ENTITY_VALUE="$2"; shift 2 ;;
@@ -140,8 +144,12 @@ fi
 if [[ "$MODE" == "train" && "$ARM" != "phase1" ]]; then
   [[ "$PHASE1_GATE_RECORD" == /* && -f "$PHASE1_GATE_RECORD" && ! -L "$PHASE1_GATE_RECORD" ]] || \
     die "dual-arm train requires an absolute, non-symlink --phase1-gate-record"
+  [[ "$DETERMINISM_QUALIFICATION_RECORD" == /* && -f "$DETERMINISM_QUALIFICATION_RECORD" && ! -L "$DETERMINISM_QUALIFICATION_RECORD" ]] || \
+    die "dual-arm train requires an absolute, non-symlink --determinism-qualification-record"
 else
   [[ -z "$PHASE1_GATE_RECORD" ]] || die "--phase1-gate-record is valid only for dual-arm train"
+  [[ -z "$DETERMINISM_QUALIFICATION_RECORD" ]] || \
+    die "--determinism-qualification-record is valid only for dual-arm train"
 fi
 if [[ -n "$RESUME" ]]; then
   [[ "$MODE" == "train" && "$RESUME" == /* && -f "$RESUME" && ! -L "$RESUME" ]] || \
@@ -173,6 +181,8 @@ TOOL_ARGS=(
 )
 [[ -n "$CALIBRATION_RECORD" ]] && TOOL_ARGS+=(--calibration-record "$CALIBRATION_RECORD")
 [[ -n "$PHASE1_GATE_RECORD" ]] && TOOL_ARGS+=(--phase1-gate-record "$PHASE1_GATE_RECORD")
+[[ -n "$DETERMINISM_QUALIFICATION_RECORD" ]] && \
+  TOOL_ARGS+=(--determinism-qualification-record "$DETERMINISM_QUALIFICATION_RECORD")
 [[ -n "$RESUME" ]] && TOOL_ARGS+=(--resume "$RESUME")
 [[ -n "$MICRO_BATCH_SIZE" ]] && TOOL_ARGS+=(--micro-batch-size "$MICRO_BATCH_SIZE")
 if [[ -n "$WANDB_ENTITY_VALUE" ]]; then

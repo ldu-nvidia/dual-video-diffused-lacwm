@@ -210,6 +210,49 @@ unpredictable appearance entropy.
 
 ### Phase 2: faithful dual-video screen
 
+Before any Phase-2 full training or evaluation, qualify exact deterministic
+evaluation in two independently scheduled jobs. This qualification is a
+pre-quality correctness gate and does not alter Phase 1. Both jobs must use the
+same clean source commit and Python environment, the same passed same-source
+Phase-1 gate, the pinned 890-clip validation manifest and R3D-18 weights, and a
+fresh, nontrivial same-source A1 200-update calibration EMA. A checkpoint whose
+raw or EMA clock-modulation, video-output-head, or auxiliary-output-head weight
+remains identically zero is rejected.
+
+Each qualification job is one exclusive node, eight B200s, eight torchrun
+ranks, and evaluation batch size eight. It runs the evaluator's exact
+determinism contract: deterministic PyTorch algorithms, deterministic cuDNN,
+cuDNN benchmarking and TF32 disabled, `CUBLAS_WORKSPACE_CONFIG=:4096:8`,
+`NVIDIA_TF32_OVERRIDE=0`, `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`, and
+CUDA bf16 autocast for sampling. It uses the production evaluation's
+pair-preserving rank/batch layout and canonical RGB clamp, extracts pinned
+R3D-18 real-target features for all 890 validation clips, and persists the
+manifest-ordered little-endian C-contiguous float32 890-by-512 matrix, its
+canonical raw-byte SHA-256, and a clip-ID-sorted digest matching the production
+quality merger. The Phase-2 analyzer binds to the latter.
+
+On every rank, the first complete eight-clip production-evaluation batch is
+also sampled through the real A1 `sample_control` path at conceptual 25+25 NFE
+under bf16 autocast. The generated auxiliary is computed once, exactly as in
+evaluation, and reused by `autonomous`, `off`, `shuffled`, and `oracle_clean`.
+Because A1 masks auxiliary fusion from the video branch, the raw generated
+video tensor must be bit-identical across all four controls at both batch and
+per-clip granularity. Thus each job probes 64 clips while exercising all eight
+GPUs. Source files, Python/package/CUDA environment, Slurm job and node, GPU
+UUIDs, manifests/provenance, gate/checkpoint/config/completion/weight files,
+every target/probe input, the R3D matrix, per-clip and batch phase boundaries,
+and generated outputs are content-hashed.
+
+Finalize only two passed job records with distinct Slurm job IDs **and disjoint
+node sets**. Environment, inputs, the full real-feature matrix digest, and all
+probe outputs must match exactly. The immutable final qualification binds both
+job records and the Phase-1 gate. Full B0/A1/L1 training requires this record,
+stores it in every resolved training configuration, and evaluation must use the
+identical record under the qualified runtime. The Phase-2 analyzer reproduces
+the qualification and fails closed on a missing, changed, or unrelated record.
+Qualification authorizes execution only; it is not evidence of model quality,
+speed, controllability, or a Latent Forcing advantage.
+
 The first seed contains these parameter-matched arms:
 
 | Arm | Training intervention | Deployable inference |

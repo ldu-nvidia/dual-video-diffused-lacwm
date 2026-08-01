@@ -56,6 +56,18 @@ BOOTSTRAP_CONFIDENCE = 0.95
 BOOTSTRAP_BASE_SEED = 20260801
 EMA_SCHEDULE = "min(target_decay,(1+completed_updates)/(10+completed_updates))-v1"
 INITIALIZATION_SCHEME = "latent-forcing-zero-adaln-and-output-heads-v1"
+DETERMINISTIC_EVALUATION_CONTRACT = {
+    "torch_deterministic_algorithms": True,
+    "cudnn_benchmark": False,
+    "cudnn_deterministic": True,
+    "cuda_matmul_allow_tf32": False,
+    "cudnn_allow_tf32": False,
+    "cublas_workspace_config": ":4096:8",
+    "nvidia_tf32_override": "0",
+    "torch_allow_tf32_cublas_override": "0",
+    "autocast": "cuda-bfloat16",
+    "r3d18_extraction_dtype": "float32",
+}
 APPROVED_ROOTS = (Path("/lustre"), Path("/mnt/data1"), Path("/mnt/data2"))
 ELIGIBLE_INVENTORY_SHA256 = (
     "3bc6f2c06abe74f1a60ddc4f9a44ce734fb8fa85f9ec94ac99e7bcc954993651"
@@ -63,6 +75,7 @@ ELIGIBLE_INVENTORY_SHA256 = (
 VALIDATION_EPISODE_IDS_SHA256 = (
     "58f1a863a7be8f273212030c902c568b32ed75df5aa79993a8aa5c1a7a0252e6"
 )
+_ACTIVE_QUALIFICATION_CACHE: dict[tuple[str, str, str], dict[str, Any]] | None = None
 
 
 class GateError(RuntimeError):
@@ -680,6 +693,34 @@ def _validate_phase2_checkpoint_walls(
             raise GateError(f"{arm} checkpoint cumulative wall time is not strictly increasing")
 
 
+def _phase2_checkpoint_wall_provenance(
+    audits: Mapping[tuple[str, int], Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Materialize the complete 3x7 checkpoint metadata/wall evidence table."""
+    expected = {
+        (arm, update) for arm in DUAL_ARMS for update in DUAL_CHECKPOINT_UPDATES
+    }
+    if set(audits) != expected:
+        raise GateError("checkpoint-wall provenance requires the complete 3x7 matrix")
+    result: dict[str, dict[str, Any]] = {}
+    for arm, update in sorted(expected):
+        metadata = audits[(arm, update)].get("checkpoint_metadata")
+        wall = audits[(arm, update)].get("checkpoint_wall_seconds")
+        if (
+            not isinstance(metadata, Mapping)
+            or isinstance(wall, bool)
+            or not isinstance(wall, (int, float))
+            or not math.isfinite(wall)
+            or wall <= 0
+        ):
+            raise GateError("checkpoint-wall provenance is missing metadata or wall time")
+        result[f"{arm}@{update}"] = {
+            "checkpoint_metadata": dict(metadata),
+            "cumulative_optimizer_wall_seconds": float(wall),
+        }
+    return result
+
+
 def analyze_phase1_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
     """Recompute the complete Phase-1 decision from immutable raw evidence."""
     root = Path(evaluation_root).expanduser().resolve()
@@ -1230,6 +1271,7 @@ def _validate_phase2_training_config(
     }
     model = training_config.get("model")
     ema = training_config.get("ema")
+    qualification = training_config.get("determinism_qualification_record")
     if (
         training_config.get("schema") != RUN_SCHEMA
         or training_config.get("command") != "train"
@@ -1255,6 +1297,7 @@ def _validate_phase2_training_config(
         or ema.get("schedule") != EMA_SCHEDULE
         or ema.get("reported_samples_use") is not True
         or ema.get("short_run_initialization_bias_corrected") is not True
+        or not isinstance(qualification, Mapping)
     ):
         raise GateError(f"{arm} training configuration violates the frozen Phase-2 contract")
     accumulation = training_config.get("gradient_accumulation_steps")
@@ -1322,6 +1365,18 @@ def _phase2_feature_inventory(
     if set(indexed) != expected_keys:
         raise GateError("Phase-2 quality feature inventory is incomplete")
     return indexed
+
+
+def _qualification_real_r3d_digest(qualification: Mapping[str, Any]) -> str:
+    comparison = qualification.get("comparison")
+    digest = (
+        comparison.get("r3d18_real_clip_id_sorted_matrix_sha256")
+        if isinstance(comparison, Mapping)
+        else None
+    )
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise GateError("qualification lacks its clip-ID-sorted real R3D digest")
+    return digest
 
 
 def _validate_pinned_quality_weight(
@@ -1675,6 +1730,8 @@ def _audit_phase2_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
         or summary.get("ema_updates") != update
         or summary.get("quality_metric_suite_complete") is not True
         or summary.get("quality_metric_provenance") != quality.get("provenance")
+        or config.get("deterministic_evaluation_contract")
+        != DETERMINISTIC_EVALUATION_CONTRACT
     ):
         raise GateError(f"{arm} update-{update} evaluation violates its frozen frontier")
     quality_audit = _validate_quality_provenance(quality["provenance"])
@@ -1687,6 +1744,46 @@ def _audit_phase2_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
     )
     training_config = load_json(training_config_record["path"], "Phase-2 training config")
     _validate_phase2_training_config(training_config, arm=arm, source=source)
+    qualification_record = _verify_file_record(
+        config.get("determinism_qualification_record"),
+        "determinism qualification",
+    )
+    if qualification_record != _verify_file_record(
+        training_config.get("determinism_qualification_record"),
+        "training determinism qualification",
+    ):
+        raise GateError("Phase-2 evaluation and training bind different qualifications")
+    try:
+        from tools.qualify_video_latent_forcing_determinism import (
+            QualificationError,
+            load_and_validate_qualification,
+        )
+
+        cache_key = (
+            qualification_record["path"],
+            qualification_record["sha256"],
+            str(source.get("commit")),
+        )
+        qualification = (
+            _ACTIVE_QUALIFICATION_CACHE.get(cache_key)
+            if _ACTIVE_QUALIFICATION_CACHE is not None
+            else None
+        )
+        if qualification is None:
+            qualification = load_and_validate_qualification(
+                qualification_record["path"], expected_commit=str(source.get("commit"))
+            )
+            if _ACTIVE_QUALIFICATION_CACHE is not None:
+                _ACTIVE_QUALIFICATION_CACHE[cache_key] = qualification
+    except (QualificationError, OSError, ValueError) as exc:
+        raise GateError(f"Phase-2 determinism qualification is invalid: {exc}") from exc
+    if config.get("evaluation_environment") != qualification.get(
+        "qualified_environment"
+    ):
+        raise GateError("Phase-2 evaluation runtime differs from its qualification")
+    qualification_real_feature_sha256 = _qualification_real_r3d_digest(
+        qualification
+    )
     checkpoint_metadata, checkpoint_wall = _load_checkpoint_metadata(
         checkpoint_record,
         arm=arm,
@@ -1730,6 +1827,8 @@ def _audit_phase2_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
         or phase1.get("source_commit") != source.get("commit")
     ):
         raise GateError("Phase-2 training lacks a passed same-source Phase-1 handoff")
+    if qualification.get("phase1_gate") != phase1_record:
+        raise GateError("Phase-2 qualification and training bind different Phase-1 gates")
     _verify_file_record(training_config.get("calibration_record"), f"{arm} calibration")
 
     if _verify_file_record(summary.get("per_clip_metrics"), "Phase-2 per-clip metrics") != top_records[
@@ -2029,6 +2128,7 @@ def _audit_phase2_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
         "manifest": manifest_record,
         "data_provenance": provenance_record,
         "quality_weights": quality_audit["weights"],
+        "determinism_qualification": qualification_record,
         "quality_features": {str(key): value for key, value in sorted(feature_records.items())},
     }
     return {
@@ -2042,6 +2142,8 @@ def _audit_phase2_evaluation(evaluation_root: str | Path) -> dict[str, Any]:
         "checkpoint_record": checkpoint_record,
         "checkpoint_metadata": checkpoint_metadata,
         "checkpoint_wall_seconds": checkpoint_wall,
+        "determinism_qualification_record": qualification_record,
+        "qualification_real_feature_sha256": qualification_real_feature_sha256,
         "manifest_record": manifest_record,
         "quality_provenance_sha256": quality_audit[
             "serialized_provenance_sha256"
@@ -2171,6 +2273,20 @@ def _validate_phase2_gate_cells(
     return digest
 
 
+def _require_qualified_real_feature_identity(
+    gate_digest: str,
+    qualification_digest: str,
+) -> None:
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", gate_digest)
+        or not re.fullmatch(r"[0-9a-f]{64}", qualification_digest)
+        or gate_digest != qualification_digest
+    ):
+        raise GateError(
+            "Phase-2 real R3D target matrix differs from deterministic qualification"
+        )
+
+
 def _require_identical_phase2_inputs(
     reference: Mapping[str, Any],
     candidate: Mapping[str, Any],
@@ -2206,12 +2322,19 @@ def _index_phase2_audits(
     if len(evaluation_roots) != len(expected):
         raise GateError(f"Phase-2 gate requires exactly {len(expected)} evaluation roots")
     audits: dict[tuple[str, int], dict[str, Any]] = {}
-    for root in evaluation_roots:
-        audit = _audit_phase2_evaluation(root)
-        key = (audit["arm"], audit["update"])
-        if key in audits:
-            raise GateError(f"duplicate Phase-2 evaluation root for {key[0]}@{key[1]}")
-        audits[key] = audit
+    global _ACTIVE_QUALIFICATION_CACHE
+    if _ACTIVE_QUALIFICATION_CACHE is not None:
+        raise GateError("nested Phase-2 qualification audit is not supported")
+    _ACTIVE_QUALIFICATION_CACHE = {}
+    try:
+        for root in evaluation_roots:
+            audit = _audit_phase2_evaluation(root)
+            key = (audit["arm"], audit["update"])
+            if key in audits:
+                raise GateError(f"duplicate Phase-2 evaluation root for {key[0]}@{key[1]}")
+            audits[key] = audit
+    finally:
+        _ACTIVE_QUALIFICATION_CACHE = None
     if set(audits) != expected:
         raise GateError("Phase-2 evaluation roots do not form the frozen 3-arm/7-checkpoint matrix")
     return audits
@@ -2227,6 +2350,10 @@ def analyze_phase2_evaluations(evaluation_roots: Sequence[str | Path]) -> dict[s
     clip_ids = canonical["clip_ids"]
     quality_provenance = canonical["quality_provenance_sha256"]
     donor_digest = canonical["donor_mapping_sha256"]
+    qualification_record = canonical["determinism_qualification_record"]
+    qualification_real_feature_sha256 = canonical[
+        "qualification_real_feature_sha256"
+    ]
     video_inputs = {
         clip_id: {
             key: value
@@ -2247,6 +2374,9 @@ def analyze_phase2_evaluations(evaluation_roots: Sequence[str | Path]) -> dict[s
             or audit["clip_ids"] != clip_ids
             or audit["quality_provenance_sha256"] != quality_provenance
             or audit["donor_mapping_sha256"] != donor_digest
+            or audit["determinism_qualification_record"] != qualification_record
+            or audit["qualification_real_feature_sha256"]
+            != qualification_real_feature_sha256
         ):
             raise GateError("Phase-2 matrix changed source/data/metric/control identity")
         current_video_inputs = {
@@ -2285,6 +2415,7 @@ def analyze_phase2_evaluations(evaluation_roots: Sequence[str | Path]) -> dict[s
         cells.update(audit["cells"])
 
     _validate_phase2_checkpoint_walls(checkpoint_walls)
+    checkpoint_wall_provenance = _phase2_checkpoint_wall_provenance(audits)
     common_config_keys = (
         "source",
         "clock_convention",
@@ -2315,6 +2446,9 @@ def analyze_phase2_evaluations(evaluation_roots: Sequence[str | Path]) -> dict[s
             raise GateError("Phase-2 arms are not architecture/parameter matched")
 
     real_feature_sha256 = _validate_phase2_gate_cells(cells)
+    _require_qualified_real_feature_identity(
+        real_feature_sha256, qualification_real_feature_sha256
+    )
     decision = phase2_gate_decision(cells, checkpoint_walls)
     structural_criteria = _phase2_structural_criteria(audits)
     decision["criteria"].update(structural_criteria)
@@ -2325,6 +2459,7 @@ def analyze_phase2_evaluations(evaluation_roots: Sequence[str | Path]) -> dict[s
         f"{arm}@{update}": {
             "root": audit["root"],
             "checkpoint": audit["checkpoint_record"],
+            **checkpoint_wall_provenance[f"{arm}@{update}"],
             "training_config": audit["training_config_record"],
             "records": audit["evidence_records"],
         }
@@ -2366,6 +2501,8 @@ def analyze_phase2_evaluations(evaluation_roots: Sequence[str | Path]) -> dict[s
             "shuffle_mapping_sha256": donor_digest,
             "quality_provenance_sha256": quality_provenance,
             "r3d18_real_target_features_sha256": real_feature_sha256,
+            "determinism_qualification": qualification_record,
+            "checkpoint_wall_provenance": checkpoint_wall_provenance,
         },
         "bootstrap": {
             "method": "paired clip-level percentile",
@@ -2407,6 +2544,19 @@ def analyze_phase2_evaluations(evaluation_roots: Sequence[str | Path]) -> dict[s
             elif isinstance(record, Mapping):
                 for child in record.values():
                     _verify_file_record(child, "Phase-2 feature evidence recheck")
+    try:
+        from tools.qualify_video_latent_forcing_determinism import (
+            QualificationError,
+            load_and_validate_qualification,
+        )
+
+        load_and_validate_qualification(
+            qualification_record["path"], expected_commit=str(source["commit"])
+        )
+    except (QualificationError, OSError, ValueError) as exc:
+        raise GateError(
+            f"determinism qualification changed during Phase-2 analysis: {exc}"
+        ) from exc
     if file_record(PROTOCOL_PATH) != payload["protocol"]:
         raise GateError("protocol changed while Phase-2 evidence was analyzed")
     _validate_source_binding(source)
