@@ -112,6 +112,43 @@ def test_injectable_r3d_feature_extractor_contract():
     assert torch.all(features[1] == 0.25)
 
 
+def test_pinned_r3d_preset_receives_contiguous_prepermuted_video():
+    from torchvision.models.video import R3D_18_Weights
+
+    class ContiguityCheckingPreset:
+        def __init__(self):
+            self.delegate = R3D_18_Weights.KINETICS400_V1.transforms()
+            self.seen_shape = None
+
+        def __call__(self, value):
+            self.seen_shape = tuple(value.shape)
+            assert value.is_contiguous()
+            return self.delegate(value)
+
+    class ShapeOnlyR3D(torch.nn.Module):
+        def forward(self, value):
+            return value.new_zeros((value.shape[0], R3D18_FEATURE_DIM))
+
+    # A strided spatial view is a genuine non-contiguous [B,C,T,H,W] input.
+    # Before the regression fix, the subsequent B,T,C,H,W permutation reached
+    # torchvision's view-based preset non-contiguously and raised at runtime.
+    storage = torch.zeros(2, 3, 8, 64, 224)
+    storage[..., ::2] = 0.25
+    video = storage[..., ::2]
+    assert video.shape == (2, 3, 8, 64, 112)
+    assert not video.is_contiguous()
+
+    extractor = FrozenR3D18AvgPool.__new__(FrozenR3D18AvgPool)
+    torch.nn.Module.__init__(extractor)
+    extractor.device = torch.device("cpu")
+    extractor.transform = ContiguityCheckingPreset()
+    extractor.model = ShapeOnlyR3D()
+
+    features = extractor(video)
+    assert extractor.transform.seen_shape == (2, 8, 3, 64, 112)
+    assert features.shape == (2, R3D18_FEATURE_DIM)
+
+
 def test_r3d18_frechet_is_float64_stable_and_has_frozen_label():
     real = np.array([[0.0], [2.0]], dtype=np.float32)
     generated = np.array([[1.0], [3.0]], dtype=np.float32)

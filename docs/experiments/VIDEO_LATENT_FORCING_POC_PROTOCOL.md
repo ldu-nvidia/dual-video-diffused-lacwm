@@ -32,6 +32,22 @@ at source `230fdc6ca0864e15636d6b0bef7fbce51f474958` with exit status `0:0` befo
 this amendment. It remains valid numerical systems evidence, but it cannot
 authorize training under the post-amendment source.
 
+Pre-quality R3D preprocessing correction (2026-08-01): exact-source Slurm job
+`486355` at commit `dddd9f382c435531883380abb13d3ab628da152a`
+completed the 200-update calibration and 5,000-update Phase-1 training without
+nonfinite updates, then failed on the first validation batch before sampling,
+per-clip metrics, a summary, or a gate existed.  The pinned torchvision video
+preset uses `view` internally, but the required `[B,C,T,H,W]` to
+`[B,T,C,H,W]` permutation was passed to it as a non-contiguous tensor.  The
+evaluator now materializes that layout with `contiguous()` before invoking the
+unchanged pinned preset, with a regression test exercising a genuinely
+strided input.  Because cache, calibration, checkpoint, evaluator, and analyzer
+source identities are intentionally one exact-commit contract, the completed
+`dddd9f3` checkpoint remains systems evidence only.  A fresh cache,
+calibration, 5,000-update training run, evaluation, and gate are required from
+the corrected clean commit.  No quality threshold or scientific decision rule
+was changed after the failed run.
+
 Latent Forcing implementation audited: `AlanBaade/LatentForcing` commit
 `fde8fc40377eaeeea49e6043e01c999b69779a53`.
 

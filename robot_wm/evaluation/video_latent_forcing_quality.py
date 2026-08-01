@@ -491,7 +491,12 @@ class FrozenR3D18AvgPool(nn.Module):
     def forward(self, video: Tensor) -> Tensor:
         _validate_video(video, name="video")
         video = video.to(dtype=torch.float32)
-        preset_input = video.add(1.0).mul(0.5).permute(0, 2, 1, 3, 4)
+        # torchvision's pinned VideoClassification preset flattens leading
+        # dimensions with ``view``.  The required B,T,C,H,W permutation is
+        # generally strided, so materialize it before crossing that boundary.
+        preset_input = (
+            video.add(1.0).mul(0.5).permute(0, 2, 1, 3, 4).contiguous()
+        )
         transformed = self.transform(preset_input).to(self.device)
         with torch.inference_mode():
             features = self.model(transformed)
