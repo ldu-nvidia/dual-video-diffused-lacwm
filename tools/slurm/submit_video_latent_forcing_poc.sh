@@ -24,7 +24,7 @@ EXPECTED_COMMIT=""
 PARTITION="batch"
 ACCOUNT=""
 QOS=""
-CONSTRAINT="b200"
+CONSTRAINT="B200"
 TIME_LIMIT="04:00:00"
 CPUS="128"
 MEMORY="900G"
@@ -67,7 +67,7 @@ Submission:
   --partition NAME              Default: batch
   --account NAME
   --qos NAME
-  --constraint NAME             Default: b200
+  --constraint NAME             Default: B200
   --time HH:MM:SS               Default: 04:00:00
   --cpus N                      Default: 128
   --mem VALUE                   Default: 900G

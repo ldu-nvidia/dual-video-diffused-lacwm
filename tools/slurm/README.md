@@ -54,7 +54,7 @@ Slurm installed.
 
 ```bash
 tools/slurm/submit_8xb200.sh \
-  --partition b200 --account MY_ACCOUNT --qos normal --constraint b200 \
+  --partition batch --account MY_ACCOUNT --qos normal --constraint B200 \
   --nodes 2 --master-port 29400 \
   --time 24:00:00 --cpus 160 --mem 1000G --signal-seconds 1200 \
   --max-requeues 12 \

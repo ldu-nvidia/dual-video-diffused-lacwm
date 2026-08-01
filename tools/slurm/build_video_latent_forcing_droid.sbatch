@@ -7,7 +7,7 @@
 #SBATCH --mem=900G
 #SBATCH --time=04:00:00
 #SBATCH --partition=batch
-#SBATCH --constraint=b200
+#SBATCH --constraint=B200
 #SBATCH --exclusive
 #SBATCH --no-requeue
 #SBATCH --open-mode=append
