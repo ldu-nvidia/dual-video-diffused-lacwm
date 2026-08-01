@@ -1,0 +1,340 @@
+# Video Latent Forcing Proof-of-Principle Protocol
+
+Date preregistered: 2026-08-01
+
+Status: frozen before any new quality result is inspected
+
+Latent Forcing implementation audited: `AlanBaade/LatentForcing` commit
+`fde8fc40377eaeeea49e6043e01c999b69779a53`.
+
+## Research question
+
+Can a future-video scratchpad that is generated autonomously from robot history
+and actions make a from-scratch video flow model learn faster, generate better
+video, or reach the same quality with fewer total network evaluations?
+
+The first candidate is deliberately simple: a low-resolution RGB future.  It
+tests the Latent Forcing mechanism without a pretrained video generator, VAE,
+or semantic teacher.  V-JEPA 2 and DINOv2 are later representation arms, not
+assumptions built into the first proof.
+
+The deployable path never receives clean future RGB, clean future scratchpads,
+or features extracted from clean future RGB.  Such inputs are labelled
+`oracle_clean` and are mechanism diagnostics only.
+
+## Clock and flow convention
+
+This standalone experiment uses the original Latent Forcing **clean-time**
+clock, not LACWM's native sigma clock:
+
+\[
+z(t)=t x + (1-t)\epsilon,\qquad v^*=x-\epsilon,
+\]
+
+where `t=0` is Gaussian noise and `t=1` is clean data.  Forward Euler therefore
+updates `z <- z + (t_next - t) * v`.  LACWM elsewhere in this repository uses
+`sigma=1` for noise, `sigma=0` for clean data, and the opposite velocity sign;
+the two conventions must not be mixed.
+
+## Frozen data contract
+
+- Source: the locally complete portion of LeRobot DROID under the pinned input
+  root recorded in each run's provenance.
+- Camera: `exterior_image_1_left` only.  No artificial multiview concatenation
+  and no transform across a camera boundary are allowed.
+- Locally eligible population: the 9,780 episodes with at least 66 RGB/action
+  frames observed in the 2026-08-01 read-only audit.
+- The canonical JSON map from eligible episode ID to parquet row count has
+  SHA-256 `3bc6f2c06abe74f1a60ddc4f9a44ce734fb8fa85f9ec94ac99e7bcc954993651`.
+  The ordered train/validation/test episode-ID lists have SHA-256 values
+  `cea3449f2a7cf3e9251b1fb1859f4fd8c3717a4ce29a344f2f48c65452e3ac12`,
+  `58f1a863a7be8f273212030c902c568b32ed75df5aa79993a8aa5c1a7a0252e6`,
+  and `aa36a731cde260ddb94875a0678435b339be18ebeaa4584b507cdbaeac71ba11`.
+- Split: sort eligible episode IDs by
+  `sha256("video-latent-forcing-poc-v1:<episode_id>")`; allocate the first
+  8,000 to train, the next 890 to validation, and the final 890 to protected
+  test.
+- The protected manifest may contain episode IDs, lengths, and hashes.  Its
+  video payload must not be decoded or scored until a validation-selected
+  configuration and NFE are frozen.
+- Clip: 5 history frames followed by 8 future frames, sampled at temporal
+  stride 2 from the native 15 fps stream.  The selected 13-frame span covers
+  24 native intervals, about 1.6 seconds.
+- RGB is resized without cropping to `64 x 112`, quantized once to canonical
+  uint8 values, scaled to `[-1,1]`, and stored
+  as history `[3,5,64,112]` and future `[3,8,64,112]`.
+- Conditioning actions are the 16 native 7-D DROID commands covering every
+  transition from the final history frame to the final future frame.  Two
+  commands occur between adjacent selected future frames because RGB stride is
+  2.  The exact native indices are saved per sample.
+- Clip starts use deterministic seed 20260801.  Training uses up to eight
+  distinct starts per train episode (about 64,000 clips); validation and the
+  protected manifest use one start per episode for paired comparisons.
+
+All generated manifests and caches are immutable, content-hashed, and written
+outside the Git repository on approved `/lustre`, `/mnt/data1`, or `/mnt/data2`
+storage.  Run artifacts record source manifest hash, Git commit, environment,
+command, seed, and Slurm identity. Data provenance additionally records the
+clean builder Git commit and builder-tool SHA-256; training rejects a cache
+built by a different source revision.
+
+## Low-resolution RGB scratchpad
+
+For each clean future clip `x`:
+
+1. area-resize each frame from `64 x 112` to `32 x 56`;
+2. split it into non-overlapping `1 x 4 x 4` spatiotemporal patches;
+3. flatten each RGB patch into 48 scalars.
+
+The resulting clean auxiliary state is
+
+\[
+s \in \mathbb{R}^{48\times8\times8\times14}.
+\]
+
+This mapping is deterministic and exactly invertible back to the `32 x 56`
+low-resolution clip after resizing.  It is a coarse future video, not a
+semantic representation.  That is useful for the first test: if this easiest,
+visually aligned scratchpad cannot help autonomously, a harder transformed
+feature should not be promoted based on oracle conditioning.
+
+## Model frozen for the primary comparison
+
+- Future RGB patches: `(1,8,8)`, producing `8 x 8 x 14 = 896` video tokens.
+- Auxiliary tokens: the aligned `48 x 8 x 8 x 14` scratchpad grid.
+- Width 512, depth 12, 8 attention heads, MLP ratio 4.
+- The resolved implementation has 41,963,760 parameters in both dual and
+  parameter-matched video-only modes.
+- Learned video and auxiliary input projections are added symmetrically with
+  no learned near-zero gate.
+- Both clean-time clocks enter every transformer block through adaptive layer
+  normalization.
+- History RGB and the aligned 16 future-transition action commands are explicit
+  conditions.
+- One shared transformer trunk and separate video and scratchpad clean-state
+  (`x`) heads.  Each prediction is converted to velocity as
+  `(x_pred-z)/max(1-t,0.05)` for the velocity-equivalent loss and Euler sampler,
+  matching the released Latent Forcing `t_eps=t_eps_inference=0.05`
+  parameterization.
+- The video-only baseline instantiates the same parameter schema; auxiliary
+  parameters stay present but are strict runtime no-ops.  Parameter counts and
+  executed-call accounting are reported.
+
+The model is trained from scratch.  It does not load Wan, a VAE, V-JEPA,
+DINOv2, or any previous LACWM checkpoint.
+
+## Phases and arms
+
+### Phase 0: implementation and numerical calibration
+
+Run CPU tests and then exactly 200 optimizer updates per arm.  Calibration may
+fix only numerical or systems defects: nonfinite values, shape/sign/mask
+errors, out-of-memory, dataloader failure, or an obviously unusable loss-scale
+ratio measured without comparing generated quality.  Any changed constant is
+recorded and the 200-update calibration restarts for every arm.
+
+### Phase 1: autonomous scratchpad screen
+
+Train the scratchpad path for 5,000 updates with seed 1234.  Save checkpoints
+at updates 500, 1,000, 2,000, and 5,000 and evaluate exact total NFE
+`{1,2,4,8,12,20,25}` from fixed per-clip Gaussian noise.  It uses the same
+global batch, optimizer, warmup, clipping, bf16, and EMA contract frozen below.
+
+The screen passes only if, at NFE at most 12:
+
+1. autonomous scratchpad NMSE is at most 0.50 and the clip mean of aligned
+   48-D token cosines is at least 0.70;
+2. decoding the generated scratchpad beats both zero and cross-clip shuffled
+   scratchpads by at least 5% on LPIPS and temporal-difference MSE, with paired
+   bootstrap 95% confidence intervals favoring the generated input;
+3. at least 50% of the clean-scratchpad utility over zero is retained on both
+   metrics; and
+4. shuffled history/actions measurably degrade sample-aligned scratchpad
+   generation, preventing an unconditional low-resolution-video model from
+   satisfying the gate.
+
+The formal gate uses only the update-5,000 EMA checkpoint and selects the
+smallest passing NFE in `{1,2,4,8,12}`. For a lower-is-better metric, relative
+improvement of generated `G` over reference `R` is
+`(mean(R)-mean(G))/mean(R)`. Each required 5% comparison must also have a
+strictly positive paired-bootstrap 95% confidence-interval lower bound.
+Bootstrap uses 10,000 clip-level resamples, base seed 20260801, and a
+per-statistic seed derived from `sha256(base_seed + NUL + statistic_label)`.
+“Measurably degrade” requires both a positive CI lower bound for autonomous
+versus `context_shuffled` auxiliary-NMSE relative improvement and a positive
+CI lower bound for the paired autonomous-minus-context-shuffled cosine
+advantage. Retained utility is
+`(mean(off)-mean(G))/(mean(off)-mean(oracle_clean))`; a nonpositive denominator
+fails the gate rather than being silently divided.
+
+If this gate fails, the dual-video run stops.  Oracle-clean evidence cannot
+override the stop.
+
+### Phase 2: faithful dual-video screen
+
+The first seed contains these parameter-matched arms:
+
+| Arm | Training intervention | Deployable inference |
+|---|---|---|
+| `B0` | video loss only; auxiliary path is a strict no-op | video from noise |
+| `A1` | Latent Forcing branch clocks/losses; auxiliary tokens enter only while predicting the auxiliary state | auxiliary first, then video with auxiliary fusion off |
+| `L1` | same branch clocks/losses as A1; symmetric auxiliary fusion on | generated auxiliary first, frozen during video phase |
+
+For A1 and L1, draw `b ~ Bernoulli(0.4)` per example.
+
+- Scratchpad branch (`b=1`): set video clean-time to exactly 0, draw
+  `t_aux = sigmoid(N(-1.2, 1.0))`, and apply only auxiliary velocity loss.
+- Video branch (`b=0`): draw video time from
+  `sigmoid(N(-0.4, 0.8))`, replacing 10% of draws with `Uniform(0,0.5)`;
+  draw `t_aux ~ Uniform(0.75,1.0)` and apply only video velocity loss.
+- As in Latent Forcing, L1's **training** video branch fuses the corrupted
+  auxiliary `z_aux=t_aux*s+(1-t_aux)*epsilon`; it is therefore teacher-forced
+  from the clean auxiliary target during training. A1 masks this fusion off.
+  This is distinct from deployable inference, which must first generate the
+  auxiliary from history, actions, and noise and never receives `s`.
+- The nominal auxiliary coefficient is 0.333.  Loss masks are normalized over
+  the unchanged global batch, matching the released Latent Forcing recipe.
+
+The video-clock mean above was corrected from the library default `-0.8` to
+the released Latent Forcing training command's explicit `--P_mean -0.4`
+during the pre-run source audit. No model-quality output had been generated or
+inspected when this preregistration correction was made.
+
+A1 enables the auxiliary projection for its scratchpad-branch examples—without
+that input the shared trunk could not denoise the scratchpad—but disables it
+for every video-branch example.  L1 enables it in both branches.  This is
+implemented with a per-example fusion mask in one parameter- and call-matched
+forward pass.
+
+Train each arm for 20,000 optimizer updates after calibration, with global
+batch 256 (32 per B200 on eight GPUs), bf16, and seed 1234.  Optimization is
+AdamW with betas `(0.9,0.95)`, weight decay 0, learning rate `5e-5`, 500-update
+linear warmup followed by a constant rate, and global gradient-norm clipping
+at 1.0.  Track EMA decay 0.9999 and use that EMA for every reported sample;
+raw-weight diagnostics are labelled separately.  If the identical 200-update
+systems calibration proves batch 256 infeasible, use gradient accumulation to
+preserve global batch 256 rather than changing the optimizer contract.  Evaluate
+updates `{500,1000,2000,5000,10000,16000,20000}`; the explicit 16,000
+endpoint makes the preregistered training-efficiency gate directly observable.
+
+Primary inference is a strict 25+25 cascade: generate the auxiliary state from
+noise while video remains exactly noise, freeze the final generated auxiliary
+state, then generate video while auxiliary remains bit-identical.  Report
+**actual transformer calls**, not solver step labels.  Euler is the initial
+solver; a higher-order solver is a new experiment and cannot silently change
+NFE accounting.
+
+For every L1 checkpoint, use the identical generated auxiliary trajectory for:
+
+- `autonomous`: aligned generated auxiliary injected during video generation;
+- `off`: auxiliary injection disabled only during the video phase;
+- `shuffled`: final generated auxiliary swapped by a manifest-global,
+  content-hashed adjacent-pair derangement only during the video phase;
+- `oracle_clean`: clean future auxiliary, clearly separated as a nondeployable
+  ceiling diagnostic.
+
+### Phase 3: representation extension
+
+Only after L1 passes, repeat the scratchpad screen with temporally aligned,
+train-statistics-only normalized features:
+
+- per-frame DINOv2, if the local checkpoint is content-hashed and its license
+  and preprocessing are pinned; and
+- causal V-JEPA 2, where deployable features are predicted from history and
+  actions and never extracted from clean future frames at inference.
+
+These arms use the same token grid, parameter budget, training examples, noise,
+NFE grid, and gates as low-resolution RGB.  Legacy V-JEPA features spanning
+history and future in one tubelet are not a temporally aligned primary arm.
+
+### Phase 4: acceleration
+
+Distillation, consistency training, or solver tuning is prohibited until a
+generated-only representation passes the quality and attribution gates.  The
+selected dual checkpoint is then compared with the fresh B0 quality/NFE
+frontier.  A speed claim requires equivalent quality with at least 20% lower
+p95 end-to-end latency, including scratchpad generation.
+
+## Metrics and claim gates
+
+All comparisons use fixed clip IDs and initial noise.  Report curves versus
+optimizer update, wall time, actual total NFE, and measured latency.
+
+Primary quality metrics are:
+
+- a pinned, non-candidate video feature Frechet distance;
+- frame LPIPS;
+- temporal-difference LPIPS/MSE; and
+- action-conditioned trajectory consistency when an independent evaluator is
+  available.
+
+The non-candidate R3D-18 Kinetics-400 V1 weight is the official torchvision
+file with SHA-256
+`b3b3357ead25631ec9c57362ff2128a92d0427e01e2cd184951a44380c3f2e9d`.
+
+Generated RGB is deterministically clamped to `[-1,1]` before LPIPS,
+R3D18-Frechet, and saved media, matching the valid image domain.  The fraction
+of clamped values is reported and raw, unclamped RGB MSE remains secondary.
+Phase-1 `32 x 56` scratchpad videos are bilinearly upsampled to `64 x 112`
+before the same frozen perceptual extractors are applied.
+
+Raw `oracle_clean` RGB, scratchpad, and phase-boundary media are not persisted
+or uploaded. Its nondeployable validation diagnostics do persist metric scalars
+and local pinned R3D feature vectors so distributional calculations remain
+recomputable; those records are never represented as deployable evidence.
+
+RGB MSE, PSNR, SSIM, token NMSE/cosine, losses, gradient norms, activation
+ratios, memory, throughput, and per-phase latency are secondary or mechanism
+telemetry.  Paired bootstrap intervals and raw per-clip records are saved.
+
+The one-seed L1 screen passes only if all are true:
+
+1. **Training efficiency:** L1 reaches B0's update-20,000 primary validation
+   quality by update 16,000 or earlier and in less cumulative wall time.
+2. **Same-budget quality:** at update 20,000, L1 improves the pinned Frechet
+   metric by at least 10% versus B0 while LPIPS and temporal quality do not
+   regress by more than 1%.
+3. **Attribution:** L1 beats A1, and its `autonomous` mode beats both its own
+   `off` and `shuffled` controls.  The paired confidence interval must favor
+   autonomous for LPIPS or the temporal metric, while neither other primary
+   metric regresses by more than 1%.
+4. **Auxiliary mechanism:** the auxiliary tensor is bit-identical across
+   autonomous/off/shuffled at the phase boundary and is bit-identical while
+   the video phase runs.
+5. **No inference leakage:** the explicitly documented L1 training branch may
+   condition on a corrupted clean-target auxiliary, matching Latent Forcing.
+   Validation/test deployable sampling receives only history, actions, and its
+   two clip-keyed noise states and executes without a feature teacher or any
+   target-derived condition. `oracle_clean` is nondeployable and cannot satisfy
+   this gate.
+
+An "obvious advantage" is claimed only after the frozen one-seed gate passes,
+the selected configuration is repeated with optimizer seeds
+`{1234,2234,3234}` paired respectively with evaluation-noise seeds
+`{20260801,20260802,20260803}`, and the three-seed result is confirmed once on
+the protected test set.
+The initial implementation code-locks optimizer seeds 2234/3234 and all
+protected-test decoding. Those paths are enabled only in a later committed
+stage that recomputes the one-seed/three-seed selection from raw validation
+evidence; a hand-authored pass flag is never sufficient authorization.
+Failed gates remain negative results for the stated representation, data,
+model, schedule, and budget; they are not generalized into impossibility
+claims.
+
+## Required tests and saved evidence
+
+- clean-time endpoints and velocity sign;
+- branch masks and loss normalization;
+- shape, patchify/unpatchify, and camera-view isolation;
+- B0 auxiliary strict no-op under arbitrary auxiliary inputs and clocks;
+- phase-boundary and frozen-auxiliary invariants;
+- shuffled-control identity before the intervention point;
+- action/history causality and protected-split non-overlap;
+- exact model-call accounting;
+- resume equivalence and distributed metric aggregation;
+- immutable resolved config, provenance, logs, checkpoints, sample videos,
+  per-clip metrics, and final gate decision.
+
+Production LACWM runs and checkpoints remain immutable.  Legacy
+`dual_diffusion.enabled` remains `false`; this standalone proof uses a new,
+isolated package and artifact root.

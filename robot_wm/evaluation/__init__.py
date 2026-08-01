@@ -1,0 +1,43 @@
+"""Evaluation utilities with publication-grade provenance."""
+
+from robot_wm.evaluation.video_latent_forcing_quality import (
+    LPIPS_ALEX_FRAME_METRIC,
+    LPIPS_ALEX_TEMPORAL_DIFFERENCE_METRIC,
+    R3D18_FRECHET_METRIC,
+    FrozenLPIPSAlex,
+    FrozenR3D18AvgPool,
+    QualityBatch,
+    QualityMetricError,
+    evaluate_quality_batch,
+    lpips_alex_per_frame_per_example,
+    merge_quality_batches,
+    paired_bootstrap_mean_difference,
+    quality_metric_provenance,
+    quality_summary,
+    r3d18_avgpool_features,
+    r3d18_frechet,
+    temporal_difference_lpips_per_example,
+    clamp_video_for_quality,
+    upsample_lowres_video_for_quality,
+)
+
+__all__ = [
+    "LPIPS_ALEX_FRAME_METRIC",
+    "LPIPS_ALEX_TEMPORAL_DIFFERENCE_METRIC",
+    "R3D18_FRECHET_METRIC",
+    "FrozenLPIPSAlex",
+    "FrozenR3D18AvgPool",
+    "QualityBatch",
+    "QualityMetricError",
+    "evaluate_quality_batch",
+    "lpips_alex_per_frame_per_example",
+    "merge_quality_batches",
+    "paired_bootstrap_mean_difference",
+    "quality_metric_provenance",
+    "quality_summary",
+    "r3d18_avgpool_features",
+    "r3d18_frechet",
+    "temporal_difference_lpips_per_example",
+    "clamp_video_for_quality",
+    "upsample_lowres_video_for_quality",
+]
