@@ -85,13 +85,13 @@ def validate_artifact_output(path: str | Path) -> Path:
         (parent for parent in (output, *output.parents) if (parent / ".git").exists()),
         None,
     )
-    if _is_relative_to(output, repo) or containing_git_root is not None:
-        raise DroidVideoLatentForcingError(
-            f"artifacts may not be written inside a Git repository: {output}"
-        )
     if not any(_is_relative_to(output, root.resolve()) for root in APPROVED_ARTIFACT_ROOTS):
         raise DroidVideoLatentForcingError(
             f"artifact output must be under /lustre, /mnt/data1, or /mnt/data2: {output}"
+        )
+    if _is_relative_to(output, repo) or containing_git_root is not None:
+        raise DroidVideoLatentForcingError(
+            f"artifacts may not be written inside a Git repository: {output}"
         )
     return output
 

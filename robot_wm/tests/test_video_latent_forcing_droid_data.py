@@ -172,7 +172,7 @@ def test_artifact_output_policy_refuses_repo_and_non_mnt_paths(tmp_path):
 
 
 def test_manifest_artifact_is_atomic_hashed_and_protected_test_is_not_cached():
-    with tempfile.TemporaryDirectory(dir="/mnt/data1/ldu") as temporary:
+    with tempfile.TemporaryDirectory(dir=REPO_ROOT.parent) as temporary:
         output = Path(temporary) / "artifact"
         provenance = build_artifact(
             data_root=Path(temporary) / "source-identity-only",
@@ -331,7 +331,7 @@ def test_parallel_cache_preserves_interleaved_manifest_order(tmp_path, monkeypat
 
 
 def test_parallel_cache_error_leaves_no_published_or_staged_artifact(monkeypatch):
-    with tempfile.TemporaryDirectory(dir="/mnt/data1/ldu") as temporary:
+    with tempfile.TemporaryDirectory(dir=REPO_ROOT.parent) as temporary:
         parent = Path(temporary)
         output = parent / "parallel-cache-artifact"
 
