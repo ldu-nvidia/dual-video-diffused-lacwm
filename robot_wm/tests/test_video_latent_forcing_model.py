@@ -117,6 +117,41 @@ def test_zero_initialized_heads_wake_modulation_on_the_second_optimizer_step():
     assert torch.count_nonzero(model.clock_modulation[-1].weight) > 0
 
 
+def test_semantic_only_forward_omits_video_head_graph_without_changing_auxiliary():
+    torch.manual_seed(20260801)
+    config = _tiny_config()
+    model = VideoLatentForcingModel(config).train()
+    _activate_conditioned_path(model)
+    inputs = _inputs(config, batch_size=2)
+
+    ordinary = model(*inputs)
+    semantic_only = model(*inputs, predict_video=False)
+
+    torch.testing.assert_close(
+        semantic_only.auxiliary_x,
+        ordinary.auxiliary_x,
+        rtol=0,
+        atol=0,
+    )
+    assert torch.count_nonzero(ordinary.video_x) > 0
+    assert torch.count_nonzero(semantic_only.video_x) == 0
+
+    semantic_only.auxiliary_x.square().mean().backward()
+    assert model.video_output_head.weight.grad is None
+    assert model.video_output_head.bias.grad is None
+
+
+def test_frozen_model_ddp_parameter_indices_name_the_video_head():
+    model = VideoLatentForcingModel(VideoLatentForcingConfig())
+    parameter_names = [name for name, _ in model.named_parameters()]
+    assert len(parameter_names) == 129
+    assert parameter_names[125:127] == [
+        "video_output_head.weight",
+        "video_output_head.bias",
+    ]
+    assert sum(parameter.numel() for parameter in model.parameters()) == 41_963_760
+
+
 def test_frozen_default_and_temporal_patch_two_grids():
     default = VideoLatentForcingConfig()
     assert default.future_shape == (3, 8, 64, 112)

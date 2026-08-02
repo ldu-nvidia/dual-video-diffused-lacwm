@@ -2,8 +2,18 @@
 
 Date preregistered: 2026-08-01
 
-Status: low-resolution Phase 1 frozen; semantic Phase 3 amended and refrozen
-before any semantic target, training run, or prediction result was produced
+Status: low-resolution Phase 1 frozen; semantic Phase 3 amended before its
+first target or training run, then operationally refrozen after a one-update
+DDP systems failure produced no checkpoint, prediction, evaluation, or gate
+
+Operational recovery amendment (2026-08-01): semantic execution v1 later built
+the preregistered caches and began its numerical calibration, but failed on the
+second backward pass because the unused video head remained reachable from
+DDP's returned outputs. The one logged update is excluded, all hypotheses and
+decision rules below remain frozen, and a commit-clean v2 restarts every
+commit-bound prerequisite. Exact jobs, artifact hashes, failure scope, source
+correction, and the added eight-rank DDP preflight are recorded in
+`VIDEO_LATENT_FORCING_SEMANTIC_RECOVERY.md`.
 
 Pre-quality amendment (2026-08-01): an independent source audit found that a
 fixed `0.9999` EMA would retain `0.9999^5000 = 60.65%` of initialization at the

@@ -435,8 +435,11 @@ class VideoLatentForcingModel(nn.Module):
         *,
         condition_on_auxiliary: Tensor | bool = True,
         auxiliary_fusion_mask: Tensor | bool | None = None,
+        predict_video: bool = True,
     ) -> VideoLatentForcingOutput:
         """Predict clean video and auxiliary states from their noisy states."""
+        if not isinstance(predict_video, bool):
+            raise TypeError("predict_video must be a bool")
         self._validate_inputs(noisy_video, noisy_auxiliary, history, actions)
         cfg = self.config
         if auxiliary_fusion_mask is None:
@@ -490,7 +493,18 @@ class VideoLatentForcingModel(nn.Module):
             hidden = block(hidden, modulation)
         hidden = self.transformer_norm(hidden)
         hidden = self.output_norm(hidden[:, context.shape[1] :])
-        video_x = self._unpatchify_video(self.video_output_head(hidden))
+        # A semantic-only DDP pass must not expose the video head's autograd
+        # graph as a forward output.  ``find_unused_parameters`` starts its
+        # traversal from every returned tensor; returning an ignored
+        # ``video_x`` therefore makes DDP classify the head as used even though
+        # its reduction hooks can never fire.  An explicit branch keeps those
+        # parameters genuinely unused (and out of the optimizer update) while
+        # preserving the architecture, state-dict schema, and auxiliary path.
+        video_x = (
+            self._unpatchify_video(self.video_output_head(hidden))
+            if predict_video
+            else torch.zeros_like(noisy_video)
+        )
         if cfg.parameter_matched_video_only:
             auxiliary_x = torch.zeros_like(noisy_auxiliary)
         else:

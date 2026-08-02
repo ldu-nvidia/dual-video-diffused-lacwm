@@ -6,7 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.nn.parallel import DistributedDataParallel
 
+from robot_wm.modeling.video_latent_forcing import (
+    VideoLatentForcingConfig,
+    VideoLatentForcingModel,
+)
 from tools import causal_vjepa2_screen as screen
 
 
@@ -25,9 +30,11 @@ class _IdentityAuxiliaryModel(torch.nn.Module):
         actions,
         *,
         auxiliary_fusion_mask,
+        predict_video,
     ):
         self.calls += 1
         assert auxiliary_fusion_mask is True
+        assert predict_video is False
         return SimpleNamespace(
             video_x=torch.zeros_like(noisy_video),
             auxiliary_x=torch.zeros_like(noisy_auxiliary),
@@ -143,9 +150,11 @@ def test_training_step_uses_future_only_as_noise_shape(monkeypatch):
         history,
         actions,
         condition_on_auxiliary,
+        predict_video,
     ):
         del model, t_video, t_auxiliary, history, actions
         assert condition_on_auxiliary is True
+        assert predict_video is False
         seen_video_noise.append(noisy_video.clone())
         return torch.zeros_like(noisy_video), torch.zeros_like(noisy_auxiliary)
 
@@ -164,6 +173,42 @@ def test_training_step_uses_future_only_as_noise_shape(monkeypatch):
         "auxiliary_branch_count",
     }
     assert "video_loss" not in second_telemetry
+
+
+def test_semantic_only_ddp_completes_consecutive_backward_passes(tmp_path):
+    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+        pytest.skip("single-process Gloo is required for the DDP regression")
+    if torch.distributed.is_initialized():
+        pytest.skip("the test process already owns a distributed process group")
+
+    init_path = tmp_path / "semantic-ddp-init"
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=f"file://{init_path}",
+        rank=0,
+        world_size=1,
+    )
+    try:
+        config = VideoLatentForcingConfig(
+            hidden_size=16,
+            depth=1,
+            num_heads=4,
+            mlp_ratio=2.0,
+        )
+        bare_model = VideoLatentForcingModel(config)
+        model = DistributedDataParallel(
+            bare_model,
+            find_unused_parameters=True,
+        )
+        batch = _semantic_batch(batch=1)
+        for _ in range(2):
+            model.zero_grad(set_to_none=True)
+            loss, _ = screen.semantic_training_step(model, batch)
+            loss.backward()
+            assert bare_model.video_output_head.weight.grad is None
+            assert bare_model.video_output_head.bias.grad is None
+    finally:
+        torch.distributed.destroy_process_group()
 
 
 def test_sampler_input_digest_is_key_order_invariant():

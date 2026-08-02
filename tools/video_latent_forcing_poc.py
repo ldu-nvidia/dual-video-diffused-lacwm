@@ -674,7 +674,16 @@ def model_forward(
     history: Tensor,
     actions: Tensor,
     condition_on_auxiliary: bool | Tensor,
+    predict_video: bool = True,
 ) -> tuple[Tensor, Tensor]:
+    forward_kwargs: dict[str, Any] = {
+        "auxiliary_fusion_mask": condition_on_auxiliary,
+    }
+    # Preserve compatibility with existing model-like test doubles and older
+    # callers on the ordinary dual-output path.  Only the explicit
+    # semantic-only path requires the new model keyword.
+    if not predict_video:
+        forward_kwargs["predict_video"] = False
     output = model(
         noisy_video,
         noisy_auxiliary,
@@ -682,7 +691,7 @@ def model_forward(
         t_auxiliary,
         history,
         actions,
-        auxiliary_fusion_mask=condition_on_auxiliary,
+        **forward_kwargs,
     )
     if not hasattr(output, "video_x") or not hasattr(output, "auxiliary_x"):
         raise PocError("model output must expose video_x and auxiliary_x clean-state predictions")

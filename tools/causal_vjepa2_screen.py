@@ -485,6 +485,7 @@ def semantic_training_step(
         history=batch["history"],
         actions=batch["actions"],
         condition_on_auxiliary=True,
+        predict_video=False,
     )
     per_example = vlf.per_example_x_prediction_flow_mse(
         auxiliary_x,
@@ -1061,6 +1062,7 @@ def sample_semantic(
             history=history,
             actions=actions,
             condition_on_auxiliary=True,
+            predict_video=False,
         )
         calls += 1
         auxiliary = vlf.clean_time_euler_from_x(
