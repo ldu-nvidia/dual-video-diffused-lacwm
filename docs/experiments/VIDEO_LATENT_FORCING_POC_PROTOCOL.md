@@ -2,7 +2,8 @@
 
 Date preregistered: 2026-08-01
 
-Status: amended and refrozen before any generated-quality result was produced
+Status: low-resolution Phase 1 frozen; semantic Phase 3 amended and refrozen
+before any semantic target, training run, or prediction result was produced
 
 Pre-quality amendment (2026-08-01): an independent source audit found that a
 fixed `0.9999` EMA would retain `0.9999^5000 = 60.65%` of initialization at the
@@ -47,6 +48,20 @@ source identities are intentionally one exact-commit contract, the completed
 calibration, 5,000-update training run, evaluation, and gate are required from
 the corrected clean commit.  No quality threshold or scientific decision rule
 was changed after the failed run.
+
+Post-Phase-1 semantic-screen amendment (2026-08-01): corrected source commit
+`6d35fbda76b3fdac6c04687ea95831d664c22231` completed the low-resolution-RGB
+screen on all 890 validation clips. Its frozen gate, SHA-256
+`33e1ab99092caf2a2820936082f3aa848b0b2406c8e92a20ceac03489a64269d`,
+failed at every selectable NFE because autonomous temporal-difference MSE did
+not beat both zero and episode-disjoint shuffled controls. The result stops
+the low-resolution-RGB Phase 2 but, as preregistered, does not stop a semantic
+screen. Before extracting any new V-JEPA target, training any semantic model,
+or observing any semantic prediction metric, the previously underspecified
+phrase "same ... gates" in Phase 3 was replaced below with an executable
+semantic gate. The amendment also freezes a prefix-causal V-JEPA target,
+train-only PCA population, controls, bootstrap rules, and the rule that a
+semantic failure cannot be rescued by old full-clip oracle experiments.
 
 Latent Forcing implementation audited: `AlanBaade/LatentForcing` commit
 `fde8fc40377eaeeea49e6043e01c999b69779a53`.
@@ -345,19 +360,134 @@ For every L1 checkpoint, use the identical generated auxiliary trajectory for:
 ### Phase 3: representation extension
 
 After the low-resolution result is frozen, repeat the representation screen
-with temporally aligned, train-statistics-only normalized features. A passed
-L1 arm provides the direct comparison; a failed low-resolution gate does not
-block the semantic screen because it is not evidence that semantic targets are
-equally unpredictable:
+with temporally aligned, train-statistics-only normalized features. A failed
+low-resolution gate does not block this screen because it is not evidence that
+semantic targets are equally unpredictable. The first semantic arm is
+**prefix-causal V-JEPA 2.1**. Per-frame DINOv2 remains a later alternative if
+its local checkpoint, license, and preprocessing are separately pinned.
 
-- per-frame DINOv2, if the local checkpoint is content-hashed and its license
-  and preprocessing are pinned; and
-- causal V-JEPA 2, where deployable features are predicted from history and
-  actions and never extracted from clean future frames at inference.
+#### Prefix-causal V-JEPA target
 
-These arms use the same token grid, parameter budget, training examples, noise,
-NFE grid, and gates as low-resolution RGB.  Legacy V-JEPA features spanning
-history and future in one tubelet are not a temporally aligned primary arm.
+Let the observed frames be `h0,...,h4` and the future targets be `f0,...,f7`.
+For future index `j`, construct the exactly 16-frame teacher prefix
+
+\[
+P_j=[\underbrace{h_0,\ldots,h_0}_{10-j\ \text{copies}},
+     h_0,h_1,h_2,h_3,h_4,f_0,\ldots,f_j].
+\]
+
+The last two frames are `(h4,f0)` when `j=0` and `(f[j-1],f[j])` otherwise.
+Thus the last V-JEPA tubelet is aligned to the transition ending at `f_j`, and
+the exact future-support invariant is
+
+\[
+\frac{\partial s_j}{\partial f_k}=0\quad\text{for every }k>j.
+\]
+
+The model may still condition on the complete planned 16-action sequence,
+which is available at deployment; the invariant concerns unavailable future
+RGB only.
+
+Use the canonical cached `64 x 112` DROID RGB without crop, resize it to
+`384 x 672`, map it from `[-1,1]` to `[0,1]`, and apply the pinned ImageNet
+mean/std used by the official encoder. Run the official V-JEPA 2.1 ViT-B
+encoder from source commit
+`45d025f636dfc58fc2426905fc4a1ab755b1c3e5` with checkpoint SHA-256
+`848a77c33cc9e6649ed2119c9bea1e2c569bcdab9539ff3e7c02ccc2959ddf4d`.
+Its 16-frame output has grid `[8,24,42,768]`. Keep only temporal token 7,
+average each non-overlapping `3 x 3` spatial cell, and obtain
+`r_j in R^[8,14,768]`:
+
+\[
+r_{j,a,b}=\frac{1}{9}\sum_{u=0}^{2}\sum_{v=0}^{2}
+E(P_j)_{7,3a+u,3b+v}.
+\]
+
+Fit one 48-component PCA whitening transform to **all** 896 tokens from the
+256 training clips with the smallest
+`sha256("causal-vjepa2-pca-v1:" + clip_id)` ranks. No validation or test token
+may influence the mean, components, eigenvalues, signs, or whitening epsilon
+(`1e-6`). Canonicalize each component sign by making its largest-absolute
+loading positive. Apply the frozen transform to every train/validation token
+and stack future indices to obtain
+
+\[
+s\in\mathbb{R}^{48\times8\times8\times14}.
+\]
+
+This exactly preserves the low-resolution arm's 896-token grid, 48 auxiliary
+channels, shared-transformer geometry, and 41,963,760-parameter budget. The
+teacher is an offline target extractor only. It is forbidden in the optimizer,
+validation sampler, and deployable sampler. Protected test RGB remains unread
+and no protected semantic cache is built during selection.
+
+The already completed legacy V-JEPA studies do not answer this arm: their
+`[64,4,24,120]` target was one bidirectional encoding spanning observed and
+future frames and all three views. At inference all four future-dependent bins
+started from noise. Those studies reject that exact full-clip target, not the
+one-view prefix-causal target above.
+
+#### Semantic predictor screen
+
+Train the same from-scratch Phase-1 model for exactly 5,000 optimizer updates,
+after its own exact 200-update numerical calibration. The only target change is
+low-resolution RGB `s` to prefix-causal V-JEPA `s`; initialization, clean-time
+clock, optimizer, global batch 256, EMA, history/actions, fixed clip noise,
+validation population, and NFE grid `{1,2,4,8,12,20,25}` remain unchanged.
+
+For each destination validation clip, pair the manifest-adjacent clip as an
+episode-disjoint donor. The fixed validation split contains one clip per
+episode, so no donor shares an episode. Evaluate these sources from the same
+destination-addressed Gaussian auxiliary noise:
+
+- `autonomous`: destination history and actions; compare to its own clean
+  semantic target;
+- `donor_target`: reuse the autonomous generated state but compare it with the
+  donor's clean target; this target is metric-only and never a model input;
+- `context_shuffled`: donor history and donor actions; compare the generated
+  state with the destination clean target;
+- `history_shuffled`: donor history and destination actions, diagnostic only;
+- `actions_shuffled`: destination history and donor actions, diagnostic only;
+- `zero` and `oracle_clean`: metric-only lower/upper diagnostics, never
+  deployable model inputs.
+
+Report per clip: auxiliary NMSE, the mean aligned 48-D token cosine,
+temporal-difference auxiliary NMSE, and the mean temporal-difference token
+cosine. Temporal differences are along the eight aligned future indices.
+Every record binds destination/donor IDs, source hashes, initial noise, target,
+generated state, actual transformer calls, checkpoint/EMA, cache/PCA, and the
+zero teacher-call assertion.
+
+At the update-5,000 EMA checkpoint, select the smallest NFE in
+`{1,2,4,8,12}` only if all of the following hold simultaneously:
+
+1. autonomous auxiliary NMSE is at most `0.50`, token cosine is at least
+   `0.70`, and temporal-difference auxiliary NMSE is at most `0.50`;
+2. versus `donor_target`, autonomous improves ordinary NMSE and
+   temporal-difference NMSE by at least 5%, with paired-bootstrap 95% CI lower
+   bounds above zero, and has an ordinary token-cosine advantage whose paired
+   CI lower bound is above zero;
+3. versus `context_shuffled`, autonomous improves ordinary NMSE and
+   temporal-difference NMSE by at least 5%, with paired-bootstrap 95% CI lower
+   bounds above zero, and has an ordinary token-cosine advantage whose paired
+   CI lower bound is above zero; and
+4. cache validation proves the prefix support, PCA population, train/validation
+   separation, source/checkpoint hashes, and zero teacher calls during both
+   training and inference.
+
+The bootstrap is the same 10,000 paired clip-level resamples and deterministic
+SHA-derived statistic seeding used in Phase 1. `history_shuffled` and
+`actions_shuffled` are reported separately but do not hard-gate the arm because
+visual history can legitimately dominate short-horizon actions. For the
+whitened target, zero has NMSE one and clean oracle has NMSE zero, so
+`1 - autonomous_nmse` is also reported as retained zero-to-oracle utility.
+NFE 20 and 25 remain diagnostic and cannot pass selection.
+
+If this semantic gate fails, freeze the result and do not launch semantic
+Phase 2. If it passes, run a fresh parameter-matched B0/A1/L1 Phase-2 study
+with the same video-quality and generated-state attribution gates described
+above; RGB LPIPS, temporal metrics, and R3D18-Frechet become valid again only
+when the video branch is actually evaluated.
 
 ### Phase 4: acceleration
 
