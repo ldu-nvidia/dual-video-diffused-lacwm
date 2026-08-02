@@ -394,6 +394,32 @@ mean/std used by the official encoder. Run the official V-JEPA 2.1 ViT-B
 encoder from source commit
 `45d025f636dfc58fc2426905fc4a1ab755b1c3e5` with checkpoint SHA-256
 `848a77c33cc9e6649ed2119c9bea1e2c569bcdab9539ff3e7c02ccc2959ddf4d`.
+The clean source checkout's MIT `LICENSE` has SHA-256
+`cf9b17822d1fcd4ff32ccbe14183386fb3adf6f2ff92dc184130823f7fc28173`.
+The canonical RGB-cache provenance has SHA-256
+`3320244e843ccaa84828b4bbecb9c227870706be3bbbc0e6e1c28eda1ac317e0`;
+its train, validation, and identifier-only protected-test manifests have
+SHA-256 values
+`cc10bccece1ac0e20abacf30ee0db60339145ec54ab2e28af977ded21e02f27e`,
+`b8773a8627e887bf0c0a31cfae6ff537ba6a99e0b1b4f11efec011e3983d8d99`,
+and `e05bb46087152c4ea07820ce8290ae99c0a084dbcf5d576aac370a61486e925d`.
+Semantic extraction must reject any other base population, any overlap with
+the protected episode IDs, or any protected row carrying cached RGB.
+
+Teacher extraction is frozen to CUDA bfloat16 with one DROID clip per rank per
+forward. Fit the PCA by exact float32 centered covariance eigendecomposition
+on CUDA with TF32 disabled. Encoder device, dtype, extraction batch size, PCA
+device, and Python/PyTorch/CUDA/NumPy runtime identities are part of the
+immutable PCA and cache identities; a resumed build may not mix them. Before
+the full cache, require a real-checkpoint non-square `384 x 672` forward, a
+later-future perturbation causality check, and an eight-rank interrupted/resumed
+mini-cache whose resumed bytes equal an uninterrupted reference. This
+systems-only mini-cache uses a fixed synthetic projection (zero 768-D mean,
+the first 48 coordinate axes, unit eigenvalues, epsilon `1e-6`) so it can run
+before the scientific PCA is fitted. The reference build, graceful partial
+stop, and resume execute as three separate eight-rank processes. Every smoke
+artifact is labelled non-production/non-adoptable and must be rejected by the
+production PCA/cache validators.
 Its 16-frame output has grid `[8,24,42,768]`. Keep only temporal token 7,
 average each non-overlapping `3 x 3` spatial cell, and obtain
 `r_j in R^[8,14,768]`:
