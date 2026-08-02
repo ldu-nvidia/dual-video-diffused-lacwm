@@ -15,6 +15,13 @@ commit-bound prerequisite. Exact jobs, artifact hashes, failure scope, source
 correction, and the added eight-rank DDP preflight are recorded in
 `VIDEO_LATENT_FORCING_SEMANTIC_RECOVERY.md`.
 
+Post-execution result (2026-08-01): corrected execution v2 completed the exact
+200-update calibration, 5,000-update semantic training, 43,610-row validation,
+and frozen 10,000-resample paired-bootstrap gate. The gate failed at every
+selectable NFE, so semantic Phase 2 was not launched. The immutable evidence,
+failure anatomy, scope limits, and authorized diagnostic are recorded in
+`VIDEO_LATENT_FORCING_CAUSAL_VJEPA2_RESULTS.md`.
+
 Pre-quality amendment (2026-08-01): an independent source audit found that a
 fixed `0.9999` EMA would retain `0.9999^5000 = 60.65%` of initialization at the
 Phase-1 endpoint, and that the first implementation had not copied the released

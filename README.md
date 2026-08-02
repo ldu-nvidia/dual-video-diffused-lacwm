@@ -13,6 +13,13 @@ used 64 B200 GPUs and reached all 60,000 planned optimizer updates.  See
 
 ## Current status
 
+The prefix-causal V-JEPA 2 semantic representation screen is complete. It
+learned history-specific scene semantics but failed the frozen temporal and
+absolute-quality gate at every selectable NFE; the video branch therefore
+remains disabled. See
+[`docs/experiments/VIDEO_LATENT_FORCING_CAUSAL_VJEPA2_RESULTS.md`](docs/experiments/VIDEO_LATENT_FORCING_CAUSAL_VJEPA2_RESULTS.md)
+for the measured result, evidence hashes, scope, and next diagnostic.
+
 The initial bootstrap implements and tests the contracts required before Wan
 integration:
 
