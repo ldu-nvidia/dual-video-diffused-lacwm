@@ -28,8 +28,12 @@ budget. The most credible remaining **technical** route is:
 This is not merely conceptual. A leakage-controlled train512/val64 proxy screen
 found that planned actions add statistically positive information about future
 per-view motion summaries. It is still too weak to authorize generator training,
-and exact ABC rendering first requires a robot/camera calibration gate. A
-current literature audit also shows that nominal robot rendering is now an
+and exact ABC rendering first required a robot/camera calibration diagnostic.
+That first train-only diagnostic now passes: nominal top-camera YAM rendering
+is significantly closer to observed image edges than a +4-clip-step wrong-pose
+control and is cheap enough to be causal. It remains a three-clip nominal-
+calibration feasibility result, not evidence that rendered flow improves Wan.
+A current literature audit also shows that nominal robot rendering is now an
 important baseline rather than a standalone novelty claim; the publishable
 increment would need generated uncertainty/contact residuals, privileged-to-
 causal transfer, or a demonstrated low-call closed-loop advantage.
@@ -43,7 +47,8 @@ causal transfer, or a demonstrated low-call closed-loop advantage.
 | same-call midpoint scratchpad | no | tested variant negative and sample-insensitive |
 | training-only relation/spectrum/motion loss | no | TRD, TFREG, and low-frequency motion regularization negative |
 | learned action-to-dense-flow proxy | no | real direction signal, but failed the strict generator-handoff gate |
-| analytic planned-action robot-only flow | no | strongest next route; geometry/calibration prerequisite |
+| nominal D405 robot geometry | no | first three-clip train-only alignment diagnostic passed; finer timing/calibration and generator gates remain |
+| analytic planned-action robot-only flow | no | strongest next generator-conditioning baseline; not yet evaluated in Wan |
 | physics-anchored stochastic residual flow | no | prospective genuine dual-diffusion extension |
 | privileged teacher to on-policy video-only student | no | strongest training-only salvage of the oracle gain; newly frozen, not yet run |
 | consistency/self-forcing distillation | no auxiliary required | primary speed route after a stronger teacher exists |
@@ -68,6 +73,7 @@ long-horizon, protected-test, or closed-loop task claims.
 | action-to-Farneback-summary proxy | +6.59% versus history-only; +9.04% versus shuffled actions | planned actions contain incremental motion information, but target is coarse |
 | action-to-dense-top-flow proxy | +2.91% dense MSE versus history and +2.94% versus shuffled; cosine 0.040 to 0.216 | genuine action-specific direction, but both preregistered 10% handoff gates failed |
 | confidence gate over midpoint scratchpad | no valid inference confidence was preserved; a forbidden perfect temporal oracle gained only +0.0447% | always-off is the only honest no-regret policy for this auxiliary |
+| nominal D405/YAM geometry | correct-pose Chamfer 8.444 px versus 13.025 px at +4 clip steps; shifted-minus-aligned +4.581 px [3.320, 5.865] | narrow train-only feasibility pass; 3/3 clips positive and render p95 2.769 ms, but no masks, calibrated distortion, flow, or video-generation endpoint |
 
 ## Why image Latent Forcing and these video attempts diverged
 
@@ -106,6 +112,21 @@ repository provides nominal YAM MJCF/meshes and D405 transforms. The next
 defensible subset is 456 D405 clips with all three intrinsics, top view first.
 Rendered silhouettes must beat time-shifted and wrong-calibration controls
 before the resulting flow is called pixel-aligned.
+
+A bounded first probe has now checked that premise on three explicitly selected
+train clips and 39 frames. Correct-pose robot-only rendering reached 8.444 px
+mean edge Chamfer versus 13.025 px under a cyclic +4-clip-step pose control;
+the paired shifted-minus-aligned difference was +4.581 px with 95% frame
+bootstrap interval [3.320, 5.865], all three clip means were positive, and
+3-pixel edge support improved by 5.902 percentage points. A no-wrap sensitivity
+check gave +4.790 px [3.067, 6.525]. Render-only latency was 2.415 ms mean and
+2.769 ms p95 at 640x480. This authorizes building a deterministic segmentation,
+depth, link-ID, and robot-flow scaffold for a controlled screen. It does not
+complete the full calibration gate: the camera model still uses nominal
+extrinsics, a centered principal point, and no D405 distortion; observed edges
+are not robot masks; and the +4 control is roughly 0.667 seconds rather than a
+sub-frame perturbation. The immutable evidence is documented in
+`ABC_D405_NOMINAL_GEOMETRY_PROBE.md`.
 
 The current DROID LeRobot cache is also not renderer-ready: it lacks
 intrinsics/extrinsics, joint positions, robot geometry, depth, and masks, and
@@ -283,10 +304,12 @@ rules are frozen in `PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`.
 
 ## Phased execution decision
 
-1. Pin official YAM assets; reconstruct D405 top-view timing/intrinsics and pass
-   a silhouette/flow alignment gate on train/val only.
-2. Render robot-only top-view flow analytically, and require it to beat
-   wrong-calibration/time-shifted controls on observed video before integration.
+1. Extend the passing three-clip nominal-YAM diagnostic to train-only
+   calibration fitting, distortion-aware projection, masks, and finer
+   non-wrapping time-shift/wrong-calibration controls.
+2. Replay planned actions through the robot-only controller, render
+   masks/depth/link IDs and analytic top-view flow, and require alignment over
+   those controls before integration.
 3. Only after that gate, run paired `FLOW-OFF/CAUSAL/SHUFFLED/ORACLE` generator
    arms at NFE 1/2/4; do not use the failed learned dense proxy as the condition.
 4. If analytic causal flow has an attributed quality gain, port full per-block joint

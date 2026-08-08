@@ -27,6 +27,12 @@ After the learned dense-flow proxy failed its strict handoff threshold, the
 selected analytic-flow, stochastic-residual, and few-call generator protocol is
 frozen in
 [`PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md`](docs/experiments/PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md).
+The first train-only nominal D405 geometry diagnostic is also complete: aligned
+YAM rendering beat a preregistered +4-clip-step pose control by 4.58 pixels in
+Chamfer distance (95% paired interval 3.32--5.86) at 2.77 ms p95 render
+latency. This is a calibration-feasibility result, not a generation gain; exact
+evidence and limitations are in
+[`ABC_D405_NOMINAL_GEOMETRY_PROBE.md`](docs/experiments/ABC_D405_NOMINAL_GEOMETRY_PROBE.md).
 The sealed dense proxy result and post-hoc horizon diagnostics are in
 [`DENSE_TOP_FLOW_STAGE0.md`](docs/experiments/DENSE_TOP_FLOW_STAGE0.md).
 A complementary training-only route that distills a privileged clean-feature

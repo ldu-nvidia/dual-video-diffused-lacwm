@@ -105,6 +105,23 @@ control with a positive paired lower bound and p95 preprocessing is below 20 ms.
 Failure means calibration must be fitted on train data or the dataset changed;
 it does not authorize an RGB generator run.
 
+### First nominal-geometry diagnostic (2026-08-08)
+
+A deliberately bounded train-only probe passed its registered diagnostic on
+three clips and 39 frames. Correct-pose YAM rendering reached 8.444 px mean
+edge Chamfer versus 13.025 px for a +4-clip-step wrong-pose control. The paired
+shifted-minus-aligned mean was +4.581 px with 95% interval [3.320, 5.865], all
+three clip means were positive, 3-pixel edge support improved by 5.902
+percentage points, and render latency was 2.769 ms p95 at 640x480. This supports
+constructing the planned-action geometry scaffold.
+
+It does **not** close Gate 0 in full. The probe uses nominal extrinsics, a
+centered principal point, no D405 distortion, observed image edges rather than
+robot masks, and a coarse approximately 0.667-second control. Before Gate 1,
+fit/refine calibration on train data only and run non-wrapping fine time shifts,
+wrong-calibration controls, and planned-action controller replay. Full evidence
+and hashes are in `ABC_D405_NOMINAL_GEOMETRY_PROBE.md`.
+
 ## Gate 1: fixed causal flow conditioning
 
 Use one parent snapshot, identical data order/noise/optimizer, equal trainable

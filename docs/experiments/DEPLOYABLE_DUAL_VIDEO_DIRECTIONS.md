@@ -524,6 +524,19 @@ rendered silhouettes must pass an image-alignment gate before their flow can
 condition video. Heterogeneous ZED/OAK/decxin rigs and wrist timestamps require
 separate calibration or raw re-extraction.
 
+The first bounded nominal-geometry diagnostic is now complete on three selected
+train clips (39 frames; no validation or protected split). Using the official
+YAM MJCF and nominal D405 transform, correct-pose robot-only rendering achieved
+8.444 px mean edge Chamfer versus 13.025 px for a +4-clip-step wrong-pose
+control. The shifted-minus-aligned difference was +4.581 px with paired 95%
+interval [3.320, 5.865], all three clips were positive, and render latency was
+2.769 ms p95. This is an `exploratory_pass` for nominal alignment and latency,
+not a complete calibration or generator gate. It uses nominal extrinsics,
+centered principal point/no lens distortion, image edges rather than robot
+masks, and a coarse approximately 0.667-second time shift. See
+`ABC_D405_NOMINAL_GEOMETRY_PROBE.md` for hashes, camera matrices, overlays, and
+the ABC next/ceiling timestamp-resampling caveat.
+
 The existing DROID LeRobot cache is not a shortcut. It has three RGB streams
 and Cartesian end-effector action/state, but no camera calibration, joint
 positions, robot model, depth, or masks. A read-only schema audit also found
@@ -649,11 +662,12 @@ training-only two-token motion-loss route, not dense causal motion scaffolds.
 
 ## Execution priority
 
-1. Acquire or recover the exact robot URDF, joint mapping, base pose, and camera
-   calibration for one robot dataset, then run the action-to-flow causality gate
-   before modifying the RGB generator.
-2. If that gate passes, run flow-off/aligned/shuffled/oracle conditioning at
-   equal Wan calls and report both end-to-end scaffold cost and RGB quality.
+1. Use the now-validated official YAM joint mapping and nominal D405 geometry to
+   fit/refine train-only calibration, add distortion-aware masks/depth/link IDs,
+   and clear fine-shift/wrong-calibration controls.
+2. Replay planned actions through the robot-only controller, construct analytic
+   flow, and run flow-off/aligned/time-shifted/shuffled/oracle conditioning at
+   equal Wan calls while reporting end-to-end scaffold cost and RGB quality.
 3. In parallel, run the train-only privileged-teacher eligibility gate on
    student-visited states.  If it passes, compare gated on-policy distillation
    with off-policy, ungated, shuffled-teacher, and base continuations.
