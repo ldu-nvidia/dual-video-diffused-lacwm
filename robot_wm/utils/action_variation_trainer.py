@@ -37,7 +37,11 @@ def _state_sha256(state: Mapping[str, torch.Tensor]) -> str:
         tensor = state[key].detach().contiguous().cpu()
         digest.update(key.encode("utf-8") + b"\0")
         digest.update(f"{tensor.dtype}|{tuple(tensor.shape)}|".encode("ascii"))
-        digest.update(tensor.view(torch.uint8).numpy().tobytes(order="C"))
+        # ``view(dtype)`` rejects a zero-dimensional tensor when the target
+        # element size differs.  Flatten first so scalar parameters (for
+        # example the residual gate) have the same canonical byte treatment
+        # as every other dense state tensor.
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes(order="C"))
     return digest.hexdigest()
 
 
