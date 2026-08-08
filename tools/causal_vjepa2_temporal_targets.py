@@ -39,6 +39,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools import causal_vjepa2_screen as screen  # noqa: E402
 from tools import video_latent_forcing_poc as vlf  # noqa: E402
+from tools.causal_vjepa2_cache_bridge import (  # noqa: E402
+    construct_producer_attested_dataset,
+)
 
 
 RUN_SCHEMA = "causal-vjepa2-temporal-target-training-v1"
@@ -785,7 +788,7 @@ def fit_normalization_command(args: argparse.Namespace) -> int:
         split="train",
         expected_clips=screen.FROZEN_TRAIN_CLIPS,
     )
-    dataset = screen._construct_dataset(  # noqa: SLF001
+    dataset = construct_producer_attested_dataset(
         manifest, args.data_root, args.semantic_cache_root
     )
     cache_metadata = screen.validated_cache_metadata(dataset)
@@ -869,6 +872,7 @@ def fit_normalization_command(args: argparse.Namespace) -> int:
         "train_manifest_sha256": manifest_record["sha256"],
         "pca_sha256": cache_metadata["pca_sha256"],
         "cache_metadata_sha256": screen.sha256_json(cache_metadata),
+        "cache_access_attestation": dataset.producer_attestation,
         "anchor_elements_per_channel": anchor_count,
         "delta_elements_per_channel": delta_count,
         "variance": "population",
@@ -915,6 +919,58 @@ def _normalization_for_training(
         expected_cache_metadata_sha256=screen.sha256_json(train_cache),
     )
     return normalization, record
+
+
+def _training_datasets(
+    args: argparse.Namespace,
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Bind c114 targets through their exact producer without relabelling them."""
+    train_path, train_rows, train_record = screen._manifest_record(  # noqa: SLF001
+        args.train_manifest,
+        split="train",
+        expected_clips=screen.FROZEN_TRAIN_CLIPS,
+    )
+    validation_path, validation_rows, validation_record = screen._manifest_record(  # noqa: SLF001
+        args.validation_manifest,
+        split="val",
+        expected_clips=screen.FROZEN_VALIDATION_CLIPS,
+    )
+    if not screen.rows_episode_ids(train_rows).isdisjoint(  # type: ignore[attr-defined]
+        screen.rows_episode_ids(validation_rows)  # type: ignore[attr-defined]
+    ):
+        raise TemporalTargetError("training and validation episodes overlap")
+    train_dataset = construct_producer_attested_dataset(
+        train_path, args.data_root, args.semantic_cache_root
+    )
+    validation_dataset = construct_producer_attested_dataset(
+        validation_path, args.data_root, args.semantic_cache_root
+    )
+    train_cache = screen.validated_cache_metadata(train_dataset)
+    validation_cache = screen.validated_cache_metadata(validation_dataset)
+    screen._validate_training_cache_pair(  # noqa: SLF001
+        train_cache,
+        validation_cache,
+        train_manifest=train_record,
+        validation_manifest=validation_record,
+    )
+    return train_dataset, validation_dataset, {
+        "train": train_record,
+        "validation": validation_record,
+        "semantic_cache": {
+            "train": train_cache,
+            "validation": validation_cache,
+        },
+        "cache_access": {
+            "schema": "causal-vjepa2-producer-attested-cache-access-v1",
+            "bridge": vlf.file_record(
+                REPO_ROOT / "tools" / "causal_vjepa2_cache_bridge.py"
+            ),
+            "train": train_dataset.producer_attestation,
+            "validation": validation_dataset.producer_attestation,
+            "cache_relabelled_as_current_source": False,
+            "protected_test_accessed": False,
+        },
+    }
 
 
 def _checkpoint_updates(total_updates: int, every: int) -> tuple[int, ...]:
@@ -1105,7 +1161,7 @@ def training_command(args: argparse.Namespace) -> int:
         run_dir = vlf.validated_run_dir(
             args.artifact_root, args.run_id, resume=args.resume is not None
         )
-        train_dataset, validation_dataset, datasets = screen._training_datasets(args)  # noqa: SLF001
+        train_dataset, validation_dataset, datasets = _training_datasets(args)
         del validation_dataset
         normalization, normalization_record = _normalization_for_training(args, datasets)
         vlf.seed_everything(args.seed, 0)
