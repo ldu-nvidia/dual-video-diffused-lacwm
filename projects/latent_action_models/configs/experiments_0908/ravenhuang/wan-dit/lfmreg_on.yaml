@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - /experiments_0908/motion_band_training_only_common
+  - _self_
+
+name: lfmreg-on-seed1234-u000200
+model:
+  motion_band_regularization:
+    # Prospectively fixed conservative dose. The target-RMS-normalized robust
+    # loss is dimensionless; 0.05 keeps flow matching as the dominant target.
+    loss_weight: 0.05
+wandb:
+  tags: [abc, vpm, LFMREG-ON, low-frequency-motion, seed-1234]

@@ -1,0 +1,14 @@
+defaults:
+  - explicit_action_dit_model
+  - _self_
+
+_target_: lam.motion_band_training_only_model.LowFrequencyMotionTrainingOnlyExplicitActionDiT
+
+# Both arms instantiate this exact parameter schema. Only loss_weight differs.
+motion_band_regularization:
+  loss_weight: 0.0
+  num_views: 3
+  kernel_size: 5
+  sigma: 1.0
+  beta: 0.25
+  epsilon: 1.0e-4
