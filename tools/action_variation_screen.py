@@ -649,17 +649,38 @@ def revalidate_execution_environment(
 def registered_input_records(registration: Mapping[str, Any]) -> dict[str, Any]:
     """Return the exact registered records without reopening large artifacts."""
 
+    def digest_record(record: Mapping[str, Any]) -> dict[str, Any]:
+        # `_revalidate_record` intentionally emits only these cryptographic
+        # fields.  Some inherited validation records also carry audit
+        # annotations such as `full_sha256_verified`; those remain sealed in
+        # the registration but are not part of the live rehash receipt.
+        return {key: record[key] for key in ("path", "bytes", "sha256")}
+
     return {
-        "parent_snapshot": registration["controlled_study"]["parent_snapshot"],
-        "train_manifest": registration["training"]["manifest"],
-        "train_metadata": registration["training"]["cache_metadata"],
-        "train_rgb": registration["training"]["rgb"],
-        "train_actions": registration["training"]["actions"],
-        "validation_manifest": registration["validation"]["manifest"],
-        "validation_metadata": registration["validation"]["cache_metadata"],
-        "validation_rgb": registration["validation"]["arrays"]["rgb"],
-        "validation_actions": registration["validation"]["arrays"]["actions"],
-        "action_delta_stats": registration["action_delta_stats"]["file"],
+        "parent_snapshot": digest_record(
+            registration["controlled_study"]["parent_snapshot"]
+        ),
+        "train_manifest": digest_record(registration["training"]["manifest"]),
+        "train_metadata": digest_record(
+            registration["training"]["cache_metadata"]
+        ),
+        "train_rgb": digest_record(registration["training"]["rgb"]),
+        "train_actions": digest_record(registration["training"]["actions"]),
+        "validation_manifest": digest_record(
+            registration["validation"]["manifest"]
+        ),
+        "validation_metadata": digest_record(
+            registration["validation"]["cache_metadata"]
+        ),
+        "validation_rgb": digest_record(
+            registration["validation"]["arrays"]["rgb"]
+        ),
+        "validation_actions": digest_record(
+            registration["validation"]["arrays"]["actions"]
+        ),
+        "action_delta_stats": digest_record(
+            registration["action_delta_stats"]["file"]
+        ),
     }
 
 
