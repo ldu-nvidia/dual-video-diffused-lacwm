@@ -97,7 +97,10 @@ and Wan-call topology.
 Before either optimizer runs, an eight-B200 update-zero canary must instantiate
 the exact MID-ON model/optimizer and complete one production-shape BF16 forward
 and backward pass without activation checkpointing or an optimizer step. It
-records per-rank peak allocation and headroom, but no scientific metric.
+uses a deterministic bounded spatiotemporal linear RGB pattern whose three
+width-stacked views are non-constant, so the production view-validity mask
+retains every supervised region. It records per-rank peak allocation and
+headroom, but no scientific metric.
 
 Deterministic model-only loading hashes every initialized state tensor byte
 plus the parameter, trainable-parameter, and optimizer schemas. `MID-OFF`

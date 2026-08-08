@@ -9,6 +9,7 @@ import torch
 from omegaconf import OmegaConf
 
 from tools import intra_forward_forcing_screen as screen
+from tools import smoke_intra_forward_memory as memory_smoke
 from tools import validate_intra_forward_warmstart as preflight
 
 
@@ -104,6 +105,7 @@ def _write_memory_smoke(study_root: Path, registration: dict) -> dict:
                 "morphology_index": [1],
                 "clip_index": [1],
             },
+            "synthetic_rgb_pattern": screen.MEMORY_SMOKE_RGB_PATTERN,
             "gradient_checkpointing": False,
             "forward_completed": True,
             "backward_completed": True,
@@ -121,6 +123,17 @@ def _write_memory_smoke(study_root: Path, registration: dict) -> dict:
         json.dumps(receipt), encoding="utf-8"
     )
     return receipt
+
+
+def test_memory_smoke_rgb_fixture_keeps_every_stacked_view_valid():
+    rgb = memory_smoke._synthetic_rgb("cpu")
+    assert tuple(rgb.shape) == (1, 13, 3, 180, 960)
+    assert rgb.dtype == torch.float32
+    assert torch.isfinite(rgb).all()
+    assert float(rgb.min()) >= -1.0
+    assert float(rgb.max()) <= 1.0
+    for view in rgb.split(320, dim=-1):
+        assert float(view.std()) > 1e-3
 
 
 def test_frozen_arms_differ_only_by_midpoint_injection_and_have_no_oracle():

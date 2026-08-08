@@ -53,10 +53,11 @@ export MID_SCREEN_PYTHON="$PYTHON_BIN"
 ```
 
 The wrapper prints all four job IDs. The memory canary performs the exact
-production-shape BF16 forward and backward on each GPU but never executes an
-optimizer update or reports a scientific metric. Do not manually resume any
-stage. A failed stage leaves its root as evidence and requires a freshly
-registered study.
+production-shape BF16 forward and backward on each GPU using a deterministic
+non-constant RGB fixture that remains valid under the model's per-view loss
+mask, but never executes an optimizer update or reports a scientific metric.
+Do not manually resume any stage. A failed stage leaves its root as evidence
+and requires a freshly registered study.
 
 ## 3. Inspect deployable evaluation artifacts
 

@@ -59,6 +59,7 @@ INITIALIZATION_ANCHOR_SCHEMA = "video-intra-forward-initialization-anchor-v1"
 INITIALIZATION_MATCH_SCHEMA = "video-intra-forward-initialization-match-v1"
 TRAINING_CONTENT_SCHEMA = "video-intra-forward-training-content-v1"
 MEMORY_SMOKE_SCHEMA = "video-intra-forward-memory-smoke-v1"
+MEMORY_SMOKE_RGB_PATTERN = "deterministic_spatiotemporal_linear_v1"
 EVALUATION_PREFLIGHT_SCHEMA = "video-intra-forward-evaluation-preflight-v1"
 SEED = 1234
 EVALUATION_SEED = 20_260_808
@@ -1056,6 +1057,7 @@ def validate_memory_smoke(
         or receipt.get("world_size") != WORLD_SIZE
         or receipt.get("selector") != ARMS[1].selector
         or receipt.get("synthetic_batch_shapes") != expected_batch
+        or receipt.get("synthetic_rgb_pattern") != MEMORY_SMOKE_RGB_PATTERN
         or receipt.get("gradient_checkpointing") is not False
         or receipt.get("forward_completed") is not True
         or receipt.get("backward_completed") is not True

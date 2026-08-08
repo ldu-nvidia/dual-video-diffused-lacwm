@@ -51,6 +51,29 @@ def _seed_all(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def _synthetic_rgb(device: torch.device | str) -> torch.Tensor:
+    """Return a deterministic, non-constant production-shape RGB fixture.
+
+    The model's loss mask treats a constant width-stacked camera view as a
+    padded/missing view.  A zero image therefore exercises the full forward
+    graph but deliberately masks every supervised pixel.  This bounded linear
+    pattern keeps all three views valid while remaining deterministic and
+    independent of any dataset example.
+    """
+
+    time = torch.linspace(-0.10, 0.10, 13, device=device).view(1, 13, 1, 1, 1)
+    channel = torch.tensor([-0.05, 0.0, 0.05], device=device).view(
+        1, 1, 3, 1, 1
+    )
+    height = torch.linspace(-0.25, 0.25, 180, device=device).view(
+        1, 1, 1, 180, 1
+    )
+    width = torch.linspace(-0.25, 0.25, 960, device=device).view(
+        1, 1, 1, 1, 960
+    )
+    return (time + channel + height + width).contiguous()
+
+
 def _strict_model_only_load(model, checkpoint: Path) -> None:
     current = model.state_dict()
     expected_missing = sorted(
@@ -157,9 +180,7 @@ def run(args: argparse.Namespace) -> int:
 
         _seed_all(contract.SEED + rank)
         batch = {
-            "rgb": torch.zeros(
-                (1, 13, 3, 180, 960), dtype=torch.float32, device=device
-            ),
+            "rgb": _synthetic_rgb(device),
             "actions": torch.zeros(
                 (1, 13, 5, 157), dtype=torch.float32, device=device
             ),
@@ -223,6 +244,7 @@ def run(args: argparse.Namespace) -> int:
                         "morphology_index": [1],
                         "clip_index": [1],
                     },
+                    "synthetic_rgb_pattern": contract.MEMORY_SMOKE_RGB_PATTERN,
                     "dtype": "torch.bfloat16 autocast",
                     "gradient_checkpointing": False,
                     "forward_completed": True,
