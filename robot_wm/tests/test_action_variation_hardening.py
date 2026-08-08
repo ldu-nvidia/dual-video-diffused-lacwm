@@ -11,7 +11,10 @@ import pytest
 import torch
 from torch import nn
 
-from robot_wm.utils.action_variation_trainer import _load_parent_state_exact
+from robot_wm.utils.action_variation_trainer import (
+    _load_parent_state_exact,
+    _state_sha256,
+)
 from tools import action_variation_evaluate as evaluation
 from tools import action_variation_screen as screen
 from tools import vpm_phaselock_probe as phase
@@ -104,6 +107,18 @@ class _ParentPlusResidual(nn.Module):
         super().__init__()
         self.parent = nn.Linear(2, 2)
         self.action_delta_residual = nn.Linear(2, 2)
+
+
+def test_state_sha256_supports_scalar_parameters_and_hashes_their_value():
+    first = {
+        "gate": torch.tensor(0.0),
+        "weight": torch.arange(4.0).reshape(2, 2),
+    }
+    same = {"gate": torch.tensor(0.0), "weight": first["weight"].clone()}
+    changed = {"gate": torch.tensor(1.0), "weight": first["weight"].clone()}
+
+    assert _state_sha256(first) == _state_sha256(same)
+    assert _state_sha256(first) != _state_sha256(changed)
 
 
 def test_parent_load_misses_exactly_residual_and_rejects_any_other_missing_key():
