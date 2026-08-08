@@ -13,6 +13,17 @@ used 64 B200 GPUs and reached all 60,000 planned optimizer updates.  See
 
 ## Current status
 
+The broader deployable study is now summarized in
+[`TWELVE_HOUR_DUAL_VIDEO_RESEARCH_REPORT.md`](docs/experiments/TWELVE_HOUR_DUAL_VIDEO_RESEARCH_REPORT.md)
+and the living evidence map
+[`DEPLOYABLE_DUAL_VIDEO_DIRECTIONS.md`](docs/experiments/DEPLOYABLE_DUAL_VIDEO_DIRECTIONS.md).
+Oracle clean-future TF/V-JEPA features remain upper bounds, while the tested
+autonomous semantic/frequency branches and training-only relation/spectrum
+losses have not improved the low-NFE generator. The selected next hypothesis is
+an inference-causal robot-only flow scaffold computed from planned actions,
+robot geometry, and calibrated cameras; its staged gate is specified in
+[`ACTION_DERIVED_FLOW_PROTOCOL.md`](docs/experiments/ACTION_DERIVED_FLOW_PROTOCOL.md).
+
 The prefix-causal V-JEPA 2 semantic representation screen is complete. It
 learned history-specific scene semantics but failed the frozen temporal and
 absolute-quality gate at every selectable NFE; the video branch therefore
