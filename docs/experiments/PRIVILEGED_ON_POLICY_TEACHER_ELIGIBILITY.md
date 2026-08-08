@@ -66,8 +66,9 @@ large average or oracle-rollout gains cannot override it.
 ## Full-rollout oracle diagnostic
 
 These NFE-4 rollouts use clean target-video features and are explicitly
-nondeployable. Decoded metrics use the VAE-decoded clean-video target in unit
-range; temporal MSE compares differences across the eight future frames.
+nondeployable. Decoded metrics compare VAE-decoded predictions with the
+original ground-truth future RGB converted to unit range; temporal MSE compares
+differences across the eight future frames.
 
 | Metric (lower is better) | Off mean | Aligned mean | Shuffled mean | Aligned vs off | Aligned vs shuffled |
 |---|---:|---:|---:|---:|---:|

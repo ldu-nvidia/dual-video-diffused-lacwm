@@ -58,7 +58,7 @@ ABC screen, not protected-test or general video-quality claims.
 | causal action-to-motion-summary Stage 0 | a train-only ridge model using observed motion plus planned actions improved val64 standardized future Farneback-summary MSE by 6.59% over history-only (paired 95% interval 4.96--8.05%) and by 9.04% over the same model with episode-shuffled actions (7.19--11.10%); aggregate R2 rose from 0.098 to 0.158 | passes its preregistered exploratory 1% information/specificity gates, but not the later proposed 10% all-view integration gate; supports a calibrated dense-flow follow-up, not a generator-quality claim |
 | causal action-to-dense-top-flow Stage 0 | planned actions improved raw dense-flow MSE by 2.91% over history-only (paired interval 2.49--3.40%) and 2.94% over shuffled actions (2.41--3.60%); directional cosine rose from 0.040 to 0.216, but endpoint error improved only 1.71%/2.24% | `NO_GO`: the action signal is real and directional, but both preregistered 10% dense-MSE handoff gates failed; use an analytic kinematic scaffold rather than this learned proxy for the generator test |
 | nominal-to-realized tracking residual Stage 0 | a 14-D predictor from observed state/history plus planned actions reached standardized MSE 0.3719, improving 60.08% over history, 72.45% over shuffled actions, 68.52% over raw-command/zero residual, and 97.39% over hold-current; every 10% gate and paired lower bound passed, target joint residual RMS was 0.0618 rad and candidate joint RMSE 0.0331 rad | `GO` for corrected-trajectory renderer attribution only; this is command-tracking error under ceiling-resampled raw streams, not controller simulation, object/contact residual, or video quality |
-| retrospective confidence gate over midpoint scratchpad | no valid per-clip inference confidence was preserved; aligned versus future-shuffled temporal effect was -0.0047% [-0.0227, +0.0129], and even a target-leaking perfect chooser gained only 0.0447% [0.0320, 0.0588] | no actionable gating opportunity; exact always-off fallback is the only honest no-regret policy for this artifact |
+| retrospective confidence gate over midpoint scratchpad | no valid per-clip inference confidence was preserved; aligned versus future-shuffled temporal effect was -0.0047% [-0.0227, +0.0129], and even a target-leaking perfect chooser gained only 0.0447% [0.0320, 0.0592] | no actionable gating opportunity; always-off is the safe fallback under the registered materiality gate for this artifact |
 
 Across the residual, LaMo, two-clock, and observed-anchor screens, action or
 sample shuffling changes the relevant outputs by at most small fractions of a
@@ -205,8 +205,7 @@ Wan, exact parameter-matched injection-off/on arms, and an observed-history-
 preserved future shuffle to test whether the generated auxiliary is actually
 sample-specific.
 
-The independently audited B200 screen in
-`VPM_INTRA_FORWARD_LATENT_FORCING_PROTOCOL.md` completed with 1,152 sealed
+The independently audited B200 midpoint screen completed with 1,152 sealed
 rows and no protected-test access.  It did not pass.  At NFE 1 the trained
 MID-ON arm regressed decoded MSE by 1.13% and temporal MSE by 0.26% versus
 MID-OFF.  More importantly, within the same MID-ON checkpoint, autonomous
@@ -317,7 +316,7 @@ diffusion, but it is a prerequisite for an action-conditioned auxiliary future:
 a second branch cannot invent sample-specific control information that its
 input path has discarded.
 
-The completed `VPM_ACTION_VARIATION_PROTOCOL.md` screen compared an exact
+The completed action-variation screen compared an exact
 parameter-matched hard-off residual against a zero-initialized action-delta
 residual. Its causal gate uses aligned, zero-action, episode-disjoint shuffled-
 action, and runtime residual-hard-mask endpoints. A quality gain without this
@@ -360,14 +359,16 @@ Two routes avoid an online clean-future condition entirely:
    probe passes against zero, episode-shuffled, inverse-action, and magnitude-
    only controls, its loss can supervise Wan during training and the probe can
    be discarded at inference.
-2. A robot policy can consume generated Wan latents directly through a small
-   adapter, decoding RGB only for visualization or intervention review. The
+2. Prospectively, a robot policy could consume generated Wan latents directly
+   through a small adapter, decoding RGB only for visualization or intervention review. The
    current warmed latent-only endpoint is about 0.102 s mean and 0.118 s
-   empirical p95 over 64 rollouts (8.49 latent rollouts/s at p95), whereas RGB
-   decoding adds roughly 0.130 s. This is a systems observation, not yet a
-   closed-loop DAgger result or a video-quality claim.
+   empirical p95 over 64 warmed endpoints (8.49 latent endpoints/s at p95),
+   whereas RGB decoding adds roughly 0.130 s. This excludes a policy adapter,
+   policy execution, and a closed loop; it is a systems observation, not yet a
+   DAgger result or a video-quality claim.
 
-The first route was screened by `CSIP_PHASE0_PROTOCOL.md`. Its full spectral
+The first route was screened by the completed causal spectral-information
+probe. Its full spectral
 probe beat the matched angle-neutral probe on cosine but not MSE, and failed
 the action-specific gate because raw-no-action was substantially better on
 MSE. That closes this particular causal spectral-generator path without
@@ -596,7 +597,8 @@ episode-shuffled action. Directional cosine improved by +0.175, from 0.040 to
 MSE. However, endpoint-error gains were only 1.71%/2.24%, and both registered
 10% dense-MSE gates failed. A train-only PCA192 oracle retained 98.60% of target
 variance and reached validation cosine 0.911, making target compression an
-unlikely primary cause. This is positive causal-information evidence but a
+unlikely primary cause. This is positive action-alignment-specific predictive
+evidence but a
 `NO_GO` for using the learned field as Wan's condition. The next condition must
 come from kinematics/calibration, not from extrapolating the full future field
 with this ridge proxy.

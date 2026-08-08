@@ -160,7 +160,7 @@ parameter count, equal updates, and equal Wan calls. The mandatory arms are:
 | `FLOW-SHUFFLED` | another episode's marginally matched flow | sample attribution |
 | `FLOW-TIMESHIFT` | same episode, wrong trajectory time | temporal attribution |
 | `FLOW-WRONG-CAL` | deliberately perturbed extrinsic | geometry attribution |
-| `FLOW-ORACLE` | target-video full-scene flow | non-deployable ceiling only |
+| `FLOW-ORACLE` | target-video full-scene flow | non-deployable privileged diagnostic only |
 
 Evaluate NFE 1/2/4 without spending a transformer call on flow. Register one
 primary endpoint before training. A reasonable development gate is:
@@ -169,7 +169,7 @@ primary endpoint before training. A reasonable development gate is:
   lower bounds above 1%;
 - nonnegative latent-NMSE point effect and lower bound above -1%;
 - `FLOW-CAUSAL` materially better than shuffled, time-shifted, and wrong-cal;
-- causal retention of at least 25% of the oracle improvement;
+- causal retention of at least 25% of the empirical privileged-reference improvement;
 - full render + adapter + Wan + decoder latency reported, not model-only time.
 
 FVD/perceptual metrics, long rollouts, and a lockbox are reserved until this
@@ -177,15 +177,16 @@ development gate passes. Reusing val64 makes the current phase exploratory.
 
 ## Gate 2: stochastic residual motion
 
-Only after `FLOW-CAUSAL` improves RGB, define a training target from future RGB
-flow:
-
-\[
-r^* = M_{valid}\odot (u_{scene} - u_{robot}).
-\]
+Only after `FLOW-CAUSAL` improves RGB, derive a layered training target from
+future RGB. Do not define the state as unrestricted pixelwise
+`u_scene-u_robot`: optical flow does not add linearly across moving supports,
+occlusions, disocclusions, depth order, or visibility changes. Represent robot
+and object layers with masks, depth, visibility, and warp composition, or use a
+severe object/contact bottleneck such as particles, object SE(3), contact mode,
+attachment, and visibility.
 
 Use confidence and occlusion channels so RAFT/Farneback errors are not treated
-as physical residuals. Train a small residual-state flow/consistency model from
+as physical interaction residuals. Train a small residual-state flow/consistency model from
 `h,a,u_robot`; future RGB creates `r*` for supervision only. During RGB
 training, progressively replace clean `r*` with stopped, self-generated
 `r_hat`, ending with the inference distribution. This avoids the exact
@@ -195,13 +196,19 @@ Inference is strictly ordered:
 
 1. render `u_robot`;
 2. generate `r_hat` in one or two small-model calls;
-3. freeze `u_robot+r_hat`;
+3. freeze the layered composition of `u_robot` and `r_hat`;
 4. denoise RGB in one, two, or four Wan calls.
 
 Compare generated residuals against zero, train mean, within-episode time shift,
 episode shuffle, and clean oracle residual at the same total call and latency
 budget. Require generated-residual attribution; an oracle-only gain is not a
 deployable result.
+
+Because a causal stochastic sample need not match the dataset's single recorded
+future, paired MSE cannot be the sole primary endpoint. Use matched-count
+multi-sample distributional/perceptual metrics, calibration and coverage,
+contact/physics consistency, and downstream planning utility. Any best-of-K
+comparison must use the same K and total compute for every arm.
 
 ## Gate 3: few-call deployment
 

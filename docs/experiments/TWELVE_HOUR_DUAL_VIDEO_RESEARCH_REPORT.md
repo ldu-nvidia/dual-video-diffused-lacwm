@@ -32,9 +32,11 @@ found that planned actions add statistically positive information about future
 per-view motion summaries. It is still too weak to authorize generator training,
 and exact ABC rendering first required a robot/camera calibration diagnostic.
 That first train-only diagnostic now passes: nominal top-camera YAM rendering
-is significantly closer to observed image edges than a +4-clip-step wrong-pose
-control and is cheap enough to be causal. It remains a three-clip nominal-
-calibration feasibility result, not evidence that rendered flow improves Wan.
+from observed poses is closer to observed image edges than a +4-clip-step
+wrong-pose control in this bounded three-clip probe. Its renderer latency is
+compatible with a future causal scaffold, but the inputs used here were not
+deployable. It remains a nominal-calibration feasibility result, not evidence
+that predicted rendered flow improves Wan.
 A separate train512/val64 Stage-0 now shows that this nominal trajectory should
 not simply equal the raw command: an inference-causal 14-D tracking-correction
 predictor improved standardized residual MSE 60.08% over history-only and
@@ -48,7 +50,8 @@ but lost slightly on 64/64 clips at the final low-noise update. Consequently
 the frozen all-step coverage gate failed at 50% versus the required 60%.
 All-step privileged distillation is stopped; an early-update-only residual
 teacher was a post-hoc hypothesis and therefore faced a disjoint train-only
-replication. That NFE-2 gate passed on 64/64 fresh clips, authorizing only a
+replication. That NFE-2 gate passed on 64/64 clips that were probe-disjoint
+from the NFE-4 diagnostic, authorizing only a
 feature-free student screen—not a quality claim.
 A current literature audit also shows that nominal robot rendering is now an
 important baseline rather than a standalone novelty claim; the publishable
@@ -59,7 +62,7 @@ causal transfer, or a demonstrated low-call closed-loop advantage.
 
 | Mechanism | Future clean video needed at inference? | Status |
 |---|---:|---|
-| target-video TF/V-JEPA condition | yes | oracle upper bound only |
+| target-video TF/V-JEPA condition | yes | privileged oracle diagnostic only |
 | autonomous semantic/frequency branch before RGB | no | tested variants negative |
 | same-call midpoint scratchpad | no | tested variant negative and sample-insensitive |
 | training-only relation/spectrum/motion loss | no | TRD, TFREG, and low-frequency motion regularization negative |
@@ -71,7 +74,7 @@ causal transfer, or a demonstrated low-call closed-loop advantage.
 | privileged teacher to feature-free video student | no | NFE-4 all-step gate stopped at 50%; disjoint NFE-2 high-noise replication passed 64/64 and authorizes a PFD-VIDEO student screen only |
 | V-JEPA 2-AC future-feature predictor | no | released action-conditioned dynamics prior is distinct from the tested encoder/generator; action-attribution screen not yet run |
 | consistency/self-forcing distillation | no auxiliary required | primary speed route after a stronger teacher exists |
-| latent-only policy adapter | no decoded RGB for policy | measured systems fallback near 8.49 rollouts/s p95 |
+| prospective latent-only policy adapter | no decoded RGB for policy | warmed latent endpoint measured near 8.49 rollouts/s p95; policy and closed loop untested |
 
 ## Information boundary: what an autonomous feature can and cannot do
 
@@ -88,7 +91,8 @@ under that independent-sampling contract. `U_hat` can express a plausible
 future, but it cannot identify which irreducible contact/object outcome the
 recording happened to realize. In contrast, an oracle `U*=E(X)` generally has
 positive conditional mutual information precisely because it reads the target;
-that explains both its large upper bound and its deployment failure.
+that explains both its large privileged-reference advantage and its deployment
+failure.
 
 This does not make an autonomous intermediate useless. It can still help in
 four narrower ways:
@@ -114,7 +118,7 @@ and on-policy-teacher experiments target mechanisms 2 and 3 directly.
 Positive numbers below mean lower error. All are development evidence, not FVD,
 long-horizon, protected-test, or closed-loop task claims.
 
-| Screen | Main NFE-1 result | Mechanism diagnosis |
+| Screen | Main result | Mechanism diagnosis |
 |---|---|---|
 | generated V-JEPA/full-clip state | fusion-on approximately equalled off/shuffled; flow training worse | autonomous feature lacked useful causal identity |
 | generated Haar forcing | best joint arm -6.39% latent, -3.86% decoded, -0.74% temporal | synchronous auxiliary output arrives too late for the same Wan call |
@@ -122,15 +126,15 @@ long-horizon, protected-test, or closed-loop task claims.
 | midpoint generated scratchpad | -0.18%/-1.13%/-0.26%; aligned approximately shuffled | nonzero injection, no sample-specific use |
 | action-delta residual | -1.06%/-1.09%/-0.023% | gate/action path collapsed |
 | fixed-dose ordered action tokens | +0.405% latent, +0.259% decoded, -0.086% temporal; all gates failed | route opened, but action-specific effect remained near zero |
-| VideoREPA relation loss, 0.5/0.05 | teacher relation improved 90.2%/84.1%, while deployable video worsened at both doses | representation imitation conflicted with or failed to help flow learning |
+| VideoREPA relation loss, 0.5/0.05 | student-to-teacher relation error fell 90.2%/84.1%, while deployable video worsened at both doses | representation imitation conflicted with or failed to help flow learning |
 | TF spectral loss, 0.05 | -0.564%/-0.134%/-0.110% | zero inference dependency, but no quality gain; exploratory geometry mismatch |
 | per-view low-frequency motion loss, 0.05 | -0.256% latent, +0.662% decoded, +0.099% temporal; every registered gate failed | tiny uncertain appearance/motion points, latent regression, and the same effect under aligned/shuffled/zero actions |
 | action-to-Farneback-summary proxy | +6.59% versus history-only; +9.04% versus shuffled actions | planned actions contain incremental motion information, but target is coarse |
 | action-to-dense-top-flow proxy | +2.91% dense MSE versus history and +2.94% versus shuffled; cosine 0.040 to 0.216 | genuine action-specific direction, but both preregistered 10% handoff gates failed |
-| confidence gate over midpoint scratchpad | no valid inference confidence was preserved; a forbidden perfect temporal oracle gained only +0.0447% | always-off is the only honest no-regret policy for this auxiliary |
+| confidence gate over midpoint scratchpad | no valid inference confidence was preserved; a forbidden perfect temporal oracle gained only +0.0447% | always-off is the safe fallback under the registered materiality gate |
 | nominal D405/YAM geometry | correct-pose Chamfer 8.444 px versus 13.025 px at +4 clip steps; shifted-minus-aligned +4.581 px [3.320, 5.865] | narrow train-only feasibility pass; 3/3 clips positive and render p95 2.769 ms, but no masks, calibrated distortion, flow, or video-generation endpoint |
 | nominal-to-realized tracking residual | aligned standardized MSE 0.3719 versus 0.9316 history, 1.3499 shuffled, 1.1812 raw-command/zero residual, and 14.245 hold-current; gains +60.08%/+72.45%/+68.52%/+97.39% with positive paired intervals | strongest compact inference-causal signal; predicts robot command-tracking error, not object/contact motion, and advances only to corrected-render alignment |
-| privileged teacher eligibility | NFE-4 aggregate improved 18.00% versus off, but only 64/128 units improved because sigma 1 was +90.44% on 64/64 and sigma 0.0244 was -1.92% on 0/64; a disjoint NFE-2 sigma-1 replication improved 89.95% versus off and 80.02% versus shuffled on 64/64 | all-step `STOP` remains; high-noise teacher is reproducible and eligible for a feature-free residual-student screen, but no student/video gain exists yet |
+| privileged teacher eligibility | NFE-4 aggregate improved 18.00% versus off, but only 64/128 units improved because sigma 1 was +90.44% on 64/64 and sigma 0.0244 was -1.92% on 0/64; a probe-disjoint NFE-2 sigma-1 same-checkpoint replication improved 89.95% versus off and 80.02% versus shuffled on 64/64 | all-step `STOP` remains; the high-noise effect replicated on a disjoint probe subset and is eligible for a feature-free residual-student screen, but no student/video gain exists yet |
 
 ## Why image Latent Forcing and these video attempts diverged
 
@@ -259,6 +263,10 @@ x\sim p_\theta(x\mid h,a,u_{robot}+r),
 
 where `r` captures object motion/contact residuals. Require generated residuals
 to beat zero, train-mean, and shuffled residuals at equal total calls.
+Here `u_robot+r` denotes layered conditioning/fusion, not literal optical-flow
+addition: robot/object masks, depth, visibility, occlusion, and warp composition
+must be explicit. A raw RAFT/Farneback difference is not by itself an
+interaction state.
 The leakage contract, state channels, attribution arms, thresholds, and stop
 rules are frozen in `PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md`.
 
@@ -333,7 +341,8 @@ only +0.0636%/+0.0326%, while aligned versus future-shuffled temporal error was
 -0.0047% with interval [-0.0227, +0.0129]%.  More decisively, a prohibited
 target-aware chooser selected 36/64 clips and still gained only +0.0447%
 temporal MSE.  Therefore no fitted confidence gate or generator continuation is
-justified; `always off` is the exact no-regret policy for this artifact.  This
+justified; `always off` is the safe fallback under the registered materiality
+gate for this artifact. This
 does not reject confidence gating for a future auxiliary that emits calibrated,
 inference-observable uncertainty and first shows material sample-specific
 utility.
@@ -405,7 +414,8 @@ update was exactly at `sigma_video=1`. Aligned clean V-JEPA reduced velocity MSE
 from 1.72645 to 0.17352: +89.949% `[89.418,90.463]`, with 64/64 favorable
 units. It also beat episode-shuffled clean V-JEPA by 80.020%
 `[78.233,81.685]`. The target-leaking full rollout improved latent/decoded/
-temporal error 90.03%/79.16%/63.52% over off; those remain oracle ceilings.
+temporal error 90.03%/79.16%/63.52% over off; those remain privileged oracle
+diagnostics rather than deployable bounds.
 
 This pass has an important attribution consequence. At `sigma_video=1`, no
 video update has yet occurred, so a student-visited state and the ordinary
@@ -447,10 +457,12 @@ only and complete latency must therefore be gated before integration.
    arms at NFE 1/2/4; do not use the failed learned dense proxy as the condition.
 4. If analytic causal flow has an attributed quality gain, port full per-block joint
    RGB/flow attention and test the physics-anchored residual state.
-5. Keep all-step privileged distillation stopped. The disjoint high-noise gate
-   passed; implement the next controlled feature-free screen with `BASE`,
-   `PFD-VIDEO`, aligned/shuffled residual teachers, and equal capacity/calls.
-   Do not claim an on-policy advantage at the initial pure-noise state.
+5. Keep all-step privileged distillation stopped. The probe-disjoint high-noise
+   gate passed; first measure whether its residual is causally compressible,
+   then run the controlled feature-free screen with J1-off, direct-residual,
+   aligned/shuffled PFD, equal capacity/calls, and the actual VPM@1 frontier.
+   Do not claim an on-policy advantage at the initial pure-noise state or a
+   gain if PFD merely repairs the weaker J1 parent.
 6. In parallel, screen V-JEPA 2-AC predicted future tokens for action
    specificity before another semantic Wan integration.
 7. Distill only the strongest causal teacher to two/four calls; report complete

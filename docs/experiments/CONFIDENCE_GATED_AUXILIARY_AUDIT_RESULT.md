@@ -6,7 +6,7 @@
 even a perfect target-leaking selector has a negligible ceiling. Do not launch
 a generator experiment from this result.**
 
-The exact no-regret policy supported by this artifact is to keep the
+The safe fallback under the registered materiality gate is to keep the
 same-checkpoint midpoint injection off for every clip. This retains 0% of the
 unattainable oracle gain. It is safe under corrupted auxiliary input because
 it reuses the already generated `off` endpoint exactly.
@@ -102,7 +102,7 @@ temporal rows. The respective selection fractions are 53.1%, 60.9%, and 56.2%;
 none supplies a deployable selection rule because the sign is known only after
 clean-target scoring.
 
-## Unattainable oracle ceilings
+## Unattainable oracle diagnostics
 
 The perfect temporal oracle reads both future-target temporal errors and picks
 aligned only when aligned is lower. It selects 36/64 clips (56.25%, bootstrap

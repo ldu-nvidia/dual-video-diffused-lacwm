@@ -17,7 +17,7 @@ The broader deployable study is now summarized in
 [`TWELVE_HOUR_DUAL_VIDEO_RESEARCH_REPORT.md`](docs/experiments/TWELVE_HOUR_DUAL_VIDEO_RESEARCH_REPORT.md)
 and the living evidence map
 [`DEPLOYABLE_DUAL_VIDEO_DIRECTIONS.md`](docs/experiments/DEPLOYABLE_DUAL_VIDEO_DIRECTIONS.md).
-Oracle clean-future TF/V-JEPA features remain upper bounds, while the tested
+Oracle clean-future TF/V-JEPA features remain privileged diagnostics, while the tested
 autonomous semantic/frequency branches and training-only relation/spectrum
 losses have not improved the low-NFE generator. The selected next hypothesis is
 an inference-causal robot-only flow scaffold computed from planned actions,
@@ -50,13 +50,14 @@ harmful at the final low-noise update, leaving only 50% favorable units versus
 the registered 60% requirement. The exact timestep split and immutable evidence
 are in
 [`PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`](docs/experiments/PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md).
-A preregistered replication on 64 disjoint train episodes then confirmed that
+A preregistered same-checkpoint replication on 64 probe-disjoint train episodes then confirmed that
 the clean-feature teacher is uniformly strong at the sole NFE-2 pure-noise
 video update (89.95% velocity-MSE gain over off; 64/64 favorable). This passes
 only the prerequisite for a feature-free `PFD-VIDEO` student screen; no student
 or deployable gain exists yet. See
 [`PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md`](docs/experiments/PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md).
-The required `BASE-PM`/direct-residual/aligned/shuffled PFD student comparison
+The required J1-off/direct-residual/aligned/shuffled PFD comparison plus the
+actual VPM@1 frontier
 is specified in
 [`PRIVILEGED_HIGH_NOISE_VIDEO_RESIDUAL_STUDENT_PROTOCOL.md`](docs/experiments/PRIVILEGED_HIGH_NOISE_VIDEO_RESIDUAL_STUDENT_PROTOCOL.md).
 The read-only confidence-gating audit and its fail-closed result are documented

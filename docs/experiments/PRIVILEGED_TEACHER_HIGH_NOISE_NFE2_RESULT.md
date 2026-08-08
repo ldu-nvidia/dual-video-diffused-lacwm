@@ -7,7 +7,7 @@ calibration gate. No student was trained.**
 
 ## Result in one sentence
 
-On 64 untouched train episodes, the clean-future V-JEPA teacher improved the
+On 64 train episodes probe-disjoint from the NFE-4 diagnostic, the clean-future V-JEPA teacher improved the
 sole NFE=2 high-noise video-velocity query on **64/64 units**, reducing mean
 velocity MSE by **89.949%** versus feature-off and **80.020%** versus an
 episode-shuffled clean-feature teacher; all five preregistered eligibility

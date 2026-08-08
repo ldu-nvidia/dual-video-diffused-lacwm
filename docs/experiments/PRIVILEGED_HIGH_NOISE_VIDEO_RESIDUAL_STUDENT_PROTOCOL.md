@@ -18,6 +18,12 @@ That pass proves only that a strong sample-specific **training teacher** exists.
 It does not prove that its correction is predictable from causal inputs or that
 a feature-free model improves.
 
+The J1 parent is not the current video-only frontier. In the prior controlled
+study, its update-1000 video-flow loss was 31.6% worse than VPM, and at NFE 1
+its validation decoded MSE was 0.0199946 versus 0.0191015 for VPM. Therefore a
+student that improves only over J1-off is not sufficient; it must also beat the
+existing VPM@1 endpoint under a matched fresh evaluation.
+
 ## Attribution that changes the next experiment
 
 At `sigma_video=1`, no video update precedes the teacher query. The student-
@@ -31,6 +37,19 @@ Ordinary flow matching already observes the clean-video velocity target during
 training. Extra adapter capacity trained directly on that target is therefore
 a mandatory stronger control. Without it, a gain from the privileged arm could
 be ordinary residual fitting rather than V-JEPA structure.
+
+## Causal-compressibility preflight
+
+Before a full continuation, freeze J1 and collect only optimization-split rows
+at `sigma=1`: the inference-visible off hidden state, direct residual
+`v*-v_S`, and privileged residual `v_T-v_S`. Fit identical small probes to the
+direct, aligned-privileged, shuffled-privileged, and zero targets. Evaluate on
+episode-disjoint development rows with zero teacher/cache calls. Report
+held-out residual R2/cosine, corrected velocity MSE, one-step latent/decoded/
+temporal quality, latency, and the comparison with VPM@1. If aligned privileged
+prediction does not beat both direct and shuffled prediction, stop before the
+expensive student continuation: the oracle correction is not shown to be
+causally compressible.
 
 ## Information contract
 
@@ -54,21 +73,28 @@ for metrics after sampling.
 
 ## Controlled arms
 
-Every arm starts from one parent snapshot and uses the same data order, noise,
-optimizer, updates, trainable backbone subset, adapter architecture, and
-inference calls.
+The five attribution arms below start from the same J1 parent snapshot and use
+the same data order, noise, optimizer, updates, trainable backbone subset,
+adapter architecture, and inference calls.
 
 | Arm | Adapter training target at sigma 1 | Purpose |
 |---|---|---|
-| `BASE-PM` | zero target; adapter instantiated and held at exact zero | parameter/interface control |
-| `DIRECT-RESIDUAL` | stopped ordinary `v* - v_S` | tests whether extra causal residual capacity is sufficient without V-JEPA |
-| `PFD-ALIGNED` | stopped aligned `v_T - v_S` | primary privileged semantic teacher |
-| `PFD-SHUFFLED` | stopped episode-shuffled-teacher residual | sample-specific V-JEPA attribution |
-| `PFD-GATED` | aligned residual only where `e_T < e_S`, training-only | tests whether rejecting harmful teacher units matters |
+| `J1-OFF-PM` | zero target; adapter instantiated and held at exact zero | within-J1 parameter/interface control |
+| `J1-DIRECT-RESIDUAL` | stopped ordinary `v* - v_S` | tests whether extra causal residual capacity is sufficient without V-JEPA |
+| `J1-PFD-ALIGNED` | stopped aligned `v_T - v_S` | primary privileged semantic teacher |
+| `J1-PFD-SHUFFLED` | stopped episode-shuffled-teacher residual | sample-specific V-JEPA attribution |
+| `J1-PFD-GATED` | aligned residual only where `e_T < e_S`, training-only | tests whether rejecting harmful teacher units matters |
 
-Do not label any arm `OPD` at this initial state. If `DIRECT-RESIDUAL` matches
-`PFD-ALIGNED`, the supported mechanism is added residual capacity/optimization,
-not privileged semantic transfer. If `PFD-ALIGNED` matches `PFD-SHUFFLED`, the
+The outcome table must also include the frozen `VPM@1` frontier, evaluated on
+the identical clips and seeds. Preferably add a fresh `VPM-DIRECT-RESIDUAL`
+continuation with matched adapter capacity and optimization budget. This
+separates recovery of a damaged J1 parent from an actual improvement over the
+best existing video-only model.
+
+Do not label any arm `OPD` at this initial state. If `J1-DIRECT-RESIDUAL`
+matches `J1-PFD-ALIGNED`, the supported mechanism is added residual
+capacity/optimization, not privileged semantic transfer. If `J1-PFD-ALIGNED`
+matches `J1-PFD-SHUFFLED`, the
 clean feature is not sample-specifically useful to the causal student.
 
 ## Training and data separation
@@ -88,18 +114,20 @@ clean feature is not sample-specifically useful to the causal student.
 ## Evaluation and decision
 
 Evaluate feature-free NFE 1 and 2 with the same seeds and total Wan calls.
-Primary comparison is `PFD-ALIGNED` versus both `BASE-PM` and
-`DIRECT-RESIDUAL`; `PFD-SHUFFLED` is the attribution control. Positive means
-lower error.
+Primary within-parent comparison is `J1-PFD-ALIGNED` versus both `J1-OFF-PM`
+and `J1-DIRECT-RESIDUAL`; `J1-PFD-SHUFFLED` is the attribution control. The
+deployable endpoint must additionally beat frozen `VPM@1` and, if trained,
+`VPM-DIRECT-RESIDUAL`. Positive means lower error.
 
 Advance only if one preregistered NFE satisfies all of:
 
-1. decoded and temporal MSE improve at least 3% over both `BASE-PM` and
-   `DIRECT-RESIDUAL`, with paired 95% lower bounds above 1%;
+1. decoded and temporal MSE improve at least 3% over both `J1-OFF-PM` and
+   `J1-DIRECT-RESIDUAL`, with paired 95% lower bounds above 1%, and improve
+   over the actual `VPM@1` frontier with positive paired lower bounds;
 2. latent NMSE has a nonnegative point effect and lower bound above -1%;
-3. decoded and temporal MSE beat `PFD-SHUFFLED` by at least 1%;
+3. decoded and temporal MSE beat `J1-PFD-SHUFFLED` by at least 1%;
 4. aligned-versus-shuffled and aligned-versus-zero action sensitivity do not
-   regress relative to `BASE-PM`;
+   regress relative to `J1-OFF-PM`;
 5. inference makes exactly the baseline number of Wan calls, zero teacher/
    cache calls, and adds no material end-to-end latency; and
 6. no metric is selected from the protected split.
@@ -118,4 +146,3 @@ would require a demonstrated target-video semantic teacher for low-NFE robot
 **video velocity**, advantage over direct-residual and shuffled controls,
 feature-free serving, and preferably closed-loop world-model utility. At the
 initial pure-noise state, no on-policy novelty can be claimed.
-
