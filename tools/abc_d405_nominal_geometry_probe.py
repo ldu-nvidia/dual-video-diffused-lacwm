@@ -423,7 +423,14 @@ def load_bundles(bundle_dir: Path) -> list[LoadedBundle]:
             raise ValueError(f"Bundle hash mismatch: {npz_path}")
         with np.load(npz_path, allow_pickle=False) as payload:
             arrays = {name: payload[name].copy() for name in payload.files}
-        required = {"rgb", "joint_states", "gripper_states", "K", "frame_indices"}
+        required = {
+            "rgb",
+            "joint_states",
+            "gripper_states",
+            "K",
+            "frame_indices",
+            "frame_ts",
+        }
         missing = required - arrays.keys()
         if missing:
             raise ValueError(f"Bundle {npz_path} lacks arrays: {sorted(missing)}")
@@ -622,8 +629,10 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
 
     rows: list[dict[str, Any]] = []
     latency_ms: list[float] = []
-    overlay_paths: list[str] = []
+    max_pose_overlay_paths: list[str] = []
+    failure_overlay_paths: list[str] = []
     calibrations: list[dict[str, Any]] = []
+    control_timings: list[dict[str, Any]] = []
     renderer = None
     renderer_shape = None
     try:
@@ -648,6 +657,26 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
             aligned_masks = []
             shifted_masks = []
             shifted_indices = [int((index + args.pose_shift) % count) for index in range(count)]
+            nonwrap_count = count - args.pose_shift
+            frame_shift = (
+                arrays["frame_indices"][args.pose_shift:]
+                - arrays["frame_indices"][:nonwrap_count]
+            )
+            timestamp_shift_ns = (
+                arrays["frame_ts"][args.pose_shift:]
+                - arrays["frame_ts"][:nonwrap_count]
+            )
+            control_timings.append(
+                {
+                    "clip_id": bundle.metadata["clip_id"],
+                    "median_source_video_frame_shift": float(np.median(frame_shift)),
+                    "median_timestamp_shift_seconds": float(
+                        np.median(timestamp_shift_ns) / 1_000_000_000.0
+                    ),
+                    "cyclic_wrap_frame_count": args.pose_shift,
+                    "nonwrap_frame_count": nonwrap_count,
+                }
+            )
             for index in range(count):
                 for pose_index, target in (
                     (index, aligned_masks),
@@ -699,8 +728,9 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
                 shifted_masks[overlay_index],
                 f"frame={int(arrays['frame_indices'][overlay_index])}",
             )
-            overlay_paths.append(str(overlay_path))
+            max_pose_overlay_paths.append(str(overlay_path))
 
+            bundle_rows = []
             for index in range(count):
                 edges = observed_edges(rgb[index])
                 aligned_metrics = edge_alignment_metrics(aligned_masks[index], edges)
@@ -716,6 +746,25 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
                     "shifted": shifted_metrics,
                 }
                 rows.append(row)
+                bundle_rows.append(row)
+
+            worst_index = int(
+                np.argmax([row["aligned"]["chamfer_px"] for row in bundle_rows])
+            )
+            failure_overlay_path = (
+                args.output_dir / f"failure_worst_{bundle.metadata['clip_id'][:12]}.png"
+            )
+            _write_overlay(
+                failure_overlay_path,
+                rgb[worst_index],
+                aligned_masks[worst_index],
+                shifted_masks[worst_index],
+                (
+                    f"worst aligned frame={int(arrays['frame_indices'][worst_index])} "
+                    f"chamfer={bundle_rows[worst_index]['aligned']['chamfer_px']:.1f}px"
+                ),
+            )
+            failure_overlay_paths.append(str(failure_overlay_path))
     finally:
         if renderer is not None:
             renderer.close()
@@ -730,9 +779,74 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
     aligned_support = np.asarray([row["aligned"]["edge_support_3px"] for row in rows])
     shifted_support = np.asarray([row["shifted"]["edge_support_3px"] for row in rows])
     delta, lower, upper = paired_bootstrap_mean_ci(shifted_chamfer - aligned_chamfer)
+    clip_counts = {
+        clip_id: sum(1 for row in rows if row["clip_id"] == clip_id)
+        for clip_id in {str(row["clip_id"]) for row in rows}
+    }
+    nonwrap_rows = [
+        row
+        for row in rows
+        if row["frame_ordinal"] + args.pose_shift < clip_counts[str(row["clip_id"])]
+    ]
+    nonwrap_delta = np.asarray(
+        [
+            row["shifted"]["chamfer_px"] - row["aligned"]["chamfer_px"]
+            for row in nonwrap_rows
+        ]
+    )
+    nonwrap_support_delta = np.asarray(
+        [
+            row["aligned"]["edge_support_3px"]
+            - row["shifted"]["edge_support_3px"]
+            for row in nonwrap_rows
+        ]
+    )
+    nonwrap_mean, nonwrap_lower, nonwrap_upper = paired_bootstrap_mean_ci(nonwrap_delta)
+    clip_metrics = []
+    clip_mean_chamfer_deltas = []
+    for clip_id in sorted({str(row["clip_id"]) for row in rows}):
+        clip_rows = [row for row in rows if row["clip_id"] == clip_id]
+        clip_aligned = np.asarray(
+            [row["aligned"]["chamfer_px"] for row in clip_rows]
+        )
+        clip_shifted = np.asarray(
+            [row["shifted"]["chamfer_px"] for row in clip_rows]
+        )
+        clip_aligned_support = np.asarray(
+            [row["aligned"]["edge_support_3px"] for row in clip_rows]
+        )
+        clip_shifted_support = np.asarray(
+            [row["shifted"]["edge_support_3px"] for row in clip_rows]
+        )
+        clip_delta, clip_lower, clip_upper = paired_bootstrap_mean_ci(
+            clip_shifted - clip_aligned
+        )
+        clip_mean_chamfer_deltas.append(clip_delta)
+        clip_metrics.append(
+            {
+                "clip_id": clip_id,
+                "frame_count": len(clip_rows),
+                "aligned_chamfer_px_mean": float(clip_aligned.mean()),
+                "shifted_chamfer_px_mean": float(clip_shifted.mean()),
+                "paired_shifted_minus_aligned_chamfer_px_mean": clip_delta,
+                "paired_frame_bootstrap_95_ci": [clip_lower, clip_upper],
+                "aligned_edge_support_3px_mean": float(clip_aligned_support.mean()),
+                "shifted_edge_support_3px_mean": float(clip_shifted_support.mean()),
+                "edge_support_delta_percentage_points": float(
+                    100.0 * (clip_aligned_support.mean() - clip_shifted_support.mean())
+                ),
+            }
+        )
+    _, clip_block_lower, clip_block_upper = paired_bootstrap_mean_ci(
+        np.asarray(clip_mean_chamfer_deltas)
+    )
     latency = np.asarray(latency_ms[2:] if len(latency_ms) > 2 else latency_ms)
     quality_gate = bool(lower > 0.0 and aligned_support.mean() > shifted_support.mean())
     tool_path = Path(__file__).resolve()
+    preprocessor_path = (
+        tool_path.parents[1]
+        / "robot_wm/datasets/abc/preprocessing/abc_preprocess.py"
+    )
     analysis = {
         "artifact_type": "abc-d405-nominal-geometry-probe",
         "format_version": 1,
@@ -763,10 +877,27 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
             "joint_states": "[left_joint1..6,right_joint1..6]",
             "gripper_states": "[left,right] normalized then +/-0.0475 finger qpos",
             "cache14_to_official14": list(CACHE14_TO_OFFICIAL14),
+            "preprocessor_timing": {
+                "source": "robot_wm/datasets/abc/preprocessing/abc_preprocess.py:86-92",
+                "source_sha256": sha256_file(preprocessor_path),
+                "behavior": (
+                    "np.searchsorted timestamps are used directly, so a frame between "
+                    "samples receives the next/ceiling state despite the nearest comment."
+                ),
+            },
         },
         "control": {
             "type": "cyclic_time_shift_within_same_train_clip",
             "pose_shift_frames": args.pose_shift,
+            "timing_by_clip": control_timings,
+            "nonwrap_sensitivity": {
+                "frame_count": len(nonwrap_rows),
+                "paired_shifted_minus_aligned_chamfer_px_mean": nonwrap_mean,
+                "paired_frame_bootstrap_95_ci": [nonwrap_lower, nonwrap_upper],
+                "edge_support_delta_percentage_points": float(
+                    100.0 * nonwrap_support_delta.mean()
+                ),
+            },
         },
         "metrics": {
             "aligned_chamfer_px_mean": float(aligned_chamfer.mean()),
@@ -776,11 +907,19 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "paired_shifted_minus_aligned_chamfer_px_mean": delta,
             "paired_bootstrap_95_ci": [lower, upper],
+            "clip_block_bootstrap_95_ci_sensitivity": [
+                clip_block_lower,
+                clip_block_upper,
+            ],
+            "clips_with_positive_mean_chamfer_delta": int(
+                np.sum(np.asarray(clip_mean_chamfer_deltas) > 0.0)
+            ),
             "aligned_edge_support_3px_mean": float(aligned_support.mean()),
             "shifted_edge_support_3px_mean": float(shifted_support.mean()),
             "edge_support_delta_percentage_points": float(
                 100.0 * (aligned_support.mean() - shifted_support.mean())
             ),
+            "by_clip": clip_metrics,
         },
         "diagnostic_gate": {
             "definition": "chamfer paired-bootstrap lower bound > 0 and aligned 3px support > shifted",
@@ -796,13 +935,18 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
         "bundles": [bundle.metadata["identity_sha256"] for bundle in bundles],
         "rows": str(row_path),
         "rows_sha256": sha256_file(row_path),
-        "overlays": overlay_paths,
+        "overlays": {
+            "maximum_pose_difference": max_pose_overlay_paths,
+            "worst_aligned_failure_audit": failure_overlay_paths,
+        },
         "limitations": [
             "Exploratory train-only calibration probe; no held-out quality claim.",
             "Observed RGB edges contain objects/background and are not robot segmentation ground truth.",
             "Official MJCF camera extrinsics are nominal and not per-episode calibration.",
             "MuJoCo rendering uses centered principal point and does not apply D405 distortion.",
             "Observed states are used only to validate geometry; deployable scaffolds must replay planned actions.",
+            "ABC preprocessing uses next/ceiling timestamp resampling, not true nearest resampling; this probe cannot establish sub-frame temporal calibration.",
+            "The primary four-clip-step control is about 20 source-video frames, not a subtle timing perturbation.",
         ],
     }
     analysis["identity_sha256"] = sha256_json(analysis)
