@@ -2,7 +2,8 @@
 
 Date: 2026-08-08
 
-Status: prospective protocol; no downstream generator claim has been made
+Status: learned-proxy Stage 0B completed `NO_GO`; analytic geometry Stage 0A
+remains prospective; no downstream generator claim has been made
 
 ## Scientific question
 
@@ -119,6 +120,19 @@ it does not authorize Stage 1 by itself. A diagnostic top-view slice was
 +12.61% [10.23,15.08], versus +3.57%/+3.18% for the two wrist views; signed
 direction was more predictable than magnitude. Freeze that top-view hypothesis
 before the next run rather than retroactively redefining the completed endpoint.
+
+The frozen dense top-view follow-up is now complete. Its exact registered
+endpoint used raw dense-field MSE, with separate 10% aligned-versus-history and
+aligned-versus-shuffled gates plus nonregression and compression checks. Aligned
+actions improved dense MSE by only 2.91% [2.49, 3.40] over history and 2.94%
+[2.41, 3.60] over shuffled actions; endpoint error improved 1.71%/2.24%.
+Directional cosine did rise from 0.040 to 0.216, and all 64 clips favored the
+aligned model over history in dense MSE, so the action signal is real rather
+than shuffled-invariant. Nevertheless both 10% handoff gates failed. This is a
+`NO_GO` for Stage 1 with the learned ridge field. The remaining Stage 1 route
+must first pass Stage 0A with an analytic kinematic render; it may not silently
+substitute the failed learned proxy. See `DENSE_TOP_FLOW_STAGE0.md` for the
+sealed identities and post-hoc diagnostics.
 
 ## Stage 1: fixed-flow RGB conditioning
 

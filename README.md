@@ -27,6 +27,13 @@ After the learned dense-flow proxy failed its strict handoff threshold, the
 selected analytic-flow, stochastic-residual, and few-call generator protocol is
 frozen in
 [`PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md`](docs/experiments/PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md).
+The sealed dense proxy result and post-hoc horizon diagnostics are in
+[`DENSE_TOP_FLOW_STAGE0.md`](docs/experiments/DENSE_TOP_FLOW_STAGE0.md).
+A complementary training-only route that distills a privileged clean-feature
+teacher into a feature-free on-policy student is frozen in
+[`PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`](docs/experiments/PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md).
+The read-only confidence-gating audit and its fail-closed result are documented
+in [`CONFIDENCE_GATED_AUXILIARY_AUDIT_RESULT.md`](docs/experiments/CONFIDENCE_GATED_AUXILIARY_AUDIT_RESULT.md).
 
 The prefix-causal V-JEPA 2 semantic representation screen is complete. It
 learned history-specific scene semantics but failed the frozen temporal and

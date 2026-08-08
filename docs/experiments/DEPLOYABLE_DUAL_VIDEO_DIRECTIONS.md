@@ -43,6 +43,7 @@ ABC screen, not protected-test or general video-quality claims.
 | causal spectral-information probe (CSIP) | spectral angle improved target cosine over a matched magnitude/support-only probe by +0.127 (simultaneous lower bound +0.023), but improved MSE only 1.57% with a negative lower bound (-7.61%); aligned actions were 314% worse than raw-no-action in relative MSE | phase is partly informative, but no action-specific causal spectral route was demonstrated; stop this generator path |
 | causal action-to-motion-summary Stage 0 | a train-only ridge model using observed motion plus planned actions improved val64 standardized future Farneback-summary MSE by 6.59% over history-only (paired 95% interval 4.96--8.05%) and by 9.04% over the same model with episode-shuffled actions (7.19--11.10%); aggregate R2 rose from 0.098 to 0.158 | passes its preregistered exploratory 1% information/specificity gates, but not the later proposed 10% all-view integration gate; supports a calibrated dense-flow follow-up, not a generator-quality claim |
 | causal action-to-dense-top-flow Stage 0 | planned actions improved raw dense-flow MSE by 2.91% over history-only (paired interval 2.49--3.40%) and 2.94% over shuffled actions (2.41--3.60%); directional cosine rose from 0.040 to 0.216, but endpoint error improved only 1.71%/2.24% | `NO_GO`: the action signal is real and directional, but both preregistered 10% dense-MSE handoff gates failed; use an analytic kinematic scaffold rather than this learned proxy for the generator test |
+| retrospective confidence gate over midpoint scratchpad | no valid per-clip inference confidence was preserved; aligned versus future-shuffled temporal effect was -0.0047% [-0.0227, +0.0129], and even a target-leaking perfect chooser gained only 0.0447% [0.0320, 0.0588] | no actionable gating opportunity; exact always-off fallback is the only honest no-regret policy for this artifact |
 
 Across the residual, LaMo, two-clock, and observed-anchor screens, action or
 sample shuffling changes the relevant outputs by at most small fractions of a
@@ -569,6 +570,43 @@ first helps and if a generated residual beats zero/mean/shuffled residuals at
 equal calls. Otherwise it repeats the already failed autonomous-feature path
 with a more elaborate parameterization.
 
+## Direction 11b: privileged on-policy teacher distillation
+
+The oracle-clean result can be used without putting an unavailable feature in
+the deployed sampler.  During training only, evaluate a teacher with the clean
+target-video TF/V-JEPA feature and a causal student without it at the same
+student-visited video state:
+
+\[
+v_T=v_{\bar\theta}(z_t^S,t,h,a,u^*),\qquad
+v_S=v_\theta(z_t^S,t,h,a,\varnothing).
+\]
+
+Match the teacher's stopped video velocity only where it is better than the
+ordinary flow target and its discrepancy from the student falls inside a
+train-frozen reachability percentile.  The teacher, feature encoder, and clean
+feature cache are deleted from the inference graph.  This cannot transfer
+irreducible future identity, but it can test whether the oracle branch provides
+a smoother, more reachable denoising field than the raw target.
+
+This was **not** tested by the negative VideoREPA relation-loss arms.  Those
+aligned hidden relation matrices at ordinary forward-noised samples; they did
+not match the privileged teacher's actual denoising policy on the causal
+student's rollout distribution.  Current external evidence is relevant but
+not dispositive: [branch-aware on-policy diffusion distillation](https://arxiv.org/html/2607.24731)
+transfers dense control to sparse-control video students, while
+[future-privileged self-distillation](https://arxiv.org/html/2607.27055) uses a
+reachability gate for a causal student in sequential recommendation.  The
+former also warns that classifier-free positive/negative branches must be
+matched separately when privileged conditioning makes their information
+asymmetric.
+
+The exact train-only teacher eligibility gate, five controlled arms, leakage
+assertions, and development thresholds are frozen in
+`PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`.  It is a
+prospective training-only alternative, not a completed positive result or an
+inference-time dual-diffusion claim.
+
 ## Direction 12: per-view low-frequency motion supervision
 
 The joint-view TFREG screen mixed three camera views along the FFT width and had
@@ -600,14 +638,17 @@ training-only two-token motion-loss route, not dense causal motion scaffolds.
    before modifying the RGB generator.
 2. If that gate passes, run flow-off/aligned/shuffled/oracle conditioning at
    equal Wan calls and report both end-to-end scaffold cost and RGB quality.
-3. Distill only a demonstrably stronger causal flow-conditioned teacher with an
+3. In parallel, run the train-only privileged-teacher eligibility gate on
+   student-visited states.  If it passes, compare gated on-policy distillation
+   with off-policy, ungated, shuffled-teacher, and base continuations.
+4. Distill only a demonstrably stronger causal flow-conditioned teacher with an
    inference-consistent/self-forced objective to two or four calls. The current
    VPM NFE-4 trajectory is worse than NFE 1 and is not a valid teacher.
-4. In parallel, prototype a policy adapter over generated Wan latents and
+5. In parallel, prototype a policy adapter over generated Wan latents and
    measure closed-loop task utility at the observed latent-only p95 latency.
    Optimize or distill the VAE decoder separately if RGB is operationally
    required at 5--10 Hz.
-5. Advance a mechanism to multi-seed DROID and one untouched lockbox only after
+6. Advance a mechanism to multi-seed DROID and one untouched lockbox only after
    it passes action-attribution, latency, and quality gates on development data.
 
 Every comparison must report quality at the same total transformer calls,

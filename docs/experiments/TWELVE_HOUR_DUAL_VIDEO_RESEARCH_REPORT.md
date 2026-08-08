@@ -41,6 +41,7 @@ and exact ABC rendering first requires a robot/camera calibration gate.
 | learned action-to-dense-flow proxy | no | real direction signal, but failed the strict generator-handoff gate |
 | analytic planned-action robot-only flow | no | strongest next route; geometry/calibration prerequisite |
 | physics-anchored stochastic residual flow | no | prospective genuine dual-diffusion extension |
+| privileged teacher to on-policy video-only student | no | strongest training-only salvage of the oracle gain; newly frozen, not yet run |
 | consistency/self-forcing distillation | no auxiliary required | primary speed route after a stronger teacher exists |
 | latent-only policy adapter | no decoded RGB for policy | measured systems fallback near 8.49 rollouts/s p95 |
 
@@ -62,6 +63,7 @@ long-horizon, protected-test, or closed-loop task claims.
 | per-view low-frequency motion loss, 0.05 | -0.256% latent, +0.662% decoded, +0.099% temporal; every registered gate failed | tiny uncertain appearance/motion points, latent regression, and the same effect under aligned/shuffled/zero actions |
 | action-to-Farneback-summary proxy | +6.59% versus history-only; +9.04% versus shuffled actions | planned actions contain incremental motion information, but target is coarse |
 | action-to-dense-top-flow proxy | +2.91% dense MSE versus history and +2.94% versus shuffled; cosine 0.040 to 0.216 | genuine action-specific direction, but both preregistered 10% handoff gates failed |
+| confidence gate over midpoint scratchpad | no valid inference confidence was preserved; a forbidden perfect temporal oracle gained only +0.0447% | always-off is the only honest no-regret policy for this auxiliary |
 
 ## Why image Latent Forcing and these video attempts diverged
 
@@ -144,7 +146,8 @@ main explanation. The result is nevertheless `NO_GO` for a learned proxy: it
 does not predict flow magnitude/detail strongly enough to condition Wan under
 the registered handoff rule. It strengthens the case for an analytic kinematic
 scaffold while weakening the case for learning the entire flow field from this
-small screen.
+small screen. Full identities and post-hoc per-horizon/motion-quartile slices are
+preserved in `DENSE_TOP_FLOW_STAGE0.md`.
 
 ## Recommended architecture
 
@@ -220,9 +223,44 @@ Ranked after the completed evidence and prior-art audit:
    unreliable states fall back to the video-only path. This can make a partly
    useful auxiliary safe, but it cannot manufacture missing information.
 
+The retrospective confidence screen closes option 4 for the existing midpoint
+scratchpad.  Its generated tensor was preserved only by hash; auxiliary NMSE
+and cosine require the hidden clean future; its learned state/clock gates are
+global constants; and all other varying numerics are target quality or timing
+metadata.  Aligned versus same-checkpoint off changed decoded/temporal error by
+only +0.0636%/+0.0326%, while aligned versus future-shuffled temporal error was
+-0.0047% with interval [-0.0227, +0.0129]%.  More decisively, a prohibited
+target-aware chooser selected 36/64 clips and still gained only +0.0447%
+temporal MSE.  Therefore no fitted confidence gate or generator continuation is
+justified; `always off` is the exact no-regret policy for this artifact.  This
+does not reject confidence gating for a future auxiliary that emits calibrated,
+inference-observable uncertainty and first shows material sample-specific
+utility.
+
 Few-step self-/causal-forcing is an acceleration layer after one of these
 mechanisms produces a stronger teacher; it is not a substitute for a causally
 informative state.
+
+There is one additional route that does not require a second state at serving:
+**privileged on-policy distillation**.  During training, the teacher receives
+the clean target-video TF/V-JEPA feature, while the causal student receives only
+history, actions, and its own rollout state.  Teacher and student velocities are
+matched at student-visited states; a training-only reachability gate discards
+teacher corrections that are either not better than the direct flow target or
+too far from the causal student's prediction.  At inference the teacher,
+feature extractor, and clean-feature cache are absent.  This is materially
+different from the failed VideoREPA arms, which aligned intermediate relation
+matrices at ordinary forward-noised states and never distilled the teacher's
+actual denoising policy.
+
+Recent external evidence makes this a credible controlled experiment rather
+than a guarantee.  [Branch-aware on-policy diffusion distillation](https://arxiv.org/html/2607.24731)
+transfers dense controls to sparse-control video students, and
+[Privileged Self-Distillation](https://arxiv.org/html/2607.27055) uses a
+future-aware teacher plus a reachability gate for causal sequential prediction.
+Neither is an ABC/LACWM result, and a causal student cannot recover irreducible
+future detail.  The exact eligibility gate, arms, leakage assertions, and stop
+rules are frozen in `PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`.
 
 ## Phased execution decision
 
@@ -234,9 +272,12 @@ informative state.
    arms at NFE 1/2/4; do not use the failed learned dense proxy as the condition.
 4. If analytic causal flow has an attributed quality gain, port full per-block joint
    RGB/flow attention and test the physics-anchored residual state.
-5. Distill only the strongest causal teacher to two/four calls; report complete
+5. In parallel, run the train-only eligibility test for privileged on-policy
+   distillation; proceed only if the aligned oracle teacher beats both the
+   causal student and a shuffled-feature teacher on student-visited states.
+6. Distill only the strongest causal teacher to two/four calls; report complete
    rendering, flow, Wan, and decode latency.
-6. Evaluate multi-seed DROID/ABC lockbox, perceptual/FVD metrics, long rollouts,
+7. Evaluate multi-seed DROID/ABC lockbox, perceptual/FVD metrics, long rollouts,
    and closed-loop DAgger utility. In parallel, test a latent-only policy path
    to avoid the approximately 0.130-second RGB decoder cost.
 
