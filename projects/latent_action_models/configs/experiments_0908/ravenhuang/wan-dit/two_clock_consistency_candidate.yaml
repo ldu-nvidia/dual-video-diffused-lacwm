@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - /experiments_0908/two_clock_consistency_common
+  - _self_
+
+name: two-clock-consistency-tc-cons-seed1234-u000200
+model:
+  two_clock_consistency:
+    weight: 0.2
+    epsilon: 1.0e-6
+    high_sigma_min: 0.8
+    high_sigma_max: 1.0
+    low_sigma_min: 0.0
+    low_sigma_max: 0.4
+wandb:
+  tags: [abc, vpm, two-clock-consistency, candidate, seed-1234]

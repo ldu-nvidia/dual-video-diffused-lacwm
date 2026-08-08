@@ -1,0 +1,32 @@
+_target_: robot_wm.datasets.multi_dataset.MultiDataset
+padding_dim: 157
+seed: ${seed}
+infinite: true
+img_augment: false
+emit_crop_rgb: false
+transform:
+  sample_size: 13
+  chunk_size: 5
+future_validity:
+  # The 512/64 immutable clips were already admitted by the frozen study.
+  # Disabling retries keeps the exact manifest permutation as the arm order.
+  enabled: false
+  history_frames: 5
+  future_frames: 8
+  temporal_ratio: 4
+  num_views: 3
+  view_std_threshold: 0.001
+  max_retries: 0
+datasets:
+  ABC:
+    _target_: robot_wm.datasets.abc.two_clock_consistency_fixed_dataset.ABCTwoClockConsistencyDataset
+    clip_manifest: ???
+    cache_metadata: ???
+    expected_split: ???
+    expected_clip_count: ???
+    expected_manifest_sha256: ???
+    expected_rgb_sha256: ???
+    expected_actions_sha256: ???
+    seed: ${seed}
+    infinite: ${dataset.infinite}
+    transform: null
