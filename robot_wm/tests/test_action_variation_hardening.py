@@ -205,8 +205,9 @@ def _runtime_registration(tmp_path: Path) -> dict:
             for key in ("manifest", "cache_metadata", "rgb", "actions")
         },
         "validation": {
-            key: dict(record)
-            for key in ("manifest", "cache_metadata", "rgb", "actions")
+            "manifest": dict(record),
+            "cache_metadata": dict(record),
+            "arrays": {"rgb": dict(record), "actions": dict(record)},
         },
         "action_delta_stats": {"file": {**record, "sha256": "c" * 64}},
         "runtime": {
