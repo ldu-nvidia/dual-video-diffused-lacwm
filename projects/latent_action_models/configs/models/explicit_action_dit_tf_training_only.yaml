@@ -1,0 +1,12 @@
+defaults:
+  - explicit_action_dit_model
+  - _self_
+
+_target_: lam.tf_training_only_model.TFTrainingOnlyExplicitActionDiT
+
+# Both arms instantiate this exact model. The intervention is only loss_weight.
+spectral_regularization:
+  loss_weight: 0.0
+  spatial_band_fraction: 0.5
+  phase_weight: 0.25
+  epsilon: 1.0e-4

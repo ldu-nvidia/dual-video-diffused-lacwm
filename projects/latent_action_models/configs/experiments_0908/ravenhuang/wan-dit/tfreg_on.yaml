@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - /experiments_0908/tf_training_only_common
+  - _self_
+
+name: tfreg-on-seed1234-u000200
+model:
+  spectral_regularization:
+    # One prospectively fixed dose. The normalized spectral loss is
+    # dimensionless; 0.05 limits it to an auxiliary regularizer rather than a
+    # replacement for velocity flow matching.
+    loss_weight: 0.05
+wandb:
+  tags: [abc, vpm, TFREG-ON, training-only-spectrum, seed-1234]
