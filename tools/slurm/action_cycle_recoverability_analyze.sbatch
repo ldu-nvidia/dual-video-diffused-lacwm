@@ -17,8 +17,14 @@ REGISTRATION=$1
 PYTHON_BIN=$2
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 TOOL=$REPO/tools/action_cycle_recoverability.py
+LUSTRE_BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
 [[ -f $REGISTRATION && -x $PYTHON_BIN ]] || { echo "registered runtime input is missing" >&2; exit 2; }
-export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+[[ -d $LUSTRE_BASE && ! -L $LUSTRE_BASE && $(realpath -e -- "$LUSTRE_BASE") == "$LUSTRE_BASE" ]] || {
+  echo "reviewed Lustre base is missing or noncanonical" >&2
+  exit 2
+}
+export LACWM_ALLOWED_RUN_ROOTS=$LUSTRE_BASE
+export PYTHONPATH="$REPO"
 export WANDB_ENTITY=zijiandu
 export WANDB_PROJECT=dual-video-diffusion-private
 unset WANDB_RUN_GROUP WANDB_GROUP || true
@@ -33,4 +39,3 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 "$PYTHON_BIN" "$TOOL" validate-registration --registration "$REGISTRATION"
 "$PYTHON_BIN" "$TOOL" wandb-check >/dev/null
 "$PYTHON_BIN" "$TOOL" analyze --registration "$REGISTRATION" --wandb
-

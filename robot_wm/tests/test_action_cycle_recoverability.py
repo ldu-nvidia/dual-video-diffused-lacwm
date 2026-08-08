@@ -26,6 +26,15 @@ def test_action_target_uses_full_aligned_segments_not_within_chunk_delta() -> No
     np.testing.assert_array_equal(target[:, 1], actions[:, 4:8].reshape(2, -1))
     np.testing.assert_array_equal(target[:, 2], actions[:, 8:12].reshape(2, -1))
     assert not np.isin(actions[:, 12].reshape(-1), target.reshape(-1)).all()
+    temporal = probe.temporally_misaligned_action_targets(actions)
+    np.testing.assert_array_equal(temporal[:, 0], actions[:, 1:5].reshape(2, -1))
+    np.testing.assert_array_equal(temporal[:, 1], actions[:, 5:9].reshape(2, -1))
+    np.testing.assert_array_equal(temporal[:, 2], actions[:, 9:13].reshape(2, -1))
+    control = probe.fixed_protocol()["controls"][
+        "same_clip_task_matched_temporal_misalignment"
+    ]
+    assert control["same_clip_episode_and_task"] is True
+    assert control["offset_low_level_actions"] == 5
 
 
 def test_latent_features_split_three_views_and_keep_three_displacements() -> None:
@@ -107,6 +116,29 @@ def test_paired_bootstrap_requires_point_threshold_and_simultaneous_bound() -> N
     assert all(row["simultaneous_lower_95"] > 0 for row in result["comparisons"].values())
 
 
+def test_full_preconsumption_hash_rejects_same_size_middle_mutation(tmp_path) -> None:
+    artifact = tmp_path / "array.bin"
+    artifact.write_bytes(b"a" * 128)
+    record = probe.file_record(artifact)
+    receipt = probe.full_preconsumption_rehash(
+        record,
+        label="synthetic array",
+        registration_identity_sha256="1" * 64,
+    )
+    assert receipt["full_file_hashed"] is True
+    assert receipt["sha256"] == record["sha256"]
+    with artifact.open("r+b") as handle:
+        handle.seek(64)
+        handle.write(b"z")
+    assert artifact.stat().st_size == record["bytes"]
+    with pytest.raises(probe.ActionCycleProbeError, match="same-size middle mutation"):
+        probe.full_preconsumption_rehash(
+            record,
+            label="synthetic array",
+            registration_identity_sha256="1" * 64,
+        )
+
+
 def test_slurm_contract_is_one_gpu_encode_then_cpu_analysis() -> None:
     root = Path(probe.__file__).resolve().parents[1]
     encode = (root / "tools/slurm/action_cycle_recoverability_encode.sbatch").read_text()
@@ -121,3 +153,14 @@ def test_slurm_contract_is_one_gpu_encode_then_cpu_analysis() -> None:
     assert '--dependency="afterok:$ENCODE_JOB"' in submit
     assert "--kill-on-invalid-dep=yes" in submit
     assert "wandb-check" in encode and "wandb-check" in analyze
+    exact_base = "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train"
+    assert f"LUSTRE_BASE={exact_base}" in encode
+    assert f"LUSTRE_BASE={exact_base}" in analyze
+    assert f"LUSTRE_BASE={exact_base}" in submit
+    assert 'export LACWM_ALLOWED_RUN_ROOTS=$LUSTRE_BASE' in submit
+    assert 'export PYTHONPATH="$REPO:$VIDEOX_HOME"' in submit
+    assert submit.index('export PYTHONPATH="$REPO:$VIDEOX_HOME"') < submit.index(
+        '"$PYTHON_BIN" "$TOOL" register'
+    )
+    assert "--lustre-base \"$LUSTRE_BASE\"" in submit
+    assert "full_preconsumption_rehash" not in submit  # implemented inside bound tools

@@ -73,6 +73,16 @@ against an episode-disjoint bijection of validation targets. Retrieval is
 scored against all 64 validation action trajectories. Shuffles preserve each
 split and are bijective; no donor may share an episode with its recipient.
 
+A task-matched temporal negative is mandatory for every clip. It retains the
+same clip, task label, episode, action coordinates, and four-chunk target width,
+but shifts every action window forward by exactly one cached chunk (five
+low-level actions): `[0:4]→[1:5]`, `[4:8]→[5:9]`, and
+`[8:12]→[9:13]`. Aligned MSE and cosine must beat this negative under the same
+point thresholds and simultaneous bootstrap family. Thus repeated task labels
+or task-level motion cannot by themselves satisfy the causal-alignment gate.
+Chunk 12 remains forbidden as a positive target; its recorded post-frame-12
+actions appear only in the deliberately offset final negative.
+
 ## Preregistered gate
 
 Clip is the bootstrap unit; views and transitions are aggregated inside each
@@ -81,14 +91,18 @@ of the 64 paired clips. Ten thousand deterministic paired resamples use seed
 over the complete preregistered comparison family.
 
 For both all-three and future-relevant transition sets, aligned normalized MSE
-must improve by at least 20% over each of the three controls, aligned cosine
-must exceed shuffled-fit and shuffled-target cosine by at least 0.10, and
+must improve by at least 20% over each of the three original controls and the
+same-clip temporal negative; aligned cosine must exceed shuffled-fit,
+shuffled-target, and same-clip temporal-negative cosine by at least 0.10; and
 top-1 retrieval must exceed its episode-disjoint target assignment. Every
 simultaneous lower bound must be strictly positive. Any failure yields
 `stop_or_revise_action_cycle_path`; no post-hoc subset can override it.
 
 All inputs, code, Wan assets, encodings, fitted ridge, rows, shuffles, and
-results are content-hashed and bound to the preregistration identity. W&B is
+results are content-hashed and bound to the preregistration identity. Every RGB
+array is fully rehashed immediately before its encode split opens it, and each
+action array is fully rehashed immediately before analysis consumes it; inode,
+size, mtime, and full SHA-256 are sealed, so a same-size middle mutation fails.
+W&B is
 locked to the authenticated owner `zijiandu`, private project
 `dual-video-diffusion-private`, with no group.
-

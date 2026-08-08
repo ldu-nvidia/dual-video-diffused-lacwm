@@ -39,6 +39,10 @@ SUBMISSION_KIND = "action-cycle-recoverability-submission-v1"
 
 EXPECTED_ENTITY = "zijiandu"
 EXPECTED_PROJECT = "dual-video-diffusion-private"
+EXPECTED_LUSTRE_BASE = Path(
+    "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train"
+)
+RUN_ROOT_ENVIRONMENT = "LACWM_ALLOWED_RUN_ROOTS"
 EXPECTED_VIDEOX_COMMIT = "1d6d9c3e1540968466937129fef4b288041e06de"
 EXPECTED_VAE_SHA256 = (
     "38071ab59bd94681c686fa51d75a1968f64e470262043be31f7a094e442fd981"
@@ -60,6 +64,7 @@ LATENT_SHAPE = (16, 4, 24, 120)
 PER_VIEW_LATENT_SHAPE = (16, 4, 24, 40)
 VAE_FRAME_SUPPORTS = ((0, 1), (1, 5), (5, 9), (9, 13))
 ACTION_CHUNK_INTERVALS = ((0, 4), (4, 8), (8, 12))
+TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS = ((1, 5), (5, 9), (9, 13))
 ALL_TRANSITIONS = (0, 1, 2)
 FUTURE_RELEVANT_TRANSITIONS = (1, 2)
 POOL_SHAPE = (6, 10)
@@ -343,6 +348,15 @@ def fixed_protocol() -> dict[str, Any]:
             "episode_disjoint_train_label_shuffle_fit": True,
             "episode_disjoint_validation_target_shuffle": True,
             "shuffle_is_bijective_and_deterministic": True,
+            "same_clip_task_matched_temporal_misalignment": {
+                "action_chunk_intervals": [
+                    list(value) for value in TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS
+                ],
+                "offset_action_chunks": 1,
+                "offset_low_level_actions": 5,
+                "same_clip_episode_and_task": True,
+                "validation_scoring_control_only": True,
+            },
         },
         "bootstrap": {
             "unit": "validation_clip_with_views_and_transitions_aggregated_inside_clip",
@@ -498,6 +512,7 @@ def validate_cache_inputs(
                 "index": i,
                 "clip_id": str(row["clip_id"]),
                 "episode_dir": str(row["episode_dir"]),
+                "task_label": Path(str(row["episode_dir"])).parent.name,
                 "start": int(row["start"]),
                 "frame_indices": [int(value) for value in row["frame_indices"]],
             }
@@ -519,6 +534,7 @@ def validate_train_val_disjoint(train: Mapping[str, Any], val: Mapping[str, Any]
 def _tool_records() -> dict[str, Any]:
     paths = {
         "tool": REPO_ROOT / "tools/action_cycle_recoverability.py",
+        "run_root_policy": REPO_ROOT / "tools/run_root_policy.py",
         "encode_slurm": REPO_ROOT / "tools/slurm/action_cycle_recoverability_encode.sbatch",
         "analysis_slurm": REPO_ROOT / "tools/slurm/action_cycle_recoverability_analyze.sbatch",
         "submit": REPO_ROOT / "tools/slurm/submit_action_cycle_recoverability.sh",
@@ -599,13 +615,43 @@ def _canonical_new_root(path: Path) -> Path:
     return root
 
 
+def validate_lustre_run_root_environment(value: str | Path) -> Path:
+    """Require the one reviewed canonical Lustre root and no broader override."""
+
+    requested = Path(value).expanduser()
+    if not requested.is_absolute() or requested != EXPECTED_LUSTRE_BASE:
+        raise ActionCycleProbeError(
+            f"Lustre base must be exactly {EXPECTED_LUSTRE_BASE}"
+        )
+    base = regular_directory(requested, label="registered Lustre base")
+    if base != requested:
+        raise ActionCycleProbeError("registered Lustre base is not canonical")
+    configured = os.environ.get(RUN_ROOT_ENVIRONMENT)
+    if configured != str(base):
+        raise ActionCycleProbeError(
+            f"{RUN_ROOT_ENVIRONMENT} must contain exactly the reviewed canonical Lustre base"
+        )
+    from tools.run_root_policy import configured_allowed_run_roots
+
+    allowed = configured_allowed_run_roots()
+    if base not in allowed or Path("/") in allowed:
+        raise ActionCycleProbeError("canonical run-root policy did not admit only safe roots")
+    return base
+
+
 def command_register(args: argparse.Namespace) -> int:
     repo = regular_directory(args.repo, label="probe repository")
     if repo != REPO_ROOT:
         raise ActionCycleProbeError("registration must run from this exact repository")
     expected_commit = validate_commit(args.expected_commit, label="probe source commit")
     assert_clean_commit(repo, expected_commit, label="probe")
+    lustre_base = validate_lustre_run_root_environment(args.lustre_base)
     output_root = _canonical_new_root(args.output_root)
+    study_parent = lustre_base / "artifacts/dual_video_diffusion/action_cycle_recoverability"
+    if study_parent not in output_root.parents:
+        raise ActionCycleProbeError(
+            f"study root must be a strict descendant of {study_parent}"
+        )
 
     train = validate_cache_inputs(
         args.train_metadata, args.train_manifest, split="train", count=TRAIN_CLIPS,
@@ -642,6 +688,12 @@ def command_register(args: argparse.Namespace) -> int:
             "created_at_utc": now_utc(),
             "status": "registered_before_encoding_or_validation_metrics",
             "output_root": str(output_root),
+            "run_root_policy": {
+                "environment_variable": RUN_ROOT_ENVIRONMENT,
+                "configured_value": str(lustre_base),
+                "canonical_lustre_base": str(lustre_base),
+                "required_study_parent": str(study_parent),
+            },
             "repository": {
                 "path": str(repo),
                 "commit": expected_commit,
@@ -687,6 +739,50 @@ def _rehash_record(record: Mapping[str, Any], *, label: str) -> Path:
     return path
 
 
+def full_preconsumption_rehash(
+    record: Mapping[str, Any],
+    *,
+    label: str,
+    registration_identity_sha256: str,
+) -> dict[str, Any]:
+    """Hash every byte and reject mutation during the verification window."""
+
+    path = regular_file(record.get("path", ""), label=label, protected_ok=True)
+    before = path.stat()
+    digest = sha256_file(path)
+    after = path.stat()
+    fingerprint_before = (
+        int(before.st_dev), int(before.st_ino), int(before.st_size), int(before.st_mtime_ns)
+    )
+    fingerprint_after = (
+        int(after.st_dev), int(after.st_ino), int(after.st_size), int(after.st_mtime_ns)
+    )
+    if (
+        fingerprint_before != fingerprint_after
+        or digest != record.get("sha256")
+        or int(after.st_size) != int(record.get("bytes", -1))
+    ):
+        raise ActionCycleProbeError(
+            f"{label} changed, including a possible same-size middle mutation"
+        )
+    return identity_payload(
+        {
+            "kind": "action-cycle-preconsumption-full-rehash-v1",
+            "created_at_utc": now_utc(),
+            "registration_identity_sha256": registration_identity_sha256,
+            "label": label,
+            "path": str(path),
+            "sha256": digest,
+            "bytes": int(after.st_size),
+            "device": int(after.st_dev),
+            "inode": int(after.st_ino),
+            "mtime_ns": int(after.st_mtime_ns),
+            "full_file_hashed": True,
+            "protected_test_accessed": False,
+        }
+    )
+
+
 def validate_registration(path: Path, *, full_hash: bool) -> dict[str, Any]:
     registration_path = regular_file(path, label="probe registration", protected_ok=True)
     registration = read_json(registration_path, label="probe registration")
@@ -707,6 +803,18 @@ def validate_registration(path: Path, *, full_hash: bool) -> dict[str, Any]:
     output_root = Path(registration.get("output_root", "")).resolve(strict=True)
     if registration_path != (output_root / "registration.json").resolve(strict=True):
         raise ActionCycleProbeError("registration is not at its canonical output root")
+    run_root = registration.get("run_root_policy", {})
+    lustre_base = validate_lustre_run_root_environment(
+        run_root.get("canonical_lustre_base", "")
+    )
+    expected_parent = lustre_base / "artifacts/dual_video_diffusion/action_cycle_recoverability"
+    if (
+        run_root.get("environment_variable") != RUN_ROOT_ENVIRONMENT
+        or run_root.get("configured_value") != str(lustre_base)
+        or run_root.get("required_study_parent") != str(expected_parent)
+        or expected_parent not in output_root.parents
+    ):
+        raise ActionCycleProbeError("registered canonical run-root policy differs")
     repo = regular_directory(registration["repository"]["path"], label="probe repository")
     if repo != REPO_ROOT:
         raise ActionCycleProbeError("registration repository differs from executing source")
@@ -802,19 +910,38 @@ def latent_displacement_features(latents: torch.Tensor) -> torch.Tensor:
     return result
 
 
-def aligned_action_targets(actions: np.ndarray | torch.Tensor) -> np.ndarray:
-    """Map three Wan-bin displacements to their exact 4x5 action segments."""
-
+def action_targets_for_intervals(
+    actions: np.ndarray | torch.Tensor,
+    intervals: Sequence[tuple[int, int]],
+) -> np.ndarray:
     value = np.asarray(actions)
     if value.ndim != 4 or tuple(value.shape[1:]) != ACTION_SHAPE:
         raise ActionCycleProbeError("actions must have shape [N,13,5,23]")
+    if len(intervals) != 3 or any(stop - start != 4 for start, stop in intervals):
+        raise ActionCycleProbeError("action-target intervals must be three 4-chunk windows")
     targets = np.stack(
-        [value[:, start:stop].reshape(value.shape[0], -1) for start, stop in ACTION_CHUNK_INTERVALS],
+        [value[:, start:stop].reshape(value.shape[0], -1) for start, stop in intervals],
         axis=1,
     ).astype(np.float64, copy=False)
     if targets.shape != (value.shape[0], 3, TARGET_DIM) or not np.isfinite(targets).all():
         raise ActionCycleProbeError("aligned action target construction failed")
     return targets
+
+
+def aligned_action_targets(actions: np.ndarray | torch.Tensor) -> np.ndarray:
+    """Map three Wan-bin displacements to their exact 4x5 action segments."""
+
+    return action_targets_for_intervals(actions, ACTION_CHUNK_INTERVALS)
+
+
+def temporally_misaligned_action_targets(
+    actions: np.ndarray | torch.Tensor,
+) -> np.ndarray:
+    """Shift every target by one cached action chunk within the same clip/task."""
+
+    return action_targets_for_intervals(
+        actions, TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS
+    )
 
 
 def _distributed_context() -> tuple[int, int, torch.device]:
@@ -944,6 +1071,7 @@ def _merge_encoding_shards(
     world_size: int,
     registration: Mapping[str, Any],
     canary: Mapping[str, Any],
+    rgb_rehash: Mapping[str, Any],
 ) -> dict[str, Any]:
     all_indices: list[np.ndarray] = []
     all_features: list[np.ndarray] = []
@@ -997,6 +1125,7 @@ def _merge_encoding_shards(
             "split": split,
             "registration_identity_sha256": registration["identity_sha256"],
             "source_rgb": registration["inputs"][split]["rgb"],
+            "immediate_preconsumption_rgb_full_rehash": dict(rgb_rehash),
             "source_actions": registration["inputs"][split]["actions"],
             "features": file_record(final_path),
             "feature_shape": [count, 3, 3, FEATURE_DIM],
@@ -1027,6 +1156,24 @@ def command_encode(args: argparse.Namespace) -> int:
     torch.distributed.barrier()
 
     tokenizer = _load_wan_tokenizer(registration, device)
+    rehash_path = output / "rgb.preconsumption-full-rehash.json"
+    if rank == 0:
+        rgb_rehash = full_preconsumption_rehash(
+            source["rgb"],
+            label=f"{split} RGB array immediately before encode consumption",
+            registration_identity_sha256=registration["identity_sha256"],
+        )
+        exclusive_json(rehash_path, rgb_rehash)
+    torch.distributed.barrier()
+    rgb_rehash = read_json(rehash_path, label=f"{split} RGB preconsumption rehash")
+    if (
+        not identity_valid(rgb_rehash)
+        or rgb_rehash.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or rgb_rehash.get("sha256") != source["rgb"]["sha256"]
+        or rgb_rehash.get("full_file_hashed") is not True
+    ):
+        raise ActionCycleProbeError("RGB preconsumption full rehash receipt differs")
     rgbs = np.load(source["rgb"]["path"], mmap_mode="r", allow_pickle=False)
     indexes = np.arange(rank, count, world_size, dtype=np.int64)
     features = np.empty((len(indexes), 3, 3, FEATURE_DIM), dtype=np.float32)
@@ -1072,7 +1219,7 @@ def command_encode(args: argparse.Namespace) -> int:
             raise ActionCycleProbeError("rank-zero actual VAE alignment canary is missing")
         metadata = _merge_encoding_shards(
             output, split=split, count=count, world_size=world_size,
-            registration=registration, canary=canary,
+            registration=registration, canary=canary, rgb_rehash=rgb_rehash,
         )
         if args.wandb:
             _wandb_log(
@@ -1128,6 +1275,7 @@ def _validate_encoding(
     root = Path(registration["output_root"]) / "artifacts/encoded" / split
     metadata = read_json(root / "metadata.json", label=f"{split} encoding metadata")
     count = TRAIN_CLIPS if split == "train" else VALIDATION_CLIPS
+    rgb_rehash = metadata.get("immediate_preconsumption_rgb_full_rehash", {})
     if (
         not identity_valid(metadata)
         or metadata.get("kind") != ENCODING_KIND
@@ -1140,6 +1288,12 @@ def _validate_encoding(
         or metadata.get("alignment") != fixed_protocol()["alignment"]
         or metadata.get("actual_vae_alignment_canary", {}).get("passed") is not True
         or metadata.get("actual_vae_alignment_canary", {}).get("adjacent_displacements") != 3
+        or not identity_valid(rgb_rehash)
+        or rgb_rehash.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or rgb_rehash.get("sha256")
+        != registration["inputs"][split]["rgb"]["sha256"]
+        or rgb_rehash.get("full_file_hashed") is not True
         or metadata.get("target_cache_array_opened") is not False
         or metadata.get("protected_test_accessed") is not False
     ):
@@ -1276,6 +1430,7 @@ def _comparison_vectors(
     shuffled_fit: np.ndarray,
     targets: np.ndarray,
     shuffled_targets: np.ndarray,
+    temporally_misaligned_targets: np.ndarray,
     active: np.ndarray,
     transitions: Sequence[int],
     prefix: str,
@@ -1286,9 +1441,15 @@ def _comparison_vectors(
     mse_mean = _per_clip_mse(zero, targets, active, transitions)
     mse_shuffled_fit = _per_clip_mse(shuffled_fit, targets, active, transitions)
     mse_shuffled_target = _per_clip_mse(aligned, shuffled_targets, active, transitions)
+    mse_temporally_misaligned = _per_clip_mse(
+        aligned, temporally_misaligned_targets, active, transitions
+    )
     cosine_aligned = _per_clip_cosine(aligned, targets, active, transitions)
     cosine_shuffled_fit = _per_clip_cosine(shuffled_fit, targets, active, transitions)
     cosine_shuffled_target = _per_clip_cosine(aligned, shuffled_targets, active, transitions)
+    cosine_temporally_misaligned = _per_clip_cosine(
+        aligned, temporally_misaligned_targets, active, transitions
+    )
     retrieval_aligned = _retrieval_hits(
         aligned, targets, active, transitions, np.arange(len(aligned), dtype=np.int64)
     )
@@ -1299,8 +1460,14 @@ def _comparison_vectors(
         f"{prefix}/mse_vs_train_mean": ("relative", mse_mean, mse_aligned),
         f"{prefix}/mse_vs_shuffled_fit": ("relative", mse_shuffled_fit, mse_aligned),
         f"{prefix}/mse_vs_shuffled_target": ("relative", mse_shuffled_target, mse_aligned),
+        f"{prefix}/mse_vs_same_clip_temporal_misalignment": (
+            "relative", mse_temporally_misaligned, mse_aligned
+        ),
         f"{prefix}/cosine_vs_shuffled_fit": ("difference", cosine_aligned, cosine_shuffled_fit),
         f"{prefix}/cosine_vs_shuffled_target": ("difference", cosine_aligned, cosine_shuffled_target),
+        f"{prefix}/cosine_vs_same_clip_temporal_misalignment": (
+            "difference", cosine_aligned, cosine_temporally_misaligned
+        ),
         f"{prefix}/retrieval_vs_shuffled_target": (
             "difference", retrieval_aligned, retrieval_shuffled
         ),
@@ -1310,9 +1477,11 @@ def _comparison_vectors(
         "mse_train_mean": mse_mean,
         "mse_shuffled_fit": mse_shuffled_fit,
         "mse_shuffled_target": mse_shuffled_target,
+        "mse_same_clip_temporal_misalignment": mse_temporally_misaligned,
         "cosine_aligned": cosine_aligned,
         "cosine_shuffled_fit": cosine_shuffled_fit,
         "cosine_shuffled_target": cosine_shuffled_target,
+        "cosine_same_clip_temporal_misalignment": cosine_temporally_misaligned,
         "retrieval_aligned": retrieval_aligned,
         "retrieval_shuffled_target": retrieval_shuffled,
     }
@@ -1398,22 +1567,40 @@ def command_analyze(args: argparse.Namespace) -> int:
     val_encoding, val_features_mmap = _validate_encoding(registration, "val")
     train_features = np.asarray(train_features_mmap, dtype=np.float64)
     val_features = np.asarray(val_features_mmap, dtype=np.float64)
+    train_action_rehash = full_preconsumption_rehash(
+        registration["inputs"]["train"]["actions"],
+        label="train actions immediately before analysis consumption",
+        registration_identity_sha256=registration["identity_sha256"],
+    )
     train_actions = np.load(
         registration["inputs"]["train"]["actions"]["path"], mmap_mode="r",
         allow_pickle=False,
+    )
+    train_targets_raw = aligned_action_targets(train_actions)
+    del train_actions
+    val_action_rehash = full_preconsumption_rehash(
+        registration["inputs"]["val"]["actions"],
+        label="validation actions immediately before analysis consumption",
+        registration_identity_sha256=registration["identity_sha256"],
     )
     val_actions = np.load(
         registration["inputs"]["val"]["actions"]["path"], mmap_mode="r",
         allow_pickle=False,
     )
-    train_targets_raw = aligned_action_targets(train_actions)
     val_targets_raw = aligned_action_targets(val_actions)
+    val_temporally_misaligned_raw = temporally_misaligned_action_targets(val_actions)
+    del val_actions
     train_targets, target_mean, target_std, target_active = _standardize_targets(
         train_targets_raw
     )
     val_targets = np.where(
         target_active[None],
         (val_targets_raw - target_mean[None]) / target_std[None],
+        0.0,
+    )
+    val_temporally_misaligned = np.where(
+        target_active[None],
+        (val_temporally_misaligned_raw - target_mean[None]) / target_std[None],
         0.0,
     )
 
@@ -1475,11 +1662,13 @@ def command_analyze(args: argparse.Namespace) -> int:
     shuffled_fit = shuffled_predictions_by_view.mean(axis=2)
 
     primary_comparisons, primary_metrics = _comparison_vectors(
-        aligned, shuffled_fit, val_targets, shuffled_val_targets, target_active,
+        aligned, shuffled_fit, val_targets, shuffled_val_targets,
+        val_temporally_misaligned, target_active,
         ALL_TRANSITIONS, "all_three_transitions", val_shuffle,
     )
     future_comparisons, future_metrics = _comparison_vectors(
-        aligned, shuffled_fit, val_targets, shuffled_val_targets, target_active,
+        aligned, shuffled_fit, val_targets, shuffled_val_targets,
+        val_temporally_misaligned, target_active,
         FUTURE_RELEVANT_TRANSITIONS, "future_relevant_transitions", val_shuffle,
     )
     gate = paired_bootstrap_gate({**primary_comparisons, **future_comparisons})
@@ -1521,6 +1710,13 @@ def command_analyze(args: argparse.Namespace) -> int:
             "model_strata": 9,
             "train_shuffle_sha256": numpy_sha256(train_shuffle),
             "validation_shuffle_sha256": numpy_sha256(val_shuffle),
+            "immediate_preconsumption_action_full_rehash": {
+                "train": train_action_rehash,
+                "val": val_action_rehash,
+            },
+            "same_clip_temporal_misalignment": fixed_protocol()["controls"][
+                "same_clip_task_matched_temporal_misalignment"
+            ],
             "target_cache_array_opened": False,
             "protected_test_accessed": False,
         }
@@ -1537,6 +1733,15 @@ def command_analyze(args: argparse.Namespace) -> int:
                     "index": index,
                     "clip_id": clip["clip_id"],
                     "episode_dir": clip["episode_dir"],
+                    "task_label": clip["task_label"],
+                    "same_clip_temporal_misalignment": {
+                        "task_label": clip["task_label"],
+                        "episode_dir": clip["episode_dir"],
+                        "action_chunk_intervals": [
+                            list(value)
+                            for value in TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS
+                        ],
+                    },
                     "shuffled_donor_index": int(val_shuffle[index]),
                     "shuffled_donor_clip_id": registration["inputs"]["val"]["descriptors"][int(val_shuffle[index])]["clip_id"],
                     "all_three_transitions": {
@@ -1586,6 +1791,10 @@ def command_analyze(args: argparse.Namespace) -> int:
                 "clean_latent_action_recoverability_only_no_video_quality_claim"
             ),
             "validation_fit_observations": 0,
+            "immediate_preconsumption_action_full_rehash": {
+                "train": train_action_rehash,
+                "val": val_action_rehash,
+            },
             "target_cache_array_opened": False,
             "protected_test_accessed": False,
         }
@@ -1641,6 +1850,7 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--repo", type=Path, required=True)
     register.add_argument("--expected-commit", required=True)
     register.add_argument("--output-root", type=Path, required=True)
+    register.add_argument("--lustre-base", type=Path, required=True)
     register.add_argument("--train-metadata", type=Path, required=True)
     register.add_argument("--train-manifest", type=Path, required=True)
     register.add_argument("--validation-metadata", type=Path, required=True)

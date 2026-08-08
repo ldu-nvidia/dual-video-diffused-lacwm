@@ -21,10 +21,27 @@ bash "$REPO/tools/slurm/submit_action_cycle_recoverability.sh" \
   --wan-dir "$BASE/wan_fun_1.3b_control"
 ```
 
+The wrapper intentionally sets these exact values before its first Python tool
+import (ambient values are discarded):
+
+```bash
+LACWM_ALLOWED_RUN_ROOTS=$BASE
+PYTHONPATH=$REPO:$BASE/VideoX-Fun-1d6d9c3
+```
+
+`BASE` is locked to the canonical, non-symlink path shown above. The generic
+run-root policy remains intact: its defaults are unchanged, `/` is never
+admitted, and this study is additionally restricted to a strict descendant of
+`$BASE/artifacts/dual_video_diffusion/action_cycle_recoverability`. The encode
+and analysis jobs independently restore and validate the same root setting.
+
 Before submission, confirm no active duplicate study and use a fresh absent
 `STUDY`. The wrapper rejects a dirty source tree, independently hashes both
 large RGB/action arrays, verifies the exact clean VideoX commit and Wan asset
-digests, and checks private W&B ownership. Do not reuse a partial root.
+digests, and checks private W&B ownership. Each RGB split is fully rehashed
+again immediately before encoding; train and validation actions are fully
+rehashed again immediately before analysis consumes them. Do not reuse a
+partial root.
 
 Read-only monitoring:
 
@@ -39,4 +56,3 @@ authorizes Stage 1: train a frozen clean-latent inverse-action critic, attach
 its cycle loss during world-model training, remove the critic at inference,
 and compare generated NFE-1 latents against shuffled-action controls plus
 video-quality noninferiority. It is not itself a video-generation result.
-

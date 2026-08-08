@@ -20,13 +20,19 @@ VIDEOX_HOME=$3
 WAN_DIR=$4
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 TOOL=$REPO/tools/action_cycle_recoverability.py
+LUSTRE_BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
 
 [[ -f $REGISTRATION && -x $PYTHON_BIN && -d $VIDEOX_HOME && -d $WAN_DIR ]] || {
   echo "registered runtime input is missing" >&2
   exit 2
 }
 export VIDEOX_HOME WAN_DIR
-export PYTHONPATH="$REPO:$VIDEOX_HOME${PYTHONPATH:+:$PYTHONPATH}"
+[[ -d $LUSTRE_BASE && ! -L $LUSTRE_BASE && $(realpath -e -- "$LUSTRE_BASE") == "$LUSTRE_BASE" ]] || {
+  echo "reviewed Lustre base is missing or noncanonical" >&2
+  exit 2
+}
+export LACWM_ALLOWED_RUN_ROOTS=$LUSTRE_BASE
+export PYTHONPATH="$REPO:$VIDEOX_HOME"
 export WANDB_ENTITY=zijiandu
 export WANDB_PROJECT=dual-video-diffusion-private
 unset WANDB_RUN_GROUP WANDB_GROUP || true
@@ -42,4 +48,3 @@ for SPLIT in train val; do
   "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node=8 \
     "$TOOL" encode --registration "$REGISTRATION" --split "$SPLIT" --wandb
 done
-
