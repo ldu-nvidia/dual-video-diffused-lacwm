@@ -213,12 +213,19 @@ def test_execution_condition_accepts_only_frozen_temporal_no_pass(
 def test_execution_condition_accepts_byte_identical_evaluation_recovery(
     tmp_path: Path,
 ) -> None:
-    evaluator_commit = "1" * 40
+    evaluator_commit = "2621d7b2813bd73bc8ad87d7a1eaf3ac56649f74"
     source = {
         "commit": evaluator_commit,
         "branch": "",
         "dirty": False,
     }
+    compatibility = ainc.temporal_evaluator.training_source_compatibility(
+        {
+            "commit": ainc.TEMPORAL_AUTHORIZATION_COMMIT,
+            "dirty": False,
+        },
+        source,
+    )
     input_evaluations = {}
     for arm in ainc.TEMPORAL_ARMS:
         summary = tmp_path / f"{arm}-recovered-summary.json"
@@ -226,19 +233,7 @@ def test_execution_condition_accepts_byte_identical_evaluation_recovery(
             json.dumps(
                 {
                     "arm": arm,
-                    "training_source_compatibility": {
-                        "training_commit": ainc.TEMPORAL_AUTHORIZATION_COMMIT,
-                        "evaluator_commit": evaluator_commit,
-                        "training_is_ancestor": True,
-                        "inference_critical_paths_unchanged": True,
-                        "paths": {
-                            "model.py": {
-                                "training_object": "2" * 40,
-                                "evaluator_object": "2" * 40,
-                                "unchanged": True,
-                            }
-                        },
-                    },
+                    "training_source_compatibility": compatibility,
                 }
             ),
             encoding="utf-8",
@@ -313,7 +308,8 @@ def test_execution_condition_accepts_byte_identical_evaluation_recovery(
     assert condition["temporal_inference_critical_paths_unchanged"] is True
 
     payload = json.loads(summary.read_text(encoding="utf-8"))
-    payload["training_source_compatibility"]["paths"]["model.py"][
+    changed_path = next(iter(compatibility["paths"]))
+    payload["training_source_compatibility"]["paths"][changed_path][
         "evaluator_object"
     ] = "3" * 40
     summary.write_text(json.dumps(payload), encoding="utf-8")

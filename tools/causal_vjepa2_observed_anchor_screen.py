@@ -38,6 +38,9 @@ if str(REPO_ROOT) not in sys.path:
 from robot_wm.datasets.droid.video_latent_forcing import rows_episode_ids  # noqa: E402
 from tools import causal_vjepa2_observed_anchor as anchor  # noqa: E402
 from tools import causal_vjepa2_screen as screen  # noqa: E402
+from tools import (  # noqa: E402
+    evaluate_causal_vjepa2_temporal_targets as temporal_evaluator,
+)
 from tools import video_latent_forcing_poc as vlf  # noqa: E402
 
 RUN_SCHEMA = "causal-vjepa2-observed-anchor-training-v1"
@@ -199,32 +202,24 @@ def _execution_condition(args: argparse.Namespace) -> dict[str, Any]:
         and re.fullmatch(r"[0-9a-f]{40}", evaluation_source_commit) is not None
         and set(temporal_source_compatibility) == set(TEMPORAL_ARMS)
     )
+    expected_recovery_compatibility: Mapping[str, Any] | None = None
+    if recovery_source_is_valid:
+        try:
+            expected_recovery_compatibility = (
+                temporal_evaluator.training_source_compatibility(
+                    {
+                        "commit": TEMPORAL_AUTHORIZATION_COMMIT,
+                        "dirty": False,
+                    },
+                    authorization_source,
+                )
+            )
+        except temporal_evaluator.TemporalEvaluationError:
+            recovery_source_is_valid = False
     if recovery_source_is_valid:
         for arm in TEMPORAL_ARMS:
             compatibility = temporal_source_compatibility[arm]
-            paths = compatibility.get("paths")
-            if (
-                compatibility.get("training_commit")
-                != TEMPORAL_AUTHORIZATION_COMMIT
-                or compatibility.get("evaluator_commit")
-                != evaluation_source_commit
-                or compatibility.get("training_is_ancestor") is not True
-                or compatibility.get("inference_critical_paths_unchanged")
-                is not True
-                or not isinstance(paths, Mapping)
-                or not paths
-                or any(
-                    not isinstance(record, Mapping)
-                    or record.get("unchanged") is not True
-                    or re.fullmatch(
-                        r"[0-9a-f]{40}", str(record.get("training_object", ""))
-                    )
-                    is None
-                    or record.get("training_object")
-                    != record.get("evaluator_object")
-                    for record in paths.values()
-                )
-            ):
+            if dict(compatibility) != expected_recovery_compatibility:
                 recovery_source_is_valid = False
                 break
     temporal_source_is_valid = same_commit_evaluation or recovery_source_is_valid

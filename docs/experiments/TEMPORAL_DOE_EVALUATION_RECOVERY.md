@@ -65,3 +65,16 @@ unchanged.
 
 This recovery can establish the originally preregistered scientific result;
 it cannot be presented as an independently replicated seed.
+
+## Downstream contingency authorization
+
+The completed validation-only no-pass record may authorize the separately
+preregistered observed-anchor contingency without changing that frozen
+protocol file.  The downstream gate accepts the recovery record only after it
+independently recomputes the training-to-evaluator Git ancestry and the exact
+canonical inference-critical Git-object map, then requires all five immutable
+evaluation summaries to match that recomputed record.  It also binds the
+evaluator commit, hashed development analysis, frozen no-selection receipt,
+and explicit absence of protected-test access.  A dirty source, missing Git
+object, incomplete path map, changed model, sampler, representation, bridge,
+or runner therefore fails closed.
