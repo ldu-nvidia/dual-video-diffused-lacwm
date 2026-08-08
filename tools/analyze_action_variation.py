@@ -7,14 +7,15 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -24,13 +25,14 @@ from tools import action_variation_evaluate as evaluation  # noqa: E402
 from tools import action_variation_screen as screen  # noqa: E402
 from tools import two_clock_consistency_evaluate as base  # noqa: E402
 
-
 SCHEMA_VERSION = 1
 KIND_ANALYSIS = "action_variation_validation_analysis"
 BOOTSTRAP_SAMPLES = 10_000
 BOOTSTRAP_SEED = 20_260_808
 QUALITY_CONTRASTS = 9
 ATTRIBUTION_CONTRASTS = 6
+INTERACTION_CONTRASTS = 6
+HARD_MASK_CONTRASTS = 3
 PRIMARY_METRIC = "decoded_temporal_difference_mse_unit_range"
 GUARDRAILS = ("video_future_nmse", "decoded_mse_unit_range")
 CLAIM_METRICS = (PRIMARY_METRIC, *GUARDRAILS)
@@ -101,6 +103,73 @@ def paired_effect(
     }
 
 
+def paired_interaction_effect(
+    candidate_aligned: Sequence[float],
+    candidate_diagnostic: Sequence[float],
+    control_aligned: Sequence[float],
+    control_diagnostic: Sequence[float],
+    *,
+    label: str,
+    contrast_count: int,
+) -> dict[str, Any]:
+    """Paired action-specific difference-in-differences, normalized to control."""
+
+    arrays = [
+        np.asarray(values, dtype=np.float64)
+        for values in (
+            candidate_aligned,
+            candidate_diagnostic,
+            control_aligned,
+            control_diagnostic,
+        )
+    ]
+    if any(
+        value.shape != (evaluation.EXPECTED_VALIDATION_CLIPS,)
+        or not np.isfinite(value).all()
+        for value in arrays
+    ) or np.any(arrays[2] <= 0):
+        raise ActionVariationAnalysisError(f"invalid interaction values for {label}")
+    candidate_gap = arrays[1] - arrays[0]
+    control_gap = arrays[3] - arrays[2]
+    interaction = candidate_gap - control_gap
+    rng = np.random.default_rng(_derived_seed(label))
+    indexes = rng.integers(
+        0,
+        evaluation.EXPECTED_VALIDATION_CLIPS,
+        size=(BOOTSTRAP_SAMPLES, evaluation.EXPECTED_VALIDATION_CLIPS),
+        endpoint=False,
+    )
+    denominator = arrays[2][indexes].mean(axis=1)
+    effects = interaction[indexes].mean(axis=1) / denominator
+    confidence = 1.0 - 0.05 / contrast_count
+    point = float(interaction.mean() / arrays[2].mean())
+    return {
+        "n_paired_clips": evaluation.EXPECTED_VALIDATION_CLIPS,
+        "candidate_diagnostic_minus_aligned_mean": float(candidate_gap.mean()),
+        "control_diagnostic_minus_aligned_mean": float(control_gap.mean()),
+        "relative_improvement": point,
+        "relative_improvement_percent": 100.0 * point,
+        "one_sided_simultaneous_lower_bound": {
+            "confidence": confidence,
+            "familywise_alpha": 0.05,
+            "family_contrast_count": contrast_count,
+            "low": float(np.quantile(effects, 1.0 - confidence)),
+        },
+        "descriptive_two_sided_95_ci": {
+            "low": float(np.quantile(effects, 0.025)),
+            "high": float(np.quantile(effects, 0.975)),
+        },
+        "favorable_clip_fraction": float(np.mean(interaction > 0)),
+        "bootstrap_samples": BOOTSTRAP_SAMPLES,
+        "bootstrap_seed": BOOTSTRAP_SEED,
+        "bootstrap_derived_seed": _derived_seed(label),
+        "estimand": (
+            "((candidate_diagnostic-candidate_aligned)-"
+            "(control_diagnostic-control_aligned))/mean(control_aligned)"
+        ),
+    }
+
+
 def _effect_gate(
     effects: Mapping[str, Any], *, primary_minimum: float
 ) -> dict[str, Any]:
@@ -128,6 +197,150 @@ def _effect_gate(
     }
 
 
+@contextmanager
+def _registered_config_environment(registration: Mapping[str, Any]):
+    """Resolve a saved Hydra config only against its registered inputs."""
+
+    environment = {
+        "WAN_DIR": registration["runtime"]["wan_dir"],
+        "VIDEOX_HOME": registration["runtime"]["videox_home"],
+        "ACTION_VARIATION_VPM_SNAPSHOT": registration["controlled_study"][
+            "parent_snapshot"
+        ]["path"],
+        "ACTION_VARIATION_TRAIN_CLIP_MANIFEST": registration["training"]["manifest"][
+            "path"
+        ],
+        "ACTION_VARIATION_TRAIN_CACHE_METADATA": registration["training"][
+            "cache_metadata"
+        ]["path"],
+        "ACTION_VARIATION_VAL_CLIP_MANIFEST": registration["validation"]["manifest"][
+            "path"
+        ],
+        "ACTION_VARIATION_VAL_CACHE_METADATA": registration["validation"][
+            "cache_metadata"
+        ]["path"],
+        "ACTION_VARIATION_STATS": registration["action_delta_stats"]["file"]["path"],
+        "ACTION_VARIATION_STATS_SHA256": registration["action_delta_stats"]["file"][
+            "sha256"
+        ],
+        "ACTION_VARIATION_RUN_ROOT": str(
+            Path(registration["output_root"]) / "training"
+        ),
+    }
+    previous = {key: os.environ.get(key) for key in environment}
+    os.environ.update(environment)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _validate_arm_artifacts(
+    inventory: Mapping[str, Any],
+    registration: Mapping[str, Any],
+    arm: screen.Arm,
+) -> None:
+    """Revalidate every training artifact referenced by evaluation."""
+
+    from omegaconf import OmegaConf
+
+    artifacts = inventory.get("arm_artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise ActionVariationAnalysisError("arm artifact inventory is absent")
+    run_dir = Path(registration["output_root"]) / "training" / arm.run_name
+    expected_identity = screen.arm_run_identity(registration, arm)
+    config_path = run_dir / ".hydra" / "config.yaml"
+    with _registered_config_environment(registration):
+        config = OmegaConf.load(config_path)
+        evaluation._validate_config(config, arm, registration)
+        plan = evaluation._validate_arm_plan(registration, arm, run_dir)
+        if screen.canonical_config_contract(config) != plan["resolved_config_contract"]:
+            raise ActionVariationAnalysisError("saved arm config differs from its plan")
+    completion_path = run_dir / "training_complete.json"
+    completion = base._read_json(completion_path, "training completion")
+    if (
+        completion.get("status") != "completed"
+        or completion.get("completed_updates") != 200
+        or completion.get("run_identity_sha256") != expected_identity
+    ):
+        raise ActionVariationAnalysisError("training completion differs")
+    expected = {
+        "snapshot": base._file_record(run_dir / "snapshot.pt"),
+        "config": base._file_record(config_path),
+        "training_trace": evaluation._validate_trace(run_dir, arm, registration),
+        "training_completion": base._file_record(completion_path),
+        "wandb_completion_receipt": evaluation._validate_wandb_completion_receipt(
+            registration, arm, run_dir
+        ),
+        "arm_execution_plan": plan,
+        "run_identity_sha256": expected_identity,
+        "wandb_run_id": expected_identity,
+    }
+    if set(artifacts) != {*expected, "action_variation"} or any(
+        artifacts.get(key) != value for key, value in expected.items()
+    ):
+        raise ActionVariationAnalysisError("arm artifacts changed after evaluation")
+    variation = artifacts.get("action_variation")
+    raw_gate = variation.get("raw_gate") if isinstance(variation, Mapping) else None
+    effective_gate = (
+        variation.get("effective_gate") if isinstance(variation, Mapping) else None
+    )
+    if (
+        not isinstance(variation, Mapping)
+        or set(variation)
+        != {
+            "enabled",
+            "raw_gate",
+            "effective_gate",
+            "stats_file_sha256",
+            "stats_identity_sha256",
+        }
+        or variation.get("enabled") is not arm.residual_enabled
+        or variation.get("stats_file_sha256")
+        != registration["action_delta_stats"]["file"]["sha256"]
+        or variation.get("stats_identity_sha256")
+        != registration["action_delta_stats"]["payload"]["identity_sha256"]
+        or not isinstance(raw_gate, (int, float))
+        or not math.isfinite(float(raw_gate))
+        or not isinstance(effective_gate, (int, float))
+        or not math.isfinite(float(effective_gate))
+        or abs(float(effective_gate)) >= 1.0
+        or (not arm.residual_enabled and float(effective_gate) != 0.0)
+    ):
+        raise ActionVariationAnalysisError("learned action residual record differs")
+
+
+def _validate_latency_summary(
+    inventory: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    recomputed: dict[str, Any] = {}
+    for endpoint in evaluation.ENDPOINTS:
+        endpoint_rows = [
+            row for row in rows if row["endpoint"]["code"] == endpoint.code
+        ]
+        recomputed[endpoint.code] = {}
+        for stage in (
+            "prepare_history_and_action",
+            "wan_trajectory",
+            "decode",
+            "total",
+        ):
+            values = sorted(
+                float(row["latency_ms_per_local_batch"][stage]) for row in endpoint_rows
+            )
+            recomputed[endpoint.code][stage] = {
+                "median": float(values[len(values) // 2]),
+                "p95": float(values[math.ceil(0.95 * len(values)) - 1]),
+            }
+    if inventory.get("latency_ms_batch_one_by_endpoint") != recomputed:
+        raise ActionVariationAnalysisError("latency inventory was not row-derived")
+
+
 def _load_inventory(
     path: Path, arm: screen.Arm
 ) -> tuple[dict[str, Any], dict[tuple[int, str], dict[str, Any]]]:
@@ -141,30 +354,79 @@ def _load_inventory(
         or inventory.get("endpoints")
         != [asdict_endpoint(endpoint) for endpoint in evaluation.ENDPOINTS]
         or inventory.get("row_count") != 64 * len(evaluation.ENDPOINTS)
-        or inventory.get("actual_transformer_call_count") != 288
+        or inventory.get("actual_transformer_call_count")
+        != evaluation.EXPECTED_WORLD_SIZE
+        * evaluation._expected_rank_transformer_calls()
+        or inventory.get("batch_size_per_rank") != 1
+        or inventory.get("latency_warmup")
+        != {
+            "rollouts_per_rank": 1,
+            "nfe": 1,
+            "excluded_from_endpoint_call_accounting": True,
+        }
         or inventory.get("paired_inputs_and_noise_within_arm") is not True
         or inventory.get("protected_test_accessed") is not False
         or inventory.get("target_cache_array_opened") is not False
         or inventory.get("future_or_clean_feature_used_at_sampling") is not False
         or not isinstance(inventory.get("arm_artifacts"), Mapping)
+        or set(inventory.get("latency_ms_batch_one_by_endpoint", {}))
+        != {endpoint.code for endpoint in evaluation.ENDPOINTS}
     ):
         raise ActionVariationAnalysisError("evaluation inventory differs")
     registration_path = Path(inventory["registration"]["path"])
     if inventory["registration"]["sha256"] != base._sha256(registration_path):
         raise ActionVariationAnalysisError("registration changed")
     registration = screen.validate_registration(registration_path)
+    if inventory.get("registration") != base._file_record(registration_path):
+        raise ActionVariationAnalysisError("registration record differs")
+    screen.revalidate_execution_environment(registration)
+    _validate_arm_artifacts(inventory, registration, arm)
     rows = []
+    receipt_records = []
     root = path.resolve().parent
     for rank in range(8):
         row_path = root / f"rank_{rank:03d}.jsonl"
         receipt_path = root / f"rank_{rank:03d}_complete.json"
         receipt = base._read_json(receipt_path, "rank receipt")
-        if receipt.get("rows", {}).get("sha256") != base._sha256(row_path):
+        if (
+            not screen.identity_valid(receipt)
+            or receipt.get("kind") != evaluation.KIND_RANK
+            or receipt.get("rank") != rank
+            or receipt.get("arm") != asdict_arm(arm)
+            or receipt.get("registration_identity_sha256")
+            != registration["identity_sha256"]
+            or receipt.get("world_size") != evaluation.EXPECTED_WORLD_SIZE
+            or receipt.get("batch_size_per_rank") != 1
+            or receipt.get("unmeasured_warmup_transformer_calls") != 1
+            or receipt.get("assigned_clip_indexes")
+            != evaluation._expected_rank_indexes(rank)
+            or receipt.get("endpoints")
+            != [asdict_endpoint(endpoint) for endpoint in evaluation.ENDPOINTS]
+            or receipt.get("actual_transformer_call_count")
+            != evaluation._expected_rank_transformer_calls()
+            or receipt.get("rows")
+            != {
+                **base._file_record(row_path),
+                "count": len(evaluation._expected_rank_indexes(rank))
+                * len(evaluation.ENDPOINTS),
+            }
+            or receipt.get("protected_test_accessed") is not False
+            or receipt.get("target_cache_array_opened") is not False
+        ):
             raise ActionVariationAnalysisError("rank row file changed")
+        receipt_records.append(base._file_record(receipt_path))
         rows.extend(
             json.loads(line) for line in row_path.read_text().splitlines() if line
         )
-    evaluation._validate_rows(rows, arm, registration)
+    evaluation._validate_rows(
+        rows,
+        arm,
+        registration,
+        expected_snapshot=inventory["arm_artifacts"]["snapshot"],
+    )
+    if inventory.get("rank_receipts") != receipt_records:
+        raise ActionVariationAnalysisError("rank receipt inventory differs")
+    _validate_latency_summary(inventory, rows)
     indexed = {(int(row["clip_index"]), row["endpoint"]["code"]): row for row in rows}
     return {"inventory": inventory, "registration": registration}, indexed
 
@@ -183,6 +445,7 @@ def asdict_endpoint(endpoint: screen.Endpoint) -> dict[str, Any]:
         "code": endpoint.code,
         "nfe": endpoint.nfe,
         "action_source": endpoint.action_source,
+        "residual_mode": endpoint.residual_mode,
         "primary_gate": endpoint.primary_gate,
     }
 
@@ -352,6 +615,7 @@ def analyze(
         raise ActionVariationAnalysisError("cross-arm clip/endpoint inventory differs")
     pairing_fields = (
         "cached_rgb_input_sha256",
+        "sampler_history_rgb_sha256",
         "cached_actions_input_sha256",
         "video_clean_scoring_sha256",
         "raw_ground_truth_sha256",
@@ -386,7 +650,7 @@ def analyze(
             "claim_eligible": nfe == 1,
         }
 
-    attribution = {}
+    candidate_attribution_descriptive = {}
     for diagnostic in ("zero_nfe_1", "global_shuffled_nfe_1"):
         effects = {
             metric: paired_effect(
@@ -397,13 +661,68 @@ def analyze(
             )
             for metric in CLAIM_METRICS
         }
-        attribution[diagnostic] = {
+        candidate_attribution_descriptive[diagnostic] = {
             "effects": effects,
             "gate": _effect_gate(effects, primary_minimum=0.005),
         }
 
+    interaction_attribution = {}
+    for diagnostic in ("zero_nfe_1", "global_shuffled_nfe_1"):
+        effects = {
+            metric: paired_interaction_effect(
+                _metric(candidate_rows, "aligned_nfe_1", metric),
+                _metric(candidate_rows, diagnostic, metric),
+                _metric(control_rows, "aligned_nfe_1", metric),
+                _metric(control_rows, diagnostic, metric),
+                label=f"interaction:{diagnostic}:{metric}",
+                contrast_count=INTERACTION_CONTRASTS,
+            )
+            for metric in CLAIM_METRICS
+        }
+        interaction_attribution[diagnostic] = {
+            "effects": effects,
+            "gate": _effect_gate(effects, primary_minimum=0.005),
+        }
+
+    hard_mask_effects = {
+        metric: paired_effect(
+            _metric(candidate_rows, "aligned_nfe_1", metric),
+            _metric(candidate_rows, "aligned_residual_masked_nfe_1", metric),
+            label=f"candidate-hard-mask:{metric}",
+            contrast_count=HARD_MASK_CONTRASTS,
+        )
+        for metric in CLAIM_METRICS
+    }
+    hard_mask_ablation = {
+        "effects": hard_mask_effects,
+        "gate": _effect_gate(hard_mask_effects, primary_minimum=0.005),
+    }
+
+    # In AV-CONT both native and explicit hard-mask modes are exact-zero gates.
+    # Their equality qualifies the intervention implementation itself.
+    for index in range(evaluation.EXPECTED_VALIDATION_CLIPS):
+        native = control_rows[(index, "aligned_nfe_1")]
+        masked = control_rows[(index, "aligned_residual_masked_nfe_1")]
+        if (
+            native["tensor_sha256"]["video_final_sha256"]
+            != masked["tensor_sha256"]["video_final_sha256"]
+            or native["tensor_sha256"]["decoded_final_sha256"]
+            != masked["tensor_sha256"]["decoded_final_sha256"]
+            or native["tensor_sha256"]["action_control_sha256"]
+            != masked["tensor_sha256"]["action_control_sha256"]
+            or native["tensor_sha256"]["wan_action_control_probe_sha256"]
+            != masked["tensor_sha256"]["wan_action_control_probe_sha256"]
+            or native["metrics"] != masked["metrics"]
+        ):
+            raise ActionVariationAnalysisError(
+                "control native and residual-hard-mask endpoints are not identical"
+            )
+
     quality_pass = bool(quality["1"]["gate"]["passed"])
-    attribution_pass = all(value["gate"]["passed"] for value in attribution.values())
+    interaction_pass = all(
+        value["gate"]["passed"] for value in interaction_attribution.values()
+    )
+    hard_mask_pass = bool(hard_mask_ablation["gate"]["passed"])
     control_diagnostic = _control_diagnostic(control_rows)
     candidate_diagnostic = _control_diagnostic(candidate_rows)
     return screen.identity_payload(
@@ -417,7 +736,11 @@ def analyze(
             "protected_test_accessed": False,
             "training_pair": training_pair,
             "quality_candidate_vs_matched_control": quality,
-            "candidate_action_attribution": attribution,
+            "candidate_action_attribution_descriptive": (
+                candidate_attribution_descriptive
+            ),
+            "action_specific_difference_in_differences": interaction_attribution,
+            "trained_candidate_residual_hard_mask_ablation": hard_mask_ablation,
             "wan_action_control_diagnostic": {
                 "control": control_diagnostic,
                 "candidate": candidate_diagnostic,
@@ -427,9 +750,11 @@ def analyze(
                 ),
             },
             "latency": {
-                "control": control_record["inventory"]["latency_ms_per_local_batch"],
+                "control": control_record["inventory"][
+                    "latency_ms_batch_one_by_endpoint"
+                ],
                 "candidate": candidate_record["inventory"][
-                    "latency_ms_per_local_batch"
+                    "latency_ms_batch_one_by_endpoint"
                 ],
                 "same_transformer_calls": True,
                 "nfe_one_is_one_wan_call": True,
@@ -443,13 +768,15 @@ def analyze(
                 ],
             },
             "decision": {
-                "passed": quality_pass and attribution_pass,
+                "passed": quality_pass and interaction_pass and hard_mask_pass,
                 "nfe_1_quality_passed": quality_pass,
-                "aligned_beats_zero_and_episode_shuffled": attribution_pass,
+                "incremental_action_specificity_passed": interaction_pass,
+                "trained_candidate_residual_hard_mask_passed": hard_mask_pass,
                 "rule": (
                     "NFE-1 candidate-vs-control temporal point/LB >=1% with >-1% "
-                    "guardrails, and candidate aligned-vs-zero plus aligned-vs-episode-"
-                    "shuffled temporal point/LB >=0.5% with >-1% guardrails"
+                    "guardrails; candidate-vs-control aligned/diagnostic interaction "
+                    "temporal point/LB >=0.5%; and trained-candidate native-vs-hard-"
+                    "masked temporal point/LB >=0.5%, both with >-1% guardrails"
                 ),
                 "protected_test_authorized": False,
             },

@@ -7,13 +7,14 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -23,19 +24,34 @@ from tools import action_variation_screen as screen  # noqa: E402
 from tools import two_clock_consistency_evaluate as base  # noqa: E402
 from tools import vpm_phaselock_probe as phase  # noqa: E402
 
-
 SCHEMA_VERSION = 1
 KIND_ROW = "action_variation_validation_clip"
 KIND_RANK = "action_variation_validation_rank"
 KIND_INVENTORY = "action_variation_validation_inventory"
 EXPECTED_WORLD_SIZE = screen.EXPECTED_WORLD_SIZE
-EXPECTED_BATCH_SIZE_PER_RANK = 2
+EXPECTED_BATCH_SIZE_PER_RANK = 1
 EXPECTED_VALIDATION_CLIPS = screen.EXPECTED_VALIDATION_CLIPS
 VALIDATION_SAMPLE_ID_OFFSET = 2_000_000
 ARMS = screen.ARMS
 ARM_BY_CODE = screen.ARM_BY_CODE
 ENDPOINTS = screen.ENDPOINTS
 ENDPOINT_BY_CODE = screen.ENDPOINT_BY_CODE
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+TENSOR_HASH_FIELDS = {
+    "cached_rgb_input_sha256",
+    "sampler_history_rgb_sha256",
+    "cached_actions_input_sha256",
+    "sampler_actions_sha256",
+    "action_control_sha256",
+    "wan_action_control_probe_sha256",
+    "video_clean_scoring_sha256",
+    "raw_ground_truth_sha256",
+    "raw_history_last_sha256",
+    "video_initial_noise_sha256",
+    "auxiliary_initial_noise_sha256",
+    "video_final_sha256",
+    "decoded_final_sha256",
+}
 
 
 class ActionVariationEvaluationError(RuntimeError):
@@ -65,6 +81,9 @@ def _validate_arm_plan(
         or plan.get("training", {}).get("updates") != 200
         or plan.get("training", {}).get("wan_calls_per_update") != 1
         or plan.get("training", {}).get("same_schema_and_forward_compute") is not True
+        or plan.get("evaluation", {}).get("batch_size_per_rank") != 1
+        or plan.get("evaluation", {}).get("endpoints")
+        != [asdict(endpoint) for endpoint in ENDPOINTS]
         or plan.get("evaluation", {}).get("protected_test_accessed") is not False
         or plan.get("evaluation", {}).get("future_or_clean_feature_used_at_sampling")
         is not False
@@ -77,11 +96,13 @@ def _validate_arm_plan(
             "id": expected_identity,
             "resume": "never",
         }
+        or not screen.identity_valid(plan.get("resolved_config_contract", {}))
     ):
         raise ActionVariationEvaluationError("arm execution plan differs")
     return {
         "record": base._file_record(path),
         "identity_sha256": plan["identity_sha256"],
+        "resolved_config_contract": plan["resolved_config_contract"],
     }
 
 
@@ -146,6 +167,7 @@ def _validate_config(
         or int(config.lr_scheduler_factory.lr_lambda.warmup_steps) != 20
         or int(config.lr_scheduler_factory.lr_lambda.total_steps) != 200
         or config.wandb.entity != "zijiandu"
+        or not bool(config.wandb.enabled)
         or config.wandb.project != "dual-video-diffusion-private"
         or config.wandb.group is not None
         or str(config.wandb.mode) != "online"
@@ -229,6 +251,62 @@ def _validate_trace(
     }
 
 
+def _validate_wandb_completion_receipt(
+    registration: Mapping[str, Any], arm: screen.Arm, run_dir: Path
+) -> dict[str, Any]:
+    """Require API-observed completion of the exact private run."""
+
+    path = run_dir / "wandb_run_complete.json"
+    receipt = base._read_json(path, "W&B completion receipt")
+    expected_identity = screen.arm_run_identity(registration, arm)
+    expected_arm = {
+        "code": arm.code,
+        "run_name": arm.run_name,
+        "residual_enabled": arm.residual_enabled,
+    }
+    expected_training_completion = base._file_record(run_dir / "training_complete.json")
+    wandb_observed = receipt.get("wandb")
+    expected_url_fragment = (
+        f"/zijiandu/dual-video-diffusion-private/runs/{expected_identity}"
+    )
+    if (
+        not screen.identity_valid(receipt)
+        or receipt.get("kind") != "action_variation_wandb_run_complete"
+        or receipt.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or receipt.get("arm") != expected_arm
+        or receipt.get("run_identity_sha256") != expected_identity
+        or receipt.get("training_completion") != expected_training_completion
+        or not isinstance(wandb_observed, Mapping)
+        or set(wandb_observed)
+        != {
+            "id",
+            "entity",
+            "project",
+            "group",
+            "state",
+            "run_identity_summary",
+            "url",
+        }
+        or wandb_observed.get("id") != expected_identity
+        or wandb_observed.get("entity") != "zijiandu"
+        or wandb_observed.get("project") != "dual-video-diffusion-private"
+        or wandb_observed.get("group") is not None
+        or wandb_observed.get("state") != "finished"
+        or wandb_observed.get("run_identity_summary") != expected_identity
+        or not isinstance(wandb_observed.get("url"), str)
+        or not wandb_observed["url"].startswith("https://")
+        or expected_url_fragment not in wandb_observed["url"]
+    ):
+        raise ActionVariationEvaluationError("W&B completion receipt differs")
+    return {
+        "record": base._file_record(path),
+        "identity_sha256": receipt["identity_sha256"],
+        "training_completion": expected_training_completion,
+        "wandb": dict(wandb_observed),
+    }
+
+
 def _load_model(
     registration: Mapping[str, Any], arm: screen.Arm, run_dir: Path, device: Any
 ) -> tuple[Any, dict[str, Any]]:
@@ -255,6 +333,13 @@ def _load_model(
     config_path = run_dir / ".hydra" / "config.yaml"
     config = OmegaConf.load(config_path)
     _validate_config(config, arm, registration)
+    arm_plan = _validate_arm_plan(registration, arm, run_dir)
+    observed_config_contract = screen.canonical_config_contract(config)
+    if arm_plan["resolved_config_contract"] != observed_config_contract:
+        raise ActionVariationEvaluationError(
+            "saved resolved config differs from the pre-training arm contract"
+        )
+    wandb_completion = _validate_wandb_completion_receipt(registration, arm, run_dir)
     model = instantiate(config.model)
     snapshot_path = run_dir / "snapshot.pt"
     snapshot = torch.load(
@@ -267,6 +352,7 @@ def _load_model(
         or snapshot.get("_start_iter") != 200
         or snapshot.get("_total_observations") != 1600
         or snapshot.get("run_identity_sha256") != expected_identity
+        or snapshot.get("wandb_run_id") != expected_identity
         or any(key in snapshot for key in ("ema", "model_ema", "ema_model"))
         or not isinstance(snapshot.get("model"), Mapping)
     ):
@@ -310,7 +396,6 @@ def _load_model(
     if suspicious or getattr(model, "time_frequency_transform", None) is not None:
         raise ActionVariationEvaluationError("online feature/teacher module is present")
     training = _validate_trace(run_dir, arm, registration)
-    arm_plan = _validate_arm_plan(registration, arm, run_dir)
     completion_path = run_dir / "training_complete.json"
     completion = base._read_json(completion_path, "training completion")
     if (
@@ -324,8 +409,10 @@ def _load_model(
         "config": base._file_record(config_path),
         "training_trace": training,
         "training_completion": base._file_record(completion_path),
+        "wandb_completion_receipt": wandb_completion,
         "arm_execution_plan": arm_plan,
         "run_identity_sha256": expected_identity,
+        "wandb_run_id": expected_identity,
         "action_variation": {
             "enabled": arm.residual_enabled,
             "raw_gate": raw_action_gate,
@@ -394,6 +481,7 @@ def _rows_for_endpoint(
     donors: Sequence[int | None],
     calls: int,
     prepare_ms: float,
+    probe_ms: float,
     trajectory_ms: float,
     decode_ms: float,
     registration: Mapping[str, Any],
@@ -478,6 +566,7 @@ def _rows_for_endpoint(
                         "decode": decode_ms,
                         "total": prepare_ms + trajectory_ms + decode_ms,
                     },
+                    "evaluator_only_action_control_probe_ms": probe_ms,
                     "metrics": {
                         "video_future_nmse": latent_nmse[offset],
                         "video_future_temporal_delta_nmse": latent_delta[offset],
@@ -502,6 +591,7 @@ def _validate_rows(
     rows: Sequence[Mapping[str, Any]],
     arm: screen.Arm,
     registration: Mapping[str, Any],
+    expected_snapshot: Mapping[str, Any] | None = None,
 ) -> None:
     expected = {
         (index, endpoint.code)
@@ -521,12 +611,17 @@ def _validate_rows(
         endpoint = ENDPOINT_BY_CODE.get(code)
         index = row.get("clip_index")
         metrics = row.get("metrics")
+        latency = row.get("latency_ms_per_local_batch")
+        tensor_hashes = row.get("tensor_sha256")
+        action_abs_max = row.get("sampler_action_abs_max")
         if (
             not screen.identity_valid(row)
             or row.get("kind") != KIND_ROW
             or row.get("arm") != asdict(arm)
             or row.get("registration_identity_sha256")
             != registration["identity_sha256"]
+            or row.get("tool_git_commit")
+            != registration["tool_repository"]["git_commit"]
             or row.get("evaluation_split") != "validation"
             or row.get("protected_test_accessed") is not False
             or row.get("clean_future_rgb_passed_to_sampler") is not False
@@ -542,10 +637,15 @@ def _validate_rows(
             or dict(endpoint_payload) != asdict(endpoint)
             or row.get("clip_id") != descriptors[index]["clip_id"]
             or row.get("sampling_id") != VALIDATION_SAMPLE_ID_OFFSET + index
+            or row.get("history_rgb_frames") != 5
+            or row.get("future_rgb_frames") != 8
+            or row.get("history_video_latent_tokens") != 2
+            or row.get("future_video_latent_tokens") != 2
             or row.get("actual_transformer_call_count") != endpoint.nfe
+            or row.get("declared_nfe") != endpoint.nfe
             or not isinstance(metrics, Mapping)
-            or not isinstance(row.get("latency_ms_per_local_batch"), Mapping)
-            or set(row["latency_ms_per_local_batch"])
+            or not isinstance(latency, Mapping)
+            or set(latency)
             != {
                 "prepare_history_and_action",
                 "wan_trajectory",
@@ -557,7 +657,21 @@ def _validate_rows(
                 or not isinstance(value, (int, float))
                 or not math.isfinite(value)
                 or value < 0
-                for value in row["latency_ms_per_local_batch"].values()
+                for value in latency.values()
+            )
+            or latency["total"]
+            != latency["prepare_history_and_action"]
+            + latency["wan_trajectory"]
+            + latency["decode"]
+            or isinstance(action_abs_max, bool)
+            or not isinstance(action_abs_max, (int, float))
+            or not math.isfinite(action_abs_max)
+            or action_abs_max < 0
+            or not isinstance(tensor_hashes, Mapping)
+            or set(tensor_hashes) != TENSOR_HASH_FIELDS
+            or any(
+                not isinstance(value, str) or SHA256_RE.fullmatch(value) is None
+                for value in tensor_hashes.values()
             )
             or not isinstance(row.get("wan_action_control_probe"), list)
             or len(row["wan_action_control_probe"]) != 32
@@ -565,6 +679,11 @@ def _validate_rows(
                 isinstance(value, (int, float)) and math.isfinite(value)
                 for value in row["wan_action_control_probe"]
             )
+            or not isinstance(
+                row.get("evaluator_only_action_control_probe_ms"), (int, float)
+            )
+            or not math.isfinite(row["evaluator_only_action_control_probe_ms"])
+            or row["evaluator_only_action_control_probe_ms"] < 0
         ):
             raise ActionVariationEvaluationError("validation row violates protocol")
         for metric in (
@@ -581,6 +700,14 @@ def _validate_rows(
                 or not math.isfinite(value)
             ):
                 raise ActionVariationEvaluationError(f"invalid metric {metric}")
+        for metric in (
+            "video_future_nmse",
+            "video_future_temporal_delta_nmse",
+            "decoded_mse_unit_range",
+            "decoded_temporal_difference_mse_unit_range",
+        ):
+            if metrics[metric] < 0:
+                raise ActionVariationEvaluationError(f"negative metric {metric}")
         key = (index, endpoint.code)
         if key in observed:
             raise ActionVariationEvaluationError("duplicate validation row")
@@ -598,6 +725,16 @@ def _validate_rows(
     if len(observed_snapshot_records) != 1:
         raise ActionVariationEvaluationError(
             "validation rows do not share one snapshot"
+        )
+    if expected_snapshot is not None and observed_snapshot_records != {
+        (
+            expected_snapshot.get("path"),
+            expected_snapshot.get("sha256"),
+            expected_snapshot.get("bytes"),
+        )
+    }:
+        raise ActionVariationEvaluationError(
+            "validation rows are not bound to the loaded arm snapshot"
         )
     invariant = (
         "cached_rgb_input_sha256",
@@ -650,6 +787,16 @@ def _validate_rows(
             == descriptors[donor_index]["episode_dir"]
         ):
             raise ActionVariationEvaluationError("global shuffled action donor differs")
+        masked = observed[(index, "aligned_residual_masked_nfe_1")]
+        if (
+            masked["tensor_sha256"]["sampler_actions_sha256"]
+            != reference["cached_actions_input_sha256"]
+            or masked.get("action_donor_sampling_id") is not None
+            or masked["endpoint"].get("residual_mode") != "hard_mask"
+        ):
+            raise ActionVariationEvaluationError(
+                "trained residual hard-mask endpoint differs"
+            )
 
 
 def command_evaluate(args: argparse.Namespace) -> int:
@@ -660,9 +807,12 @@ def command_evaluate(args: argparse.Namespace) -> int:
         dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    if dist.get_world_size() != EXPECTED_WORLD_SIZE or args.batch_size_per_rank != 2:
+    if (
+        dist.get_world_size() != EXPECTED_WORLD_SIZE
+        or args.batch_size_per_rank != EXPECTED_BATCH_SIZE_PER_RANK
+    ):
         raise ActionVariationEvaluationError(
-            "evaluation requires eight ranks, local batch two"
+            "evaluation requires eight ranks, local batch one"
         )
     device = torch.device("cuda", local_rank)
     torch.cuda.set_device(device)
@@ -670,11 +820,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
         raise ActionVariationEvaluationError("evaluation requires B200 GPUs")
     registration = screen.validate_registration(args.registration)
     if rank == 0:
-        base._clean_source(
-            Path(registration["tool_repository"]["path"]),
-            registration["tool_repository"]["git_commit"],
-            "tool",
-        )
+        screen.revalidate_execution_environment(registration)
         screen.revalidate_registered_inputs(registration)
     dist.barrier()
     arm = ARM_BY_CODE.get(args.arm)
@@ -697,49 +843,90 @@ def command_evaluate(args: argparse.Namespace) -> int:
     rows: list[dict[str, Any]] = []
     hook_calls = 0
 
+    # One unmeasured history/action -> one-call -> decode rollout warms CUDA,
+    # VAE, scheduler, and allocator paths.  The accounting hook is intentionally
+    # installed only after this warmup, so declared endpoint calls stay exact.
+    warm_sample = phase._move_batch([dataset[assigned[0]]], device)
+    warm_history = warm_sample["rgb"][:, :5].clone()
+    warm_ids = warm_sample["clip_index"] + VALIDATION_SAMPLE_ID_OFFSET
+    with (
+        torch.inference_mode(),
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True),
+    ):
+        warm_prepared = phase._prepare_deployable_rollout(
+            model,
+            warm_history,
+            warm_sample["actions"],
+            warm_sample["morphology_index"],
+            warm_ids,
+        )
+        warm_result = phase._run_trajectory(model, warm_prepared, steps=1)
+        _uint8_future(
+            model,
+            warm_result["video"],
+            (int(warm_history.shape[-2]), int(warm_history.shape[-1])),
+        )
+    torch.cuda.synchronize(device)
+    del warm_sample, warm_history, warm_ids, warm_prepared, warm_result
+
     def count_calls(_module: Any, _inputs: Any, _output: Any) -> None:
         nonlocal hook_calls
         hook_calls += 1
 
     hook = model.forward_model.register_forward_hook(count_calls)
     try:
-        for start in range(0, len(assigned), 2):
-            indexes = assigned[start : start + 2]
+        for clip_index in assigned:
+            indexes = [clip_index]
             samples = [dataset[index] for index in indexes]
             batch = phase._move_batch(samples, device)
             history = batch["rgb"][:, :5].clone()
             sampling_ids = batch["clip_index"] + VALIDATION_SAMPLE_ID_OFFSET
+            donor_index = _expected_action_donor_index(clip_index)
+            donor_actions = dataset.action_only(donor_index).unsqueeze(0).to(device)
             sources = {
-                "aligned": (batch["actions"], [None, None]),
-                "zero": (torch.zeros_like(batch["actions"]), [None, None]),
+                "aligned": (batch["actions"], [None]),
+                "zero": (torch.zeros_like(batch["actions"]), [None]),
                 "global_shuffled": (
-                    batch["actions"].roll(1, dims=0),
-                    [
-                        int(value)
-                        for value in sampling_ids.roll(1, dims=0).cpu().tolist()
-                    ],
+                    donor_actions,
+                    [VALIDATION_SAMPLE_ID_OFFSET + donor_index],
                 ),
             }
-            prepared_by_source: dict[str, tuple[Any, float]] = {}
+            prepared_by_source: dict[tuple[str, str], tuple[Any, float, float]] = {}
             completed = []
             with (
                 torch.inference_mode(),
                 torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True),
             ):
-                for source, (action_input, _donors) in sources.items():
+                preparation_keys = list(
+                    dict.fromkeys(
+                        (endpoint.action_source, endpoint.residual_mode)
+                        for endpoint in ENDPOINTS
+                    )
+                )
+                for source, residual_mode in preparation_keys:
+                    action_input, _donors = sources[source]
+                    mask_context = (
+                        model.action_delta_residual.runtime_hard_mask()
+                        if residual_mode == "hard_mask"
+                        else nullcontext()
+                    )
                     torch.cuda.synchronize(device)
                     begin = time.perf_counter_ns()
-                    prepared = phase._prepare_deployable_rollout(
-                        model,
-                        history,
-                        action_input,
-                        batch["morphology_index"],
-                        sampling_ids,
-                    )
+                    with mask_context:
+                        prepared = phase._prepare_deployable_rollout(
+                            model,
+                            history,
+                            action_input,
+                            batch["morphology_index"],
+                            sampling_ids,
+                        )
+                    torch.cuda.synchronize(device)
+                    prepare_ms = (time.perf_counter_ns() - begin) / 1e6
                     # Exact 32-value state seen by Wan after the trained
                     # ActionToControl projection (two future latent rows x 16
                     # channels). This read-only probe is not fed back to the
                     # sampler and adds no transformer call.
+                    begin = time.perf_counter_ns()
                     history_tokens = int(prepared["history_frames"])
                     wan_control = model.forward_model.action_to_control(
                         prepared["z_control"], 1, 1
@@ -753,13 +940,17 @@ def command_evaluate(args: argparse.Namespace) -> int:
                         "wan_action_control_probe": wan_control,
                     }
                     torch.cuda.synchronize(device)
-                    prepared_by_source[source] = (
+                    probe_ms = (time.perf_counter_ns() - begin) / 1e6
+                    prepared_by_source[(source, residual_mode)] = (
                         prepared,
-                        (time.perf_counter_ns() - begin) / 1e6,
+                        prepare_ms,
+                        probe_ms,
                     )
                 for endpoint in ENDPOINTS:
                     action_input, donors = sources[endpoint.action_source]
-                    prepared, prepare_ms = prepared_by_source[endpoint.action_source]
+                    prepared, prepare_ms, probe_ms = prepared_by_source[
+                        (endpoint.action_source, endpoint.residual_mode)
+                    ]
                     before_calls = hook_calls
                     torch.cuda.synchronize(device)
                     begin = time.perf_counter_ns()
@@ -785,6 +976,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                             donors,
                             calls,
                             prepare_ms,
+                            probe_ms,
                             trajectory_ms,
                             decode_ms,
                         )
@@ -804,6 +996,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                     donors,
                     calls,
                     prepare_ms,
+                    probe_ms,
                     trajectory_ms,
                     decode_ms,
                 ) = values
@@ -823,6 +1016,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                         donors=donors,
                         calls=calls,
                         prepare_ms=prepare_ms,
+                        probe_ms=probe_ms,
                         trajectory_ms=trajectory_ms,
                         decode_ms=decode_ms,
                         registration=registration,
@@ -842,7 +1036,8 @@ def command_evaluate(args: argparse.Namespace) -> int:
             "arm": asdict(arm),
             "rank": rank,
             "world_size": EXPECTED_WORLD_SIZE,
-            "batch_size_per_rank": 2,
+            "batch_size_per_rank": EXPECTED_BATCH_SIZE_PER_RANK,
+            "unmeasured_warmup_transformer_calls": 1,
             "assigned_clip_indexes": assigned,
             "endpoints": [asdict(endpoint) for endpoint in ENDPOINTS],
             "actual_transformer_call_count": hook_calls,
@@ -865,6 +1060,12 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 not screen.identity_valid(rank_receipt)
                 or rank_receipt.get("kind") != KIND_RANK
                 or rank_receipt.get("rank") != value
+                or rank_receipt.get("arm") != asdict(arm)
+                or rank_receipt.get("registration_identity_sha256")
+                != registration["identity_sha256"]
+                or rank_receipt.get("batch_size_per_rank")
+                != EXPECTED_BATCH_SIZE_PER_RANK
+                or rank_receipt.get("unmeasured_warmup_transformer_calls") != 1
                 or rank_receipt.get("actual_transformer_call_count")
                 != _expected_rank_transformer_calls()
                 or rank_receipt.get("rows", {}).get("sha256") != base._sha256(rank_path)
@@ -875,16 +1076,29 @@ def command_evaluate(args: argparse.Namespace) -> int:
             all_rows.extend(
                 json.loads(line) for line in rank_path.read_text().splitlines() if line
             )
-        _validate_rows(all_rows, arm, registration)
-        latency_values = {
-            stage: [float(row["latency_ms_per_local_batch"][stage]) for row in all_rows]
+        _validate_rows(
+            all_rows, arm, registration, expected_snapshot=arm_artifacts["snapshot"]
+        )
+        latency_by_endpoint = {}
+        for endpoint in ENDPOINTS:
+            endpoint_rows = [
+                row for row in all_rows if row["endpoint"]["code"] == endpoint.code
+            ]
+            latency_by_endpoint[endpoint.code] = {}
             for stage in (
                 "prepare_history_and_action",
                 "wan_trajectory",
                 "decode",
                 "total",
-            )
-        }
+            ):
+                values = sorted(
+                    float(row["latency_ms_per_local_batch"][stage])
+                    for row in endpoint_rows
+                )
+                latency_by_endpoint[endpoint.code][stage] = {
+                    "median": float(values[len(values) // 2]),
+                    "p95": float(values[math.ceil(0.95 * len(values)) - 1]),
+                }
         inventory = screen.identity_payload(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -899,15 +1113,15 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 "endpoints": [asdict(endpoint) for endpoint in ENDPOINTS],
                 "row_count": len(all_rows),
                 "actual_transformer_call_count": total_calls,
+                "batch_size_per_rank": EXPECTED_BATCH_SIZE_PER_RANK,
+                "latency_warmup": {
+                    "rollouts_per_rank": 1,
+                    "nfe": 1,
+                    "excluded_from_endpoint_call_accounting": True,
+                },
                 "paired_inputs_and_noise_within_arm": True,
                 "arm_artifacts": arm_artifacts,
-                "latency_ms_per_local_batch": {
-                    stage: {
-                        "median": float(sorted(values)[len(values) // 2]),
-                        "p95": float(sorted(values)[math.ceil(0.95 * len(values)) - 1]),
-                    }
-                    for stage, values in latency_values.items()
-                },
+                "latency_ms_batch_one_by_endpoint": latency_by_endpoint,
                 "rank_receipts": rank_records,
                 "protected_test_accessed": False,
                 "target_cache_array_opened": False,
@@ -932,7 +1146,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--registration", type=Path, required=True)
     parser.add_argument("--arm", choices=tuple(ARM_BY_CODE), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--batch-size-per-rank", type=int, default=2)
+    parser.add_argument("--batch-size-per-rank", type=int, default=1)
     parser.set_defaults(func=command_evaluate)
     return parser
 

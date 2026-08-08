@@ -109,6 +109,9 @@ def test_control_and_candidate_have_identical_state_and_parent_function_at_zero_
         candidate.raw_gate.fill_(0.5)
     assert float(control.effective_gate().detach()) == 0.0
     assert float(candidate.effective_gate().detach()) > 0.0
+    with candidate.runtime_hard_mask():
+        assert float(candidate.effective_gate().detach()) == 0.0
+    assert float(candidate.effective_gate().detach()) > 0.0
     assert not torch.equal(
         base + candidate.effective_gate() * residual_candidate,
         parent,
