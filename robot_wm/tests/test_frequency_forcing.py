@@ -343,7 +343,7 @@ def test_frequency_launcher_exports_registered_runtime_before_activation(
     relative_path,
 ):
     source = (screen.REPO_ROOT / relative_path).read_text(encoding="utf-8")
-    activation = source.index("source ")
+    activation = source.index('\nsource "')
     assert source.index('export WAN_DIR="$WAN_DIR_VALUE"') < activation
     assert source.index('export VIDEOX_HOME="$VIDEOX_HOME_VALUE"') < activation
     assert "/mnt/data2/" not in source
