@@ -42,8 +42,11 @@ z_base = ActionEncoder(a, morphology)
 z_aug  = z_base + tanh(g) r_delta
 ```
 
-`g` initializes to exact zero. Therefore both arms have the parent VPM
-function at initialization. No arbitrary output separation is imposed.
+`g` initializes to exact zero. With the current audited source and the
+state-exact parent load, the added residual is therefore an exact forward no-op
+at initialization. This is a current-code/state claim; it is not a claim that a
+fresh forward is bit-identical to execution under the historical training
+commit. No arbitrary output separation is imposed.
 
 | Arm | Delta MLP computed | Gate parameter/schema | Effective residual |
 |---|---:|---:|---:|
@@ -84,6 +87,15 @@ historical tensors must match and the only permitted missing state is
 latents and the final action control are also logged as diagnostics. The
 initial adapter-state hashes and zero gates must match.
 
+Before `torchrun`, a single-process boundary rehashes every registered input,
+including the multi-GB parent, and seals those records in the immutable arm
+plan. The B200 runtime verifier output is likewise identity-sealed as a per-arm
+receipt and bound into the arm plan, training completion, evaluation inventory,
+and final analysis. Distributed ranks validate those receipts before NCCL and
+do not make rank zero rehash a large snapshot before an object collective. The
+trained snapshot is hashed by the single-process W&B completion seal before the
+evaluation `torchrun` starts.
+
 W&B is restricted to `zijiandu/dual-video-diffusion-private` with
 `group=null`, online mode, and registration-derived run identities. Training
 fails unless the actual W&B run ID equals the registered identity, and the same
@@ -110,8 +122,13 @@ attribution diagnostics use NFE `1`. A sixth endpoint evaluates each trained arm
 with the residual gate temporarily hard-masked at aligned NFE 1. The runtime-only
 mask does not mutate model state. A forward hook verifies actual Wan calls.
 Preparation, Wan trajectory, decode, and total batch-one latency are reported
-per endpoint with CUDA synchronization. The read-only `ActionToControl` probe is
-timed outside deployment preparation and never enters total latency.
+per endpoint with CUDA synchronization. `total` is the arithmetic sum of those
+three separately timed components, not one contiguous end-to-end wall-clock
+measurement. Preparation is measured once per unique action-source/residual-mode
+pair for a clip and reused by aligned endpoints at different NFE. Host-to-device
+loading, scoring, and the read-only `ActionToControl` probe are excluded. These
+numbers are therefore descriptive component latency, not a closed-loop latency
+claim.
 
 The evaluator records the exact 32-value future control after the trained Wan
 `ActionToControl` projection, enabling effective-rank and shuffled-cosine

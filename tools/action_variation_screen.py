@@ -29,6 +29,8 @@ from tools import vpm_phaselock_probe as phase  # noqa: E402
 SCHEMA_VERSION = 1
 KIND_REGISTRATION = "action_variation_registration"
 KIND_STATS = ACTION_DELTA_STATS_SCHEMA
+KIND_RUNTIME_RECEIPT = "action_variation_b200_runtime_receipt"
+RUNTIME_RECEIPT_STATUS = "verified_before_arm_plan_training_or_metrics"
 PARENT_SNAPSHOT_SHA256 = base.PARENT_SNAPSHOT_SHA256
 HISTORICAL_TRAINING_COMMIT = base.TRAINING_COMMIT
 EXPECTED_WORLD_SIZE = 8
@@ -83,6 +85,12 @@ ENDPOINTS = tuple(
     Endpoint("aligned_residual_masked_nfe_1", 1, "aligned", "hard_mask", False),
 )
 ENDPOINT_BY_CODE = {endpoint.code: endpoint for endpoint in ENDPOINTS}
+
+
+def endpoint_records() -> list[dict[str, Any]]:
+    """Return the one canonical serialized endpoint grid used by every boundary."""
+
+    return [asdict(endpoint) for endpoint in ENDPOINTS]
 
 
 def _now() -> str:
@@ -246,11 +254,16 @@ def fixed_protocol() -> dict[str, Any]:
             "injection": "z_future_base_plus_gate_times_delta_residual",
             "control_hard_mask": True,
             "same_schema_and_forward_compute": True,
-            "parent_function_preserved_at_initialization": True,
+            "current_code_parent_path_no_op_at_initialization": True,
+            "historical_forward_bit_identity_claimed": False,
         },
         "training_model_calls_per_update": 1,
+        "pre_torchrun_input_revalidation": "full_sha256_single_process",
+        "runtime_verification_receipt": (
+            "identity_sealed_per_arm_and_bound_through_final_analysis"
+        ),
         "nfe_grid": list(NFE_GRID),
-        "endpoints": [asdict(endpoint) for endpoint in ENDPOINTS],
+        "endpoints": endpoint_records(),
         "evaluation_noise_seed": 20_260_726,
         "bootstrap_samples": 10_000,
         "bootstrap_seed": 20_260_808,
@@ -269,7 +282,9 @@ def fixed_protocol() -> dict[str, Any]:
         },
         "evaluation_local_batch_size": 1,
         "latency_warmup": "one_unmeasured_aligned_nfe_1_rollout_per_rank",
-        "latency_reporting": "per_endpoint_batch_one",
+        "latency_reporting": (
+            "descriptive_per_endpoint_batch_one_component_sum_not_contiguous_wall_clock"
+        ),
         "protected_test_access_allowed": False,
         "future_rgb_or_feature_allowed_at_sampling": False,
         "wandb": {
@@ -617,8 +632,10 @@ def revalidate_execution_environment(
     return records
 
 
-def revalidate_registered_inputs(registration: Mapping[str, Any]) -> dict[str, Any]:
-    records = {
+def registered_input_records(registration: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the exact registered records without reopening large artifacts."""
+
+    return {
         "parent_snapshot": registration["controlled_study"]["parent_snapshot"],
         "train_manifest": registration["training"]["manifest"],
         "train_metadata": registration["training"]["cache_metadata"],
@@ -630,8 +647,150 @@ def revalidate_registered_inputs(registration: Mapping[str, Any]) -> dict[str, A
         "validation_actions": registration["validation"]["actions"],
         "action_delta_stats": registration["action_delta_stats"]["file"],
     }
+
+
+def validate_registered_input_revalidation(
+    receipt: Mapping[str, Any], registration: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate a sealed pre-torchrun rehash receipt without hashing it again."""
+
+    expected = registered_input_records(registration)
+    if not isinstance(receipt, Mapping) or dict(receipt) != expected:
+        raise ActionVariationScreenError(
+            "pre-torchrun registered-input revalidation differs"
+        )
+    return expected
+
+
+def revalidate_registered_inputs(registration: Mapping[str, Any]) -> dict[str, Any]:
+    records = registered_input_records(registration)
     return {
         key: base._revalidate_record(record, key) for key, record in records.items()
+    }
+
+
+def runtime_receipt_path(registration: Mapping[str, Any], arm: Arm) -> Path:
+    return (
+        Path(registration["output_root"])
+        / "runtime_receipts"
+        / f"{arm.code.lower()}.json"
+    )
+
+
+def runtime_verifier_identity(payload: Mapping[str, Any]) -> str:
+    if not isinstance(payload, Mapping):
+        raise ActionVariationScreenError(
+            "B200 runtime verifier output is not a mapping"
+        )
+    return hashlib.sha256(_canonical_json(dict(payload))).hexdigest()
+
+
+def validate_runtime_verifier_output(
+    payload: Mapping[str, Any], registration: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the successful verifier's deployment-critical observations."""
+
+    runtime = registration["runtime"]
+    environment = payload.get("environment")
+    weights = payload.get("weights")
+    gpus = payload.get("gpus")
+    devices = gpus.get("devices") if isinstance(gpus, Mapping) else None
+    if (
+        payload.get("python") != "3.10.20"
+        or not isinstance(environment, Mapping)
+        or environment.get("sys_executable") != runtime["python"]
+        or payload.get("videox_commit") != runtime["videox_commit"]
+        or payload.get("videox_status") != "clean"
+        or not isinstance(weights, Mapping)
+        or weights.get("root") != runtime["wan_dir"]
+        or not isinstance(gpus, Mapping)
+        or gpus.get("count") != EXPECTED_WORLD_SIZE
+        or gpus.get("nccl_available") is not True
+        or gpus.get("inaccessible_peer_pairs") != []
+        or not isinstance(devices, list)
+        or len(devices) != EXPECTED_WORLD_SIZE
+        or any(
+            not isinstance(device, Mapping)
+            or "B200" not in str(device.get("name", "")).upper()
+            or device.get("capability") != [10, 0]
+            for device in devices
+        )
+    ):
+        raise ActionVariationScreenError("B200 runtime verifier output differs")
+    return dict(payload)
+
+
+def validate_runtime_receipt(
+    registration: Mapping[str, Any],
+    arm: Arm,
+    *,
+    require_current_slurm: bool = False,
+) -> dict[str, Any]:
+    """Validate and bind the immutable per-arm pre-torchrun runtime receipt."""
+
+    path = runtime_receipt_path(registration, arm)
+    if not path.is_file() or path.is_symlink():
+        raise ActionVariationScreenError("per-arm runtime receipt is absent")
+    receipt = base._read_json(path, "action-variation runtime receipt")
+    verifier = receipt.get("verifier_output")
+    slurm = receipt.get("slurm")
+    implementation = receipt.get("verifier_implementation")
+    expected_task = list(ARM_BY_CODE).index(arm.code)
+    if (
+        not identity_valid(receipt)
+        or receipt.get("kind") != KIND_RUNTIME_RECEIPT
+        or receipt.get("status") != RUNTIME_RECEIPT_STATUS
+        or receipt.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or receipt.get("tool_git_commit")
+        != registration["tool_repository"]["git_commit"]
+        or receipt.get("arm") != asdict(arm)
+        or receipt.get("run_identity_sha256") != arm_run_identity(registration, arm)
+        or not isinstance(verifier, Mapping)
+        or receipt.get("verifier_identity_sha256")
+        != runtime_verifier_identity(verifier)
+        or not isinstance(slurm, Mapping)
+        or not str(slurm.get("job_id", "")).isdigit()
+        or not str(slurm.get("array_job_id", "")).isdigit()
+        or slurm.get("array_task_id") != expected_task
+        or slurm.get("restart_count") != 0
+        or not isinstance(slurm.get("node_list"), str)
+        or not slurm["node_list"]
+        or not isinstance(implementation, Mapping)
+        or base._revalidate_record(implementation, "B200 runtime verifier")
+        != implementation
+        or receipt.get("protected_test_accessed") is not False
+    ):
+        raise ActionVariationScreenError("per-arm runtime receipt differs")
+    if require_current_slurm:
+        try:
+            current_job_id = os.environ.get("SLURM_JOB_ID", "")
+            current_slurm = {
+                "job_id": current_job_id,
+                "array_job_id": os.environ.get(
+                    "SLURM_ARRAY_JOB_ID", current_job_id
+                ),
+                "array_task_id": int(
+                    os.environ.get("SLURM_ARRAY_TASK_ID", str(expected_task))
+                ),
+                "restart_count": int(os.environ.get("SLURM_RESTART_COUNT", "0")),
+                "node_list": os.environ.get(
+                    "SLURM_JOB_NODELIST", os.environ.get("SLURM_NODELIST", "")
+                ),
+            }
+        except ValueError as exc:
+            raise ActionVariationScreenError(
+                "current Slurm task identity is invalid"
+            ) from exc
+        if dict(slurm) != current_slurm:
+            raise ActionVariationScreenError(
+                "per-arm runtime receipt belongs to a different Slurm task"
+            )
+    validate_runtime_verifier_output(verifier, registration)
+    return {
+        "record": base._file_record(path),
+        "identity_sha256": receipt["identity_sha256"],
+        "verifier_identity_sha256": receipt["verifier_identity_sha256"],
     }
 
 

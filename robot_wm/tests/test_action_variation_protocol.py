@@ -125,6 +125,12 @@ def test_endpoint_grid_has_aligned_quality_and_zero_global_shuffle_attribution()
     ]
     assert screen.fixed_protocol()["protected_test_access_allowed"] is False
     assert screen.fixed_protocol()["future_rgb_or_feature_allowed_at_sampling"] is False
+    intervention = screen.fixed_protocol()["action_residual"]
+    assert intervention["current_code_parent_path_no_op_at_initialization"] is True
+    assert intervention["historical_forward_bit_identity_claimed"] is False
+    assert screen.fixed_protocol()["pre_torchrun_input_revalidation"].startswith(
+        "full_sha256"
+    )
 
 
 def test_rows_require_exact_calls_no_future_inputs_and_episode_disjoint_donor():

@@ -11,6 +11,7 @@ PARTITION=batch
 ACCOUNT=""
 QOS=""
 TIME_LIMIT=04:00:00
+EXCLUDE_NODES="pool0-0081,pool0-0089,pool0-0200,pool0-0343"
 EXECUTE=0
 
 die() { echo "ERROR: $*" >&2; exit 2; }
@@ -18,11 +19,13 @@ usage() {
   cat <<'EOF'
 Usage: submit_action_variation.sh --registration PATH --python PATH
        --expected-commit SHA [--partition NAME] [--account NAME] [--qos NAME]
-       [--time HH:MM:SS] [--execute]
+       [--time HH:MM:SS] [--exclude NODELIST] [--execute]
 
 Dry-run is the default. --execute submits two non-requeueable 8xB200 arm jobs,
 then a dependency-gated analysis job. Existing outputs and same-name active jobs
 fail closed; this launcher never registers the study or accesses a test split.
+Arm jobs exclude pool0-0081,pool0-0089,pool0-0200,pool0-0343 by default;
+pass --exclude with a different Slurm node list.
 EOF
 }
 while (($#)); do
@@ -34,6 +37,7 @@ while (($#)); do
     --account) ACCOUNT="${2:?}"; shift 2 ;;
     --qos) QOS="${2:?}"; shift 2 ;;
     --time) TIME_LIMIT="${2:?}"; shift 2 ;;
+    --exclude) EXCLUDE_NODES="${2:?}"; shift 2 ;;
     --execute) EXECUTE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -43,6 +47,7 @@ done
   die "--registration must be an absolute regular file"
 [[ "$PYTHON_BIN" == /* && -x "$PYTHON_BIN" ]] || die "--python is unavailable"
 [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "--expected-commit is invalid"
+[[ "$EXCLUDE_NODES" =~ ^[A-Za-z0-9_,.-]+$ ]] || die "--exclude is invalid"
 [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" == "$EXPECTED_COMMIT" ]] || \
   die "repository commit differs"
 [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] || \
@@ -68,6 +73,7 @@ SBATCH_ARGS=(--parsable --job-name "$JOB_NAME" --partition "$PARTITION"
   --output "$LOG_DIR/%x-%A_%a.out" --error "$LOG_DIR/%x-%A_%a.err")
 [[ -z "$ACCOUNT" ]] || SBATCH_ARGS+=(--account "$ACCOUNT")
 [[ -z "$QOS" ]] || SBATCH_ARGS+=(--qos "$QOS")
+[[ -z "$EXCLUDE_NODES" ]] || SBATCH_ARGS+=(--exclude "$EXCLUDE_NODES")
 
 echo "Arm submission: sbatch ${SBATCH_ARGS[*]} $SBATCH_SCRIPT ${COMMON[*]}"
 echo "Analysis will run only after both arm jobs succeed."
@@ -90,6 +96,7 @@ ANALYSIS_ARGS=(--parsable --job-name "$JOB_NAME-analysis"
   --output "$LOG_DIR/%x-%j.out" --error "$LOG_DIR/%x-%j.err")
 [[ -z "$ACCOUNT" ]] || ANALYSIS_ARGS+=(--account "$ACCOUNT")
 [[ -z "$QOS" ]] || ANALYSIS_ARGS+=(--qos "$QOS")
+[[ -z "$EXCLUDE_NODES" ]] || ANALYSIS_ARGS+=(--exclude "$EXCLUDE_NODES")
 ANALYSIS_JOB_ID="$(sbatch "${ANALYSIS_ARGS[@]}" "$SBATCH_SCRIPT" \
   --mode analyze --registration "$REGISTRATION" \
   --repo-root "$REPO_ROOT" --python "$PYTHON_BIN" \

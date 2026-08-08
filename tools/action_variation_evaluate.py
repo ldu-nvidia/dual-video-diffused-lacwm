@@ -52,6 +52,12 @@ TENSOR_HASH_FIELDS = {
     "video_final_sha256",
     "decoded_final_sha256",
 }
+LATENCY_SEMANTICS = {
+    "total_is_arithmetic_component_sum": True,
+    "contiguous_end_to_end_wall_clock": False,
+    "preparation_measured_once_per_action_source_and_residual_mode_per_clip": True,
+    "host_to_device_data_loading_scoring_and_probe_excluded": True,
+}
 
 
 class ActionVariationEvaluationError(RuntimeError):
@@ -64,6 +70,10 @@ def _validate_arm_plan(
     path = Path(registration["output_root"]) / "arm_plans" / f"{arm.code.lower()}.json"
     plan = base._read_json(path, "arm execution plan")
     expected_identity = screen.arm_run_identity(registration, arm)
+    runtime_verification = screen.validate_runtime_receipt(registration, arm)
+    input_revalidation = screen.validate_registered_input_revalidation(
+        plan.get("input_revalidation"), registration
+    )
     expected_arm = {
         "code": arm.code,
         "config_name": arm.config_name,
@@ -77,13 +87,15 @@ def _validate_arm_plan(
         or plan.get("registration_identity_sha256") != registration["identity_sha256"]
         or plan.get("arm") != expected_arm
         or plan.get("run_identity_sha256") != expected_identity
+        or plan.get("input_revalidation") != input_revalidation
+        or plan.get("runtime_verification") != runtime_verification
         or plan.get("paths", {}).get("run_dir") != str(run_dir)
         or plan.get("training", {}).get("updates") != 200
         or plan.get("training", {}).get("wan_calls_per_update") != 1
         or plan.get("training", {}).get("same_schema_and_forward_compute") is not True
         or plan.get("evaluation", {}).get("batch_size_per_rank") != 1
         or plan.get("evaluation", {}).get("endpoints")
-        != [asdict(endpoint) for endpoint in ENDPOINTS]
+        != screen.endpoint_records()
         or plan.get("evaluation", {}).get("protected_test_accessed") is not False
         or plan.get("evaluation", {}).get("future_or_clean_feature_used_at_sampling")
         is not False
@@ -103,6 +115,7 @@ def _validate_arm_plan(
         "record": base._file_record(path),
         "identity_sha256": plan["identity_sha256"],
         "resolved_config_contract": plan["resolved_config_contract"],
+        "runtime_verification": runtime_verification,
     }
 
 
@@ -192,6 +205,7 @@ def _validate_trace(
         raise ActionVariationEvaluationError("training trace is empty")
     header = rows[0]
     expected_arm = "AV-DELTA" if arm.residual_enabled else "AV-CONT"
+    runtime_verification = screen.validate_runtime_receipt(registration, arm)
     if (
         header.get("kind") != "action_variation_training_trace_header"
         or header.get("arm") != expected_arm
@@ -201,7 +215,9 @@ def _validate_trace(
         != registration["action_delta_stats"]["file"]["sha256"]
         or header.get("initial_effective_gate") != 0.0
         or header.get("same_schema_modules_and_forward_calls") is not True
-        or header.get("parent_function_preserved_at_initialization") is not True
+        or header.get("current_code_parent_path_no_op_at_initialization") is not True
+        or header.get("historical_forward_bit_identity_claimed") is not False
+        or header.get("runtime_verification_receipt") != runtime_verification
         or header.get("model_calls_per_update") != 1
         or header.get("protected_test_accessed") is not False
     ):
@@ -252,7 +268,11 @@ def _validate_trace(
 
 
 def _validate_wandb_completion_receipt(
-    registration: Mapping[str, Any], arm: screen.Arm, run_dir: Path
+    registration: Mapping[str, Any],
+    arm: screen.Arm,
+    run_dir: Path,
+    *,
+    rehash_snapshot: bool = False,
 ) -> dict[str, Any]:
     """Require API-observed completion of the exact private run."""
 
@@ -265,6 +285,9 @@ def _validate_wandb_completion_receipt(
         "residual_enabled": arm.residual_enabled,
     }
     expected_training_completion = base._file_record(run_dir / "training_complete.json")
+    snapshot_path = run_dir / "snapshot.pt"
+    expected_snapshot_stat = base._file_record(snapshot_path, rehash=False)
+    trained_snapshot = receipt.get("trained_snapshot")
     wandb_observed = receipt.get("wandb")
     expected_url_fragment = (
         f"/zijiandu/dual-video-diffusion-private/runs/{expected_identity}"
@@ -277,6 +300,16 @@ def _validate_wandb_completion_receipt(
         or receipt.get("arm") != expected_arm
         or receipt.get("run_identity_sha256") != expected_identity
         or receipt.get("training_completion") != expected_training_completion
+        or not isinstance(trained_snapshot, Mapping)
+        or set(trained_snapshot) != {"path", "bytes", "sha256"}
+        or trained_snapshot.get("path") != expected_snapshot_stat["path"]
+        or trained_snapshot.get("bytes") != expected_snapshot_stat["bytes"]
+        or not isinstance(trained_snapshot.get("sha256"), str)
+        or SHA256_RE.fullmatch(trained_snapshot["sha256"]) is None
+        or (
+            rehash_snapshot
+            and dict(trained_snapshot) != base._file_record(snapshot_path)
+        )
         or not isinstance(wandb_observed, Mapping)
         or set(wandb_observed)
         != {
@@ -303,6 +336,7 @@ def _validate_wandb_completion_receipt(
         "record": base._file_record(path),
         "identity_sha256": receipt["identity_sha256"],
         "training_completion": expected_training_completion,
+        "trained_snapshot": dict(trained_snapshot),
         "wandb": dict(wandb_observed),
     }
 
@@ -398,19 +432,26 @@ def _load_model(
     training = _validate_trace(run_dir, arm, registration)
     completion_path = run_dir / "training_complete.json"
     completion = base._read_json(completion_path, "training completion")
+    runtime_verification = arm_plan["runtime_verification"]
     if (
         completion.get("status") != "completed"
         or completion.get("completed_updates") != 200
+        or completion.get("max_iter") != 200
         or completion.get("run_identity_sha256") != expected_identity
+        or completion.get("snapshot") != str(snapshot_path.resolve(strict=True))
+        or completion.get("runtime_verification_receipt") != runtime_verification
     ):
         raise ActionVariationEvaluationError("training completion differs")
     return model, {
-        "snapshot": base._distributed_file_record(snapshot_path),
+        # The single-process W&B seal hashed this multi-GB file before torchrun.
+        # Reusing that immutable record avoids rank-zero I/O before a collective.
+        "snapshot": wandb_completion["trained_snapshot"],
         "config": base._file_record(config_path),
         "training_trace": training,
         "training_completion": base._file_record(completion_path),
         "wandb_completion_receipt": wandb_completion,
         "arm_execution_plan": arm_plan,
+        "runtime_verification_receipt": runtime_verification,
         "run_identity_sha256": expected_identity,
         "wandb_run_id": expected_identity,
         "action_variation": {
@@ -803,6 +844,19 @@ def command_evaluate(args: argparse.Namespace) -> int:
     import torch
     import torch.distributed as dist
 
+    # Every rank validates the small sealed plan/receipt before NCCL. The full
+    # parent and trained-snapshot hashes were already computed by single-process
+    # workflow boundaries before either torchrun invocation.
+    registration = screen.validate_registration(args.registration)
+    screen.revalidate_execution_environment(registration)
+    arm = ARM_BY_CODE.get(args.arm)
+    if arm is None:
+        raise ActionVariationEvaluationError("unknown arm")
+    screen.validate_runtime_receipt(
+        registration, arm, require_current_slurm=True
+    )
+    run_dir = Path(registration["output_root"]) / "training" / arm.run_name
+    _validate_arm_plan(registration, arm, run_dir)
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
@@ -818,14 +872,6 @@ def command_evaluate(args: argparse.Namespace) -> int:
     torch.cuda.set_device(device)
     if "B200" not in torch.cuda.get_device_properties(device).name.upper():
         raise ActionVariationEvaluationError("evaluation requires B200 GPUs")
-    registration = screen.validate_registration(args.registration)
-    if rank == 0:
-        screen.revalidate_execution_environment(registration)
-        screen.revalidate_registered_inputs(registration)
-    dist.barrier()
-    arm = ARM_BY_CODE.get(args.arm)
-    if arm is None:
-        raise ActionVariationEvaluationError("unknown arm")
     output = Path(registration["output_root"]) / "evaluation" / arm.code.lower()
     if args.output_dir.expanduser().absolute() != output:
         raise ActionVariationEvaluationError("evaluation output path differs")
@@ -834,7 +880,6 @@ def command_evaluate(args: argparse.Namespace) -> int:
             raise ActionVariationEvaluationError("fresh evaluation output exists")
         output.mkdir(parents=True, mode=0o700)
     dist.barrier()
-    run_dir = Path(registration["output_root"]) / "training" / arm.run_name
     model, arm_artifacts = _load_model(
         registration, arm, run_dir.resolve(strict=True), device
     )
@@ -1121,6 +1166,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 },
                 "paired_inputs_and_noise_within_arm": True,
                 "arm_artifacts": arm_artifacts,
+                "latency_semantics": LATENCY_SEMANTICS,
                 "latency_ms_batch_one_by_endpoint": latency_by_endpoint,
                 "rank_receipts": rank_records,
                 "protected_test_accessed": False,
