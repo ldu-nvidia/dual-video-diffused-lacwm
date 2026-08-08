@@ -1,8 +1,17 @@
-# Training-only VideoREPA relation-distillation screen
+# Low-dose training-only VideoREPA relation-distillation screen
 
 Status: prospective and unlaunched. This document and the implementation must
 be committed in a clean checkout before registration. No validation or test
 metric has been observed under this protocol.
+
+This is a dose follow-up chosen from the earlier `0.5` arm's **training-only**
+telemetry: that arm reduced held-out-train relation error by roughly 90% while
+raising its video-flow loss by roughly 6.6%.  No val64 generation metric was
+used to choose this dose.  The present candidate lowers the multiplier tenfold
+to `0.05` to test whether weaker geometric supervision retains useful structure
+without overwhelming the video-flow objective.  It is a new immutable study
+with fresh paired control and candidate continuations; it does not reuse the
+earlier screen's validation outputs.
 
 ## Question
 
@@ -44,7 +53,7 @@ Thus 0.05 is a tolerance: sub-margin errors contribute zero and 0.05 is
 subtracted from every supra-margin error. The candidate objective is
 
 \[
-L_{\mathrm{ON}}=L_{\mathrm{video\ flow}}+0.5L_{\mathrm{TRD}},
+L_{\mathrm{ON}}=L_{\mathrm{video\ flow}}+0.05L_{\mathrm{TRD}},
 \]
 
 while the control returns exactly `L_video flow`. Both compute the same
@@ -99,7 +108,7 @@ calls.
 | Arm | Start | Updates | Objective | Inference |
 |---|---|---:|---|---|
 | TRD-OFF | exact VPM SHA `f67c7bae...` | 200 | video flow only | video-only Wan |
-| TRD-ON | same exact VPM | 200 | video flow + `0.5 TRD` | same video-only Wan |
+| TRD-ON | same exact VPM | 200 | video flow + `0.05 TRD` | same video-only Wan |
 
 Both arms use seed 1234, eight B200 GPUs, batch one per GPU, fresh AdamW,
 identical LR schedule, train clip order, corruption/timestep stream, LoRA

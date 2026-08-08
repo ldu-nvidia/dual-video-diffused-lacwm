@@ -96,7 +96,7 @@ def test_arm_contract_has_one_gradient_level_difference():
     off, on = screen.ARMS
     assert off.code == "TRD-OFF" and on.code == "TRD-ON"
     assert off.mode == "off" and on.mode == "on"
-    assert off.loss_weight == 0.0 and on.loss_weight == 0.5
+    assert off.loss_weight == 0.0 and on.loss_weight == 0.05
     assert screen.NFE_GRID == (1, 2, 4)
     assert screen.ACTION_CONTROLS == ("aligned", "episode_shuffled", "zero")
     assert screen.TRAIN_CLIPS == 512 and screen.VALIDATION_CLIPS == 64
@@ -399,7 +399,7 @@ def test_configs_freeze_train_only_cache_and_zero_projection(monkeypatch):
         assert config.wandb.project == "dual-video-diffusion-private"
         assert config.wandb.group is None
     assert off.model.token_relation_distillation.loss_weight == 0.0
-    assert on.model.token_relation_distillation.loss_weight == 0.5
+    assert on.model.token_relation_distillation.loss_weight == 0.05
     assert set(off.model.keys()) == set(on.model.keys())
 
 

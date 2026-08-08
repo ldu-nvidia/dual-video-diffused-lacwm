@@ -109,7 +109,7 @@ ARMS = (
         "ravenhuang/wan-dit/videorepa_trd_on",
         "videorepa-trd-on-seed1234-u000200",
         "on",
-        0.5,
+        0.05,
     ),
 )
 ARM_BY_CODE = {arm.code: arm for arm in ARMS}
@@ -677,7 +677,7 @@ def command_write_plan(args: argparse.Namespace) -> int:
                 "same_data_order": True,
                 "same_seed_noise_optimizer_scheduler": True,
                 "same_single_Wan_call_per_update": True,
-                "only_difference": "whether 0.5 * TRD relation loss enters objective",
+                "only_difference": "whether 0.05 * TRD relation loss enters objective",
             },
             "validation_exposed_to_training_process": False,
             "protected_test_accessed": False,
