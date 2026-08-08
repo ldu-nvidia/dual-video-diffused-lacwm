@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,11 @@ def test_actual_four_bin_contract_yields_three_aligned_transitions() -> None:
     assert protocol["alignment"]["action_chunk_intervals"] == [[0, 4], [4, 8], [8, 12]]
     assert protocol["alignment"]["unused_terminal_action_chunk"] == 12
     assert protocol["alignment"]["future_relevant_guardrail"] == [1, 2]
+    assert set(protocol["consumption_integrity"]["full_sha256_before_and_after"]) == {
+        "train_rgb_encode", "validation_rgb_encode", "train_features_analysis",
+        "validation_features_analysis", "train_actions_analysis",
+        "validation_actions_analysis",
+    }
 
 
 def test_action_target_uses_full_aligned_segments_not_within_chunk_delta() -> None:
@@ -27,14 +33,35 @@ def test_action_target_uses_full_aligned_segments_not_within_chunk_delta() -> No
     np.testing.assert_array_equal(target[:, 2], actions[:, 8:12].reshape(2, -1))
     assert not np.isin(actions[:, 12].reshape(-1), target.reshape(-1)).all()
     temporal = probe.temporally_misaligned_action_targets(actions)
-    np.testing.assert_array_equal(temporal[:, 0], actions[:, 1:5].reshape(2, -1))
-    np.testing.assert_array_equal(temporal[:, 1], actions[:, 5:9].reshape(2, -1))
-    np.testing.assert_array_equal(temporal[:, 2], actions[:, 9:13].reshape(2, -1))
+    np.testing.assert_array_equal(temporal[:, 0], actions[:, 4:8].reshape(2, -1))
+    np.testing.assert_array_equal(temporal[:, 1], actions[:, 8:12].reshape(2, -1))
+    np.testing.assert_array_equal(temporal[:, 2], actions[:, 0:4].reshape(2, -1))
     control = probe.fixed_protocol()["controls"][
         "same_clip_task_matched_temporal_misalignment"
     ]
     assert control["same_clip_episode_and_task"] is True
-    assert control["offset_low_level_actions"] == 5
+    assert control["donor_transition_by_recipient"] == [1, 2, 0]
+    assert control["nonoverlapping_with_recipient"] is True
+    for aligned, negative in zip(
+        probe.ACTION_CHUNK_INTERVALS,
+        probe.TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS,
+    ):
+        assert not (set(range(*aligned)) & set(range(*negative)))
+
+
+def test_temporal_negative_train_oracle_can_attain_frozen_cosine_gate() -> None:
+    rng = np.random.default_rng(20260808)
+    actions = rng.normal(size=(64, *probe.ACTION_SHAPE)).astype(np.float32)
+    result = probe.temporal_control_oracle_feasibility(actions)
+    probe.validate_temporal_oracle_payload(result)
+    assert result["passed"] is True
+    for row in result["subsets"].values():
+        assert row["perfect_predictor_cosine_gap"] >= 0.10
+        assert row["perfect_predictor_mse_gap"] > 0
+    register_source = inspect.getsource(probe.command_register)
+    assert register_source.index("temporal_control_oracle_feasibility") < register_source.index(
+        "output_root.mkdir"
+    )
 
 
 def test_latent_features_split_three_views_and_keep_three_displacements() -> None:
@@ -127,14 +154,21 @@ def test_full_preconsumption_hash_rejects_same_size_middle_mutation(tmp_path) ->
     )
     assert receipt["full_file_hashed"] is True
     assert receipt["sha256"] == record["sha256"]
+    artifact.read_bytes()  # stand in for a complete, unchanged consumer
+    post = probe.full_postconsumption_rehash(
+        record,
+        label="synthetic array after consumption",
+        registration_identity_sha256="1" * 64,
+    )
+    probe.validate_consumption_window(receipt, post)
     with artifact.open("r+b") as handle:
         handle.seek(64)
         handle.write(b"z")
     assert artifact.stat().st_size == record["bytes"]
     with pytest.raises(probe.ActionCycleProbeError, match="same-size middle mutation"):
-        probe.full_preconsumption_rehash(
+        probe.full_postconsumption_rehash(
             record,
-            label="synthetic array",
+            label="synthetic array after mutated consumption",
             registration_identity_sha256="1" * 64,
         )
 

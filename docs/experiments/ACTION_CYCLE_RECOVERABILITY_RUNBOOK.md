@@ -38,10 +38,12 @@ and analysis jobs independently restore and validate the same root setting.
 Before submission, confirm no active duplicate study and use a fresh absent
 `STUDY`. The wrapper rejects a dirty source tree, independently hashes both
 large RGB/action arrays, verifies the exact clean VideoX commit and Wan asset
-digests, and checks private W&B ownership. Each RGB split is fully rehashed
-again immediately before encoding; train and validation actions are fully
-rehashed again immediately before analysis consumes them. Do not reuse a
-partial root.
+digests, checks private W&B ownership, and computes the train-only oracle
+feasibility of the nonoverlapping cyclic temporal control before registration
+is written. Each RGB split is fully rehashed immediately before and after
+encoding; train/validation encoded features and actions are fully rehashed
+immediately before and after analysis consumes them. Boundary inode, size,
+mtime, and SHA-256 identities must remain exact. Do not reuse a partial root.
 
 Read-only monitoring:
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -64,7 +65,8 @@ LATENT_SHAPE = (16, 4, 24, 120)
 PER_VIEW_LATENT_SHAPE = (16, 4, 24, 40)
 VAE_FRAME_SUPPORTS = ((0, 1), (1, 5), (5, 9), (9, 13))
 ACTION_CHUNK_INTERVALS = ((0, 4), (4, 8), (8, 12))
-TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS = ((1, 5), (5, 9), (9, 13))
+TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS = ((4, 8), (8, 12), (0, 4))
+TEMPORAL_DONOR_TRANSITIONS = (1, 2, 0)
 ALL_TRANSITIONS = (0, 1, 2)
 FUTURE_RELEVANT_TRANSITIONS = (1, 2)
 POOL_SHAPE = (6, 10)
@@ -281,7 +283,22 @@ def assert_clean_commit(repo: Path, expected: str, *, label: str) -> None:
         raise ActionCycleProbeError(f"{label} repository is dirty: {status.replace(chr(10), '; ')}")
 
 
+def validate_temporal_control_contract() -> None:
+    if tuple(
+        ACTION_CHUNK_INTERVALS[index] for index in TEMPORAL_DONOR_TRANSITIONS
+    ) != TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS:
+        raise ActionCycleProbeError("temporal control is not the declared cyclic donor")
+    for aligned, negative in zip(
+        ACTION_CHUNK_INTERVALS, TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS
+    ):
+        if set(range(*aligned)) & set(range(*negative)):
+            raise ActionCycleProbeError(
+                "temporal control must not overlap its recipient action window"
+            )
+
+
 def fixed_protocol() -> dict[str, Any]:
+    validate_temporal_control_contract()
     gate_thresholds = {
         "normalized_mse_relative_improvement": 0.20,
         "cosine_absolute_gain": 0.10,
@@ -352,10 +369,13 @@ def fixed_protocol() -> dict[str, Any]:
                 "action_chunk_intervals": [
                     list(value) for value in TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS
                 ],
-                "offset_action_chunks": 1,
-                "offset_low_level_actions": 5,
+                "donor_transition_by_recipient": list(TEMPORAL_DONOR_TRANSITIONS),
+                "nonoverlapping_with_recipient": True,
+                "cyclic_transition_donor": True,
                 "same_clip_episode_and_task": True,
                 "validation_scoring_control_only": True,
+                "train_only_oracle_feasibility_required_before_registration": True,
+                "oracle_minimum_cosine_gap": 0.10,
             },
         },
         "bootstrap": {
@@ -364,6 +384,17 @@ def fixed_protocol() -> dict[str, Any]:
             "seed": BOOTSTRAP_SEED,
             "familywise_confidence": 0.95,
             "method": "one_sided_bonferroni_paired_percentile",
+        },
+        "consumption_integrity": {
+            "full_sha256_before_and_after": [
+                "train_rgb_encode", "validation_rgb_encode",
+                "train_features_analysis", "validation_features_analysis",
+                "train_actions_analysis", "validation_actions_analysis",
+            ],
+            "boundary_identity_fields": [
+                "device", "inode", "bytes", "mtime_ns", "sha256"
+            ],
+            "unchanged_window_required": True,
         },
         "gate_thresholds": gate_thresholds,
         "go_requires": (
@@ -662,6 +693,14 @@ def command_register(args: argparse.Namespace) -> int:
         count=VALIDATION_CLIPS, full_hash=True,
     )
     validate_train_val_disjoint(train, val)
+    train_actions_for_oracle = np.load(
+        train["actions"]["path"], mmap_mode="r", allow_pickle=False
+    )
+    temporal_oracle = temporal_control_oracle_feasibility(
+        train_actions_for_oracle
+    )
+    del train_actions_for_oracle
+    validate_temporal_oracle_payload(temporal_oracle)
 
     videox = regular_directory(args.videox_home, label="VideoX-Fun repository")
     assert_clean_commit(videox, EXPECTED_VIDEOX_COMMIT, label="VideoX-Fun")
@@ -715,6 +754,7 @@ def command_register(args: argparse.Namespace) -> int:
                 "clip_id": True,
                 "episode_dir": True,
             },
+            "train_only_temporal_control_oracle_feasibility": temporal_oracle,
             "fixed_protocol": fixed_protocol(),
             "wandb": wandb,
             "target_cache_array_opened": False,
@@ -739,13 +779,17 @@ def _rehash_record(record: Mapping[str, Any], *, label: str) -> Path:
     return path
 
 
-def full_preconsumption_rehash(
+def full_integrity_rehash(
     record: Mapping[str, Any],
     *,
     label: str,
     registration_identity_sha256: str,
+    phase: str,
 ) -> dict[str, Any]:
     """Hash every byte and reject mutation during the verification window."""
+
+    if phase not in {"immediate_preconsumption", "immediate_postconsumption"}:
+        raise ActionCycleProbeError("full-integrity rehash phase is invalid")
 
     path = regular_file(record.get("path", ""), label=label, protected_ok=True)
     before = path.stat()
@@ -767,10 +811,11 @@ def full_preconsumption_rehash(
         )
     return identity_payload(
         {
-            "kind": "action-cycle-preconsumption-full-rehash-v1",
+            "kind": "action-cycle-consumption-boundary-full-rehash-v1",
             "created_at_utc": now_utc(),
             "registration_identity_sha256": registration_identity_sha256,
             "label": label,
+            "phase": phase,
             "path": str(path),
             "sha256": digest,
             "bytes": int(after.st_size),
@@ -781,6 +826,55 @@ def full_preconsumption_rehash(
             "protected_test_accessed": False,
         }
     )
+
+
+def full_preconsumption_rehash(
+    record: Mapping[str, Any],
+    *,
+    label: str,
+    registration_identity_sha256: str,
+) -> dict[str, Any]:
+    return full_integrity_rehash(
+        record,
+        label=label,
+        registration_identity_sha256=registration_identity_sha256,
+        phase="immediate_preconsumption",
+    )
+
+
+def full_postconsumption_rehash(
+    record: Mapping[str, Any],
+    *,
+    label: str,
+    registration_identity_sha256: str,
+) -> dict[str, Any]:
+    return full_integrity_rehash(
+        record,
+        label=label,
+        registration_identity_sha256=registration_identity_sha256,
+        phase="immediate_postconsumption",
+    )
+
+
+def validate_consumption_window(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> None:
+    invariant_fields = (
+        "registration_identity_sha256", "path", "sha256", "bytes", "device",
+        "inode", "mtime_ns",
+    )
+    if (
+        not identity_valid(before)
+        or not identity_valid(after)
+        or before.get("phase") != "immediate_preconsumption"
+        or after.get("phase") != "immediate_postconsumption"
+        or before.get("full_file_hashed") is not True
+        or after.get("full_file_hashed") is not True
+        or any(before.get(field) != after.get(field) for field in invariant_fields)
+    ):
+        raise ActionCycleProbeError(
+            "file identity changed across the full memmap consumption window"
+        )
 
 
 def validate_registration(path: Path, *, full_hash: bool) -> dict[str, Any]:
@@ -800,6 +894,9 @@ def validate_registration(path: Path, *, full_hash: bool) -> dict[str, Any]:
         or registration.get("wandb", {}).get("group") is not None
     ):
         raise ActionCycleProbeError("registration identity or protocol differs")
+    validate_temporal_oracle_payload(
+        registration.get("train_only_temporal_control_oracle_feasibility", {})
+    )
     output_root = Path(registration.get("output_root", "")).resolve(strict=True)
     if registration_path != (output_root / "registration.json").resolve(strict=True):
         raise ActionCycleProbeError("registration is not at its canonical output root")
@@ -937,11 +1034,117 @@ def aligned_action_targets(actions: np.ndarray | torch.Tensor) -> np.ndarray:
 def temporally_misaligned_action_targets(
     actions: np.ndarray | torch.Tensor,
 ) -> np.ndarray:
-    """Shift every target by one cached action chunk within the same clip/task."""
+    """Use a nonoverlapping cyclic transition donor in the same clip/task."""
 
     return action_targets_for_intervals(
         actions, TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS
     )
+
+
+def temporal_control_oracle_feasibility(
+    actions: np.ndarray | torch.Tensor,
+) -> dict[str, Any]:
+    """Prove on train only that the frozen 0.10 cosine gate is attainable."""
+
+    validate_temporal_control_contract()
+    aligned_raw = aligned_action_targets(actions)
+    negative_raw = temporally_misaligned_action_targets(actions)
+    aligned, mean, std, active = _standardize_targets(aligned_raw)
+    negative = np.where(
+        active[None], (negative_raw - mean[None]) / std[None], 0.0
+    )
+    subsets: dict[str, Any] = {}
+    passed = True
+    minimum = float(
+        fixed_protocol()["controls"]["same_clip_task_matched_temporal_misalignment"]
+        ["oracle_minimum_cosine_gap"]
+    )
+    for name, transitions in (
+        ("all_three_transitions", ALL_TRANSITIONS),
+        ("future_relevant_transitions", FUTURE_RELEVANT_TRANSITIONS),
+    ):
+        oracle_cosine = _per_clip_cosine(
+            aligned, aligned, active, transitions
+        )
+        negative_cosine = _per_clip_cosine(
+            aligned, negative, active, transitions
+        )
+        aligned_mse = _per_clip_mse(aligned, aligned, active, transitions)
+        negative_mse = _per_clip_mse(aligned, negative, active, transitions)
+        cosine_gap = float(oracle_cosine.mean() - negative_cosine.mean())
+        mse_gap = float(negative_mse.mean() - aligned_mse.mean())
+        subset_passed = bool(
+            cosine_gap >= minimum
+            and mse_gap > 0.0
+            and float(aligned_mse.max()) == 0.0
+        )
+        passed = passed and subset_passed
+        subsets[name] = {
+            "clips": int(aligned.shape[0]),
+            "transitions": list(transitions),
+            "perfect_predictor_cosine_mean": float(oracle_cosine.mean()),
+            "temporal_negative_cosine_mean": float(negative_cosine.mean()),
+            "perfect_predictor_cosine_gap": cosine_gap,
+            "minimum_required_cosine_gap": minimum,
+            "perfect_predictor_mse_mean": float(aligned_mse.mean()),
+            "temporal_negative_mse_mean": float(negative_mse.mean()),
+            "perfect_predictor_mse_gap": mse_gap,
+            "passed": subset_passed,
+        }
+    payload = identity_payload(
+        {
+            "kind": "action-cycle-temporal-control-train-oracle-feasibility-v1",
+            "split": "train",
+            "fit_or_validation_metrics_used": False,
+            "action_chunk_intervals": [list(value) for value in ACTION_CHUNK_INTERVALS],
+            "temporal_negative_action_chunk_intervals": [
+                list(value) for value in TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS
+            ],
+            "donor_transition_by_recipient": list(TEMPORAL_DONOR_TRANSITIONS),
+            "nonoverlapping_with_recipient": True,
+            "subsets": subsets,
+            "passed": passed,
+            "protected_test_accessed": False,
+        }
+    )
+    if not passed:
+        raise ActionCycleProbeError(
+            "train-only temporal-control oracle cannot attain the frozen cosine gate"
+        )
+    return payload
+
+
+def validate_temporal_oracle_payload(payload: Mapping[str, Any]) -> None:
+    control = fixed_protocol()["controls"][
+        "same_clip_task_matched_temporal_misalignment"
+    ]
+    if (
+        not identity_valid(payload)
+        or payload.get("kind")
+        != "action-cycle-temporal-control-train-oracle-feasibility-v1"
+        or payload.get("split") != "train"
+        or payload.get("fit_or_validation_metrics_used") is not False
+        or payload.get("action_chunk_intervals")
+        != [list(value) for value in ACTION_CHUNK_INTERVALS]
+        or payload.get("temporal_negative_action_chunk_intervals")
+        != [list(value) for value in TEMPORALLY_MISALIGNED_ACTION_CHUNK_INTERVALS]
+        or payload.get("donor_transition_by_recipient")
+        != list(TEMPORAL_DONOR_TRANSITIONS)
+        or payload.get("nonoverlapping_with_recipient") is not True
+        or payload.get("passed") is not True
+        or payload.get("protected_test_accessed") is not False
+    ):
+        raise ActionCycleProbeError("train-only temporal oracle certificate differs")
+    for name in ("all_three_transitions", "future_relevant_transitions"):
+        row = payload.get("subsets", {}).get(name, {})
+        if (
+            row.get("passed") is not True
+            or float(row.get("perfect_predictor_cosine_gap", -math.inf))
+            < float(control["oracle_minimum_cosine_gap"])
+            or float(row.get("perfect_predictor_mse_gap", -math.inf)) <= 0.0
+            or float(row.get("perfect_predictor_mse_mean", math.inf)) != 0.0
+        ):
+            raise ActionCycleProbeError("train-only temporal oracle invariant failed")
 
 
 def _distributed_context() -> tuple[int, int, torch.device]:
@@ -1071,8 +1274,10 @@ def _merge_encoding_shards(
     world_size: int,
     registration: Mapping[str, Any],
     canary: Mapping[str, Any],
-    rgb_rehash: Mapping[str, Any],
+    rgb_pre_rehash: Mapping[str, Any],
+    rgb_post_rehash: Mapping[str, Any],
 ) -> dict[str, Any]:
+    validate_consumption_window(rgb_pre_rehash, rgb_post_rehash)
     all_indices: list[np.ndarray] = []
     all_features: list[np.ndarray] = []
     shard_records: list[dict[str, Any]] = []
@@ -1125,7 +1330,11 @@ def _merge_encoding_shards(
             "split": split,
             "registration_identity_sha256": registration["identity_sha256"],
             "source_rgb": registration["inputs"][split]["rgb"],
-            "immediate_preconsumption_rgb_full_rehash": dict(rgb_rehash),
+            "rgb_full_rehash_consumption_window": {
+                "before": dict(rgb_pre_rehash),
+                "after": dict(rgb_post_rehash),
+                "unchanged": True,
+            },
             "source_actions": registration["inputs"][split]["actions"],
             "features": file_record(final_path),
             "feature_shape": [count, 3, 3, FEATURE_DIM],
@@ -1189,8 +1398,23 @@ def command_encode(args: argparse.Namespace) -> int:
             rgb.permute(0, 2, 1, 3, 4).contiguous(), sample=False
         )
         features[offset] = latent_displacement_features(latent).cpu().numpy()[0]
-    del tokenizer, rgbs
     torch.cuda.synchronize(device)
+    torch.distributed.barrier()
+    post_rehash_path = output / "rgb.postconsumption-full-rehash.json"
+    if rank == 0:
+        rgb_post_rehash = full_postconsumption_rehash(
+            source["rgb"],
+            label=f"{split} RGB array immediately after encode consumption",
+            registration_identity_sha256=registration["identity_sha256"],
+        )
+        validate_consumption_window(rgb_rehash, rgb_post_rehash)
+        exclusive_json(post_rehash_path, rgb_post_rehash)
+    torch.distributed.barrier()
+    rgb_post_rehash = read_json(
+        post_rehash_path, label=f"{split} RGB postconsumption rehash"
+    )
+    validate_consumption_window(rgb_rehash, rgb_post_rehash)
+    del tokenizer, rgbs
     elapsed = time.monotonic() - started
     index_path = output / f"indices.rank{rank:02d}.int64.npy"
     feature_path = output / f"features.rank{rank:02d}.float32.npy"
@@ -1219,7 +1443,8 @@ def command_encode(args: argparse.Namespace) -> int:
             raise ActionCycleProbeError("rank-zero actual VAE alignment canary is missing")
         metadata = _merge_encoding_shards(
             output, split=split, count=count, world_size=world_size,
-            registration=registration, canary=canary, rgb_rehash=rgb_rehash,
+            registration=registration, canary=canary,
+            rgb_pre_rehash=rgb_rehash, rgb_post_rehash=rgb_post_rehash,
         )
         if args.wandb:
             _wandb_log(
@@ -1271,11 +1496,13 @@ def episode_disjoint_permutation(
 
 def _validate_encoding(
     registration: Mapping[str, Any], split: str
-) -> tuple[dict[str, Any], np.ndarray]:
+) -> tuple[dict[str, Any], np.ndarray, dict[str, Any]]:
     root = Path(registration["output_root"]) / "artifacts/encoded" / split
     metadata = read_json(root / "metadata.json", label=f"{split} encoding metadata")
     count = TRAIN_CLIPS if split == "train" else VALIDATION_CLIPS
-    rgb_rehash = metadata.get("immediate_preconsumption_rgb_full_rehash", {})
+    rgb_window = metadata.get("rgb_full_rehash_consumption_window", {})
+    rgb_pre_rehash = rgb_window.get("before", {})
+    rgb_post_rehash = rgb_window.get("after", {})
     if (
         not identity_valid(metadata)
         or metadata.get("kind") != ENCODING_KIND
@@ -1288,23 +1515,30 @@ def _validate_encoding(
         or metadata.get("alignment") != fixed_protocol()["alignment"]
         or metadata.get("actual_vae_alignment_canary", {}).get("passed") is not True
         or metadata.get("actual_vae_alignment_canary", {}).get("adjacent_displacements") != 3
-        or not identity_valid(rgb_rehash)
-        or rgb_rehash.get("registration_identity_sha256")
+        or rgb_window.get("unchanged") is not True
+        or not identity_valid(rgb_pre_rehash)
+        or not identity_valid(rgb_post_rehash)
+        or rgb_pre_rehash.get("registration_identity_sha256")
         != registration["identity_sha256"]
-        or rgb_rehash.get("sha256")
+        or rgb_pre_rehash.get("sha256")
         != registration["inputs"][split]["rgb"]["sha256"]
-        or rgb_rehash.get("full_file_hashed") is not True
+        or rgb_post_rehash.get("sha256")
+        != registration["inputs"][split]["rgb"]["sha256"]
         or metadata.get("target_cache_array_opened") is not False
         or metadata.get("protected_test_accessed") is not False
     ):
         raise ActionCycleProbeError(f"{split} encoding protocol differs")
-    feature_path = _rehash_record(metadata["features"], label=f"{split} features")
+    validate_consumption_window(rgb_pre_rehash, rgb_post_rehash)
+    feature_pre_rehash = full_preconsumption_rehash(
+        metadata["features"],
+        label=f"{split} encoded features immediately before analysis consumption",
+        registration_identity_sha256=registration["identity_sha256"],
+    )
+    feature_path = Path(metadata["features"]["path"])
     values = np.load(feature_path, mmap_mode="r", allow_pickle=False)
     if tuple(values.shape) != (count, 3, 3, FEATURE_DIM) or values.dtype != np.float32:
         raise ActionCycleProbeError(f"{split} feature array differs")
-    if not np.isfinite(np.asarray(values)).all():
-        raise ActionCycleProbeError(f"{split} feature array is non-finite")
-    return metadata, values
+    return metadata, values, feature_pre_rehash
 
 
 def _standardize_targets(train_targets: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -1563,10 +1797,34 @@ def _exclusive_npz(path: Path, **arrays: np.ndarray) -> None:
 
 def command_analyze(args: argparse.Namespace) -> int:
     registration = validate_registration(args.registration, full_hash=False)
-    train_encoding, train_features_mmap = _validate_encoding(registration, "train")
-    val_encoding, val_features_mmap = _validate_encoding(registration, "val")
+    train_encoding, train_features_mmap, train_feature_pre_rehash = _validate_encoding(
+        registration, "train"
+    )
     train_features = np.asarray(train_features_mmap, dtype=np.float64)
+    if not np.isfinite(train_features).all():
+        raise ActionCycleProbeError("train feature array is non-finite")
+    del train_features_mmap
+    train_feature_post_rehash = full_postconsumption_rehash(
+        train_encoding["features"],
+        label="train encoded features immediately after analysis consumption",
+        registration_identity_sha256=registration["identity_sha256"],
+    )
+    validate_consumption_window(
+        train_feature_pre_rehash, train_feature_post_rehash
+    )
+    val_encoding, val_features_mmap, val_feature_pre_rehash = _validate_encoding(
+        registration, "val"
+    )
     val_features = np.asarray(val_features_mmap, dtype=np.float64)
+    if not np.isfinite(val_features).all():
+        raise ActionCycleProbeError("validation feature array is non-finite")
+    del val_features_mmap
+    val_feature_post_rehash = full_postconsumption_rehash(
+        val_encoding["features"],
+        label="validation encoded features immediately after analysis consumption",
+        registration_identity_sha256=registration["identity_sha256"],
+    )
+    validate_consumption_window(val_feature_pre_rehash, val_feature_post_rehash)
     train_action_rehash = full_preconsumption_rehash(
         registration["inputs"]["train"]["actions"],
         label="train actions immediately before analysis consumption",
@@ -1578,6 +1836,12 @@ def command_analyze(args: argparse.Namespace) -> int:
     )
     train_targets_raw = aligned_action_targets(train_actions)
     del train_actions
+    train_action_post_rehash = full_postconsumption_rehash(
+        registration["inputs"]["train"]["actions"],
+        label="train actions immediately after analysis consumption",
+        registration_identity_sha256=registration["identity_sha256"],
+    )
+    validate_consumption_window(train_action_rehash, train_action_post_rehash)
     val_action_rehash = full_preconsumption_rehash(
         registration["inputs"]["val"]["actions"],
         label="validation actions immediately before analysis consumption",
@@ -1590,6 +1854,12 @@ def command_analyze(args: argparse.Namespace) -> int:
     val_targets_raw = aligned_action_targets(val_actions)
     val_temporally_misaligned_raw = temporally_misaligned_action_targets(val_actions)
     del val_actions
+    val_action_post_rehash = full_postconsumption_rehash(
+        registration["inputs"]["val"]["actions"],
+        label="validation actions immediately after analysis consumption",
+        registration_identity_sha256=registration["identity_sha256"],
+    )
+    validate_consumption_window(val_action_rehash, val_action_post_rehash)
     train_targets, target_mean, target_std, target_active = _standardize_targets(
         train_targets_raw
     )
@@ -1710,12 +1980,33 @@ def command_analyze(args: argparse.Namespace) -> int:
             "model_strata": 9,
             "train_shuffle_sha256": numpy_sha256(train_shuffle),
             "validation_shuffle_sha256": numpy_sha256(val_shuffle),
-            "immediate_preconsumption_action_full_rehash": {
-                "train": train_action_rehash,
-                "val": val_action_rehash,
+            "full_rehash_consumption_windows": {
+                "train_features": {
+                    "before": train_feature_pre_rehash,
+                    "after": train_feature_post_rehash,
+                    "unchanged": True,
+                },
+                "validation_features": {
+                    "before": val_feature_pre_rehash,
+                    "after": val_feature_post_rehash,
+                    "unchanged": True,
+                },
+                "train_actions": {
+                    "before": train_action_rehash,
+                    "after": train_action_post_rehash,
+                    "unchanged": True,
+                },
+                "validation_actions": {
+                    "before": val_action_rehash,
+                    "after": val_action_post_rehash,
+                    "unchanged": True,
+                },
             },
             "same_clip_temporal_misalignment": fixed_protocol()["controls"][
                 "same_clip_task_matched_temporal_misalignment"
+            ],
+            "train_only_temporal_control_oracle_feasibility": registration[
+                "train_only_temporal_control_oracle_feasibility"
             ],
             "target_cache_array_opened": False,
             "protected_test_accessed": False,
@@ -1791,9 +2082,30 @@ def command_analyze(args: argparse.Namespace) -> int:
                 "clean_latent_action_recoverability_only_no_video_quality_claim"
             ),
             "validation_fit_observations": 0,
-            "immediate_preconsumption_action_full_rehash": {
-                "train": train_action_rehash,
-                "val": val_action_rehash,
+            "train_only_temporal_control_oracle_feasibility": registration[
+                "train_only_temporal_control_oracle_feasibility"
+            ],
+            "full_rehash_consumption_windows": {
+                "train_features": {
+                    "before": train_feature_pre_rehash,
+                    "after": train_feature_post_rehash,
+                    "unchanged": True,
+                },
+                "validation_features": {
+                    "before": val_feature_pre_rehash,
+                    "after": val_feature_post_rehash,
+                    "unchanged": True,
+                },
+                "train_actions": {
+                    "before": train_action_rehash,
+                    "after": train_action_post_rehash,
+                    "unchanged": True,
+                },
+                "validation_actions": {
+                    "before": val_action_rehash,
+                    "after": val_action_post_rehash,
+                    "unchanged": True,
+                },
             },
             "target_cache_array_opened": False,
             "protected_test_accessed": False,

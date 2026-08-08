@@ -75,13 +75,19 @@ split and are bijective; no donor may share an episode with its recipient.
 
 A task-matched temporal negative is mandatory for every clip. It retains the
 same clip, task label, episode, action coordinates, and four-chunk target width,
-but shifts every action window forward by exactly one cached chunk (five
-low-level actions): `[0:4]→[1:5]`, `[4:8]→[5:9]`, and
-`[8:12]→[9:13]`. Aligned MSE and cosine must beat this negative under the same
-point thresholds and simultaneous bootstrap family. Thus repeated task labels
-or task-level motion cannot by themselves satisfy the causal-alignment gate.
-Chunk 12 remains forbidden as a positive target; its recorded post-frame-12
-actions appear only in the deliberately offset final negative.
+but uses a nonoverlapping cyclic transition donor:
+`[0:4]→[4:8]`, `[4:8]→[8:12]`, and `[8:12]→[0:4]`. Unlike the rejected
+one-chunk shift, these recipient/donor windows have zero overlap. Aligned MSE
+and cosine must beat this negative under the same point thresholds and
+simultaneous bootstrap family. Thus repeated task labels or task-level motion
+cannot by themselves satisfy the causal-alignment gate.
+
+Before registration is written, the train action array must produce a sealed
+oracle-feasibility certificate. A perfect standardized-action predictor is
+scored against the cyclic negative for both the all-three and future-relevant
+transition subsets. Each mean cosine gap must be at least the already frozen
+0.10 gate and each MSE gap must be positive. This is a feasibility invariant,
+not a fitted or validation result; failure aborts registration.
 
 ## Preregistered gate
 
@@ -100,9 +106,11 @@ simultaneous lower bound must be strictly positive. Any failure yields
 
 All inputs, code, Wan assets, encodings, fitted ridge, rows, shuffles, and
 results are content-hashed and bound to the preregistration identity. Every RGB
-array is fully rehashed immediately before its encode split opens it, and each
-action array is fully rehashed immediately before analysis consumes it; inode,
-size, mtime, and full SHA-256 are sealed, so a same-size middle mutation fails.
+array is fully rehashed immediately before and after its complete distributed
+encode consumption. Each encoded-feature and action array is likewise fully
+rehashed around its complete analysis consumption. The two boundary receipts
+must have identical device, inode, size, mtime, and SHA-256; a same-size middle
+mutation or a change retained at the end of the consumption window fails.
 W&B is
 locked to the authenticated owner `zijiandu`, private project
 `dual-video-diffusion-private`, with no group.
