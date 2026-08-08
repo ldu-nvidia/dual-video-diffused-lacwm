@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - /experiments_0908/intra_forward_forcing_common
+  - _self_
+
+name: intra-forward-mid-on-seed1234-u000200
+model:
+  dual_diffusion:
+    condition_mode: matched
+    condition_on_tf: true
+    condition_on_tf_clock: false
+wandb:
+  tags: [abc, intra-forward-latent-forcing, MID-ON, aligned-generated-midpoint, seed-1234]

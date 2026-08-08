@@ -213,6 +213,17 @@ def test_video_only_control_fails_closed_if_a_tf_path_can_open(monkeypatch):
         model._assert_video_only_control_contract()
 
 
+def test_intra_forward_source_mapping_is_deployable_and_fail_closed(monkeypatch):
+    module = _load_model_module(monkeypatch)
+    mapping = module.DualExplicitActionDiTModel._intra_forward_condition_source
+
+    assert mapping("autonomous") == "aligned"
+    assert mapping("off") == "off"
+    assert mapping("autonomous_shuffled") == "shuffled"
+    with pytest.raises(RuntimeError, match="forbids oracle"):
+        mapping("oracle_matched")
+
+
 def test_historical_training_tf_noise_retains_global_rng_behavior(monkeypatch):
     module = _load_model_module(monkeypatch)
     model = object.__new__(module.DualExplicitActionDiTModel)

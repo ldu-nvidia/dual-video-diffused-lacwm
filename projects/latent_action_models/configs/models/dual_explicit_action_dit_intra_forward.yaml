@@ -1,0 +1,64 @@
+defaults:
+  - _self_
+  - /tokenizers/rgb@rgb_tokenizer: ???
+  - /networks@forward_model: wan_forward
+
+_target_: lam.dual_explicit_action_dit_model.DualExplicitActionDiTModel
+latent_action_dim: 64
+num_history_frames: 5
+num_future_frames: 8
+viz_num_steps: 1
+rgb_tokenizer: ${rgb_tokenizer}
+
+time_frequency_transform:
+  _target_: robot_wm.modeling.dual_diffusion.haar_lowpass.PerViewHaarLowpass
+  num_views: 3
+  output_size: [24, 120]
+  window_size: 4
+  pad_multiple: 16
+  pad_value: -1.0
+
+dual_diffusion:
+  enabled: true
+  auxiliary_history_mode: diffuse_all
+  tf_channels: 6
+  head_condition_on_tf_clock: true
+  condition_mode: "off"
+  condition_on_tf: false
+  condition_on_tf_clock: false
+  schedule_mode: aligned
+  tf_lead_logit: 0.0
+  tf_loss_weight: 1.0
+  # Both arms instantiate byte-identical parameters at update zero. Runtime
+  # injection, rather than the stored gate value, is the treatment.
+  state_gate_init: 0.02
+  state_gate_trainable: true
+  clock_gate_init: 0.0
+  clock_gate_trainable: false
+  video_only_control: false
+  parameter_matched_control: false
+  capture_latent_trajectories: false
+  artifact_batch_limit: 1
+  evaluation_nfe_steps: [1, 2, 4]
+  evaluation_noise_seed: 20260808
+  evaluation_condition_sources: [autonomous, "off", autonomous_shuffled]
+  validation_video_sigmas: [0.90, 0.75, 0.50, 0.25]
+  clock_embedding_dim: 128
+  intra_forward_forcing:
+    enabled: true
+    block_index: 14
+    stop_gradient: true
+
+forward_model:
+  latent_action_dim: ${..latent_action_dim}
+  dual_diffusion: ${..dual_diffusion}
+action_encoder:
+  _target_: robot_wm.modeling.networks.action_encoder.ActionEncoderMLP
+  action_dim: 157
+  chunk_size: 5
+  latent_dim: ${..latent_action_dim}
+  morph_dim: ${..latent_action_dim}
+  hidden: 512
+  num_layers: 3
+config:
+  flow_loss_on_future_only: true

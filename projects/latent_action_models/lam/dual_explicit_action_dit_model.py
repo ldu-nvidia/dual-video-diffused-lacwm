@@ -10,6 +10,7 @@ LACWM clock convention: sigma=1 is Gaussian noise and sigma=0 is clean data.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Mapping
 
 import torch
@@ -187,6 +188,15 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 "evaluation_condition_sources must be unique supported values "
                 f"; supported={EVALUATION_CONDITION_SOURCES}"
             )
+        if bool(
+            getattr(self.forward_model, "intra_forward_forcing_enabled", False)
+        ) and any(
+            source not in {"autonomous", "off", "autonomous_shuffled"}
+            for source in self.evaluation_condition_sources
+        ):
+            raise ValueError(
+                "intra-forward forcing accepts deployable evaluation sources only"
+            )
         self.capture_latent_trajectories = bool(
             config.get("capture_latent_trajectories", True)
         )
@@ -259,6 +269,8 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             tf_condition_max_sigma=self.cascade_tf_condition_max_sigma,
         )
         self._visualization_artifacts = None
+        self.profile_sampling_stages = False
+        self._last_sampling_profile = None
         logger.info(
             "DualExplicitActionDiTModel: condition_mode=%s, schedule=%s, "
             "auxiliary_history_mode=%s, tf_lead_logit=%.3f, "
@@ -906,6 +918,22 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             return "autonomous"
         return condition_source
 
+    @staticmethod
+    def _intra_forward_condition_source(condition_source: str) -> str:
+        """Map public deployable controls to the block-14 intervention."""
+        mapping = {
+            "autonomous": "aligned",
+            "autonomous_shuffled": "shuffled",
+            "off": "off",
+        }
+        try:
+            return mapping[condition_source]
+        except KeyError as exc:
+            raise RuntimeError(
+                "the deployable intra-forward screen forbids oracle midpoint "
+                f"conditioning: {condition_source!r}"
+            ) from exc
+
     def forward(
         self,
         rgb: torch.Tensor,
@@ -992,6 +1020,13 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
 
         context = self._build_context(batch_size, device, rgb.dtype)
         clip_fea = self._build_clip(batch_size, device, rgb.dtype)
+        forward_kwargs = {}
+        if bool(
+            getattr(self.forward_model, "intra_forward_forcing_enabled", False)
+        ):
+            forward_kwargs["intra_forward_condition_source"] = (
+                "aligned" if self.condition_on_tf else "off"
+            )
         prediction = self.forward_model(
             video_noisy,
             timesteps,
@@ -1004,6 +1039,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             tf_sigma=tf_sigma,
             condition_on_tf=self.condition_on_tf,
             condition_on_tf_clock=self.condition_on_tf_clock,
+            **forward_kwargs,
         )
         if not isinstance(prediction, DualWanOutput):
             raise RuntimeError("dual Wan forward did not return both velocities")
@@ -1145,6 +1181,24 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         if rgb.ndim != 5:
             raise ValueError("rgb must have shape [B,T,C,H,W]")
         batch_size = rgb.shape[0]
+        profile_stages = bool(getattr(self, "profile_sampling_stages", False))
+        if profile_stages:
+            if not rgb.is_cuda:
+                raise RuntimeError("sampling-stage latency profiling requires CUDA")
+            if collect_artifacts:
+                raise RuntimeError(
+                    "sampling-stage latency profiling forbids artifact collection"
+                )
+            if len(self.evaluation_condition_sources) != 1 or len(
+                self.evaluation_nfe_steps
+            ) != 1:
+                raise RuntimeError(
+                    "sampling-stage latency profiling requires one source/NFE cell"
+                )
+            torch.cuda.synchronize(rgb.device)
+            end_to_end_started_ns = time.perf_counter_ns()
+            history_encode_started_ns = end_to_end_started_ns
+            self._last_sampling_profile = None
         if deployment_mode:
             if rgb.shape[1] != self.num_history_frames:
                 raise ValueError(
@@ -1197,6 +1251,11 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
             reference, history_frames = self._history_reference(
                 rgb, video_shape
             )
+        if profile_stages:
+            torch.cuda.synchronize(rgb.device)
+            history_encode_latency_ms = (
+                time.perf_counter_ns() - history_encode_started_ns
+            ) / 1_000_000.0
         auxiliary_history_frames = self._auxiliary_history_frames(
             history_frames
         )
@@ -1443,6 +1502,9 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 video_state = initial_video_state.clone()
                 tf_state = initial_tf_state.clone()
                 backbone_call_count = 0
+                midpoint_head_call_count = 0
+                wan_latency_ms = 0.0
+                midpoint_overhead_latency_ms = 0.0
                 schedule, model_timesteps, tf_only_steps = (
                     self._sampling_schedule(
                         num_steps,
@@ -1521,7 +1583,19 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                         #
                         # Keep the historical ``autonomous`` path byte-for-byte
                         # equivalent when the new source is not requested.
-                        if effective_condition_source == "autonomous":
+                        if bool(
+                            getattr(
+                                self.forward_model,
+                                "intra_forward_forcing_enabled",
+                                False,
+                            )
+                        ):
+                            # The intra-forward head consumes ``tf_state``
+                            # directly and performs the sole aligned/shuffled
+                            # intervention after producing q0_hat.  Avoid an
+                            # unrelated pre-backbone global collective here.
+                            conditioning_tf = tf_state
+                        elif effective_condition_source == "autonomous":
                             conditioning_tf = self._sampling_conditioning_tf(
                                 tf_state,
                                 initial_tf_noise,
@@ -1580,25 +1654,77 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                         "tf_sigma": tf_batch_sigma,
                         "condition_on_tf": use_tf_condition,
                     }
+                    if bool(
+                        getattr(
+                            self.forward_model,
+                            "intra_forward_forcing_enabled",
+                            False,
+                        )
+                    ):
+                        forward_kwargs["intra_forward_condition_source"] = (
+                            self._intra_forward_condition_source(
+                                effective_condition_source
+                            )
+                        )
                     # Preserve compatibility with historical test doubles and
                     # checkpoints that predate the separately switchable clock.
                     if hasattr(self, "condition_on_tf_clock"):
                         forward_kwargs[
                             "condition_on_tf_clock"
                         ] = use_tf_clock_condition
-                    prediction = self.forward_model(
-                        video_state,
-                        timesteps,
-                        z_control,
-                        reference,
-                        context,
-                        clip_fea,
-                        **forward_kwargs,
-                    )
+                    if profile_stages:
+                        torch.cuda.synchronize(rgb.device)
+                        wan_started_ns = time.perf_counter_ns()
+                        self.forward_model.profile_intra_forward_latency = True
+                    try:
+                        prediction = self.forward_model(
+                            video_state,
+                            timesteps,
+                            z_control,
+                            reference,
+                            context,
+                            clip_fea,
+                            **forward_kwargs,
+                        )
+                    finally:
+                        if profile_stages:
+                            torch.cuda.synchronize(rgb.device)
+                            wan_latency_ms += (
+                                time.perf_counter_ns() - wan_started_ns
+                            ) / 1_000_000.0
+                            self.forward_model.profile_intra_forward_latency = False
                     backbone_call_count += 1
                     if not isinstance(prediction, DualWanOutput):
                         raise RuntimeError(
                             "dual Wan sampler did not return both velocities"
+                        )
+                    if bool(
+                        getattr(
+                            self.forward_model,
+                            "intra_forward_forcing_enabled",
+                            False,
+                        )
+                    ):
+                        calls = prediction.tf_condition_telemetry.get(
+                            "midpoint_head_calls"
+                        )
+                        block = prediction.tf_condition_telemetry.get(
+                            "midpoint_block_index"
+                        )
+                        if (
+                            calls is None
+                            or block is None
+                            or float(calls.detach().float()) != 1.0
+                            or float(block.detach().float()) != 14.0
+                        ):
+                            raise RuntimeError(
+                                "intra-forward call telemetry violated the frozen seam"
+                            )
+                        midpoint_head_call_count += 1
+                        midpoint_overhead_latency_ms += float(
+                            prediction.tf_condition_telemetry[
+                                "midpoint_overhead_latency_ms"
+                            ].detach().float()
                         )
 
                     video_x0 = (
@@ -1673,9 +1799,17 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                             .to(torch.float16)
                         )
 
+                if profile_stages:
+                    torch.cuda.synchronize(rgb.device)
+                    decode_started_ns = time.perf_counter_ns()
                 predicted_pixels = self.rgb_tokenizer.decode_temporal(
                     video_state, out_hw=(rgb.shape[-2], rgb.shape[-1])
                 )
+                if profile_stages:
+                    torch.cuda.synchronize(rgb.device)
+                    decode_latency_ms = (
+                        time.perf_counter_ns() - decode_started_ns
+                    ) / 1_000_000.0
                 if backbone_call_count != num_steps:
                     raise RuntimeError(
                         "reported NFE does not equal actual Wan calls: "
@@ -1687,6 +1821,18 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     artifacts[
                         f"wan_call_count{source_infix}_nfe_{num_steps}"
                     ] = torch.tensor([backbone_call_count], dtype=torch.int64)
+                    if bool(
+                        getattr(
+                            self.forward_model,
+                            "intra_forward_forcing_enabled",
+                            False,
+                        )
+                    ):
+                        artifacts[
+                            f"midpoint_head_call_count{source_infix}_nfe_{num_steps}"
+                        ] = torch.tensor(
+                            [midpoint_head_call_count], dtype=torch.int64
+                        )
                     artifacts[
                         f"video_final{source_infix}_nfe_{num_steps}"
                     ] = (
@@ -1744,6 +1890,22 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     )
                 if is_primary_result:
                     primary_pixels = predicted_pixels
+                if profile_stages:
+                    torch.cuda.synchronize(rgb.device)
+                    self._last_sampling_profile = {
+                        "condition_source": condition_source,
+                        "nfe": num_steps,
+                        "history_encode_latency_ms": history_encode_latency_ms,
+                        "wan_latency_ms": wan_latency_ms,
+                        "midpoint_overhead_latency_ms": (
+                            midpoint_overhead_latency_ms
+                        ),
+                        "decode_latency_ms": decode_latency_ms,
+                        "end_to_end_latency_ms": (
+                            time.perf_counter_ns() - end_to_end_started_ns
+                        )
+                        / 1_000_000.0,
+                    }
 
         if primary_pixels is None:
             raise RuntimeError(

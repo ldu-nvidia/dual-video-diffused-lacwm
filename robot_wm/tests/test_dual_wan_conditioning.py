@@ -10,6 +10,7 @@ from torch import nn
 
 from robot_wm.modeling.dual_diffusion.adapters import (
     TFSigmaTokenEmbedding,
+    TFVelocityHead,
     ZeroInitTFTokenAdapter,
 )
 
@@ -116,15 +117,69 @@ class _FakeTransformer(nn.Module):
         return self.video_gain * x + shared_mean
 
 
+class _FakeBlock(nn.Module):
+    def __init__(self, index):
+        super().__init__()
+        self.index = index
+        self.last_input = None
+        self.last_output = None
+
+    def forward(self, tokens):
+        self.last_input = tokens
+        self.last_output = tokens + (self.index + 1) * 1.0e-4
+        return self.last_output
+
+
+class _FakeMidpointTransformer(_FakeTransformer):
+    def __init__(self, hidden_size=8):
+        super().__init__(hidden_size=hidden_size)
+        self.blocks = nn.ModuleList([_FakeBlock(index) for index in range(30)])
+
+    def forward(
+        self,
+        *,
+        x,
+        t,
+        context,
+        seq_len,
+        y,
+        y_camera=None,
+        clip_fea=None,
+    ):
+        del t, context, seq_len, clip_fea
+        native_patches = []
+        shared = []
+        for index in range(x.shape[0]):
+            native = self.patch_embedding(
+                torch.cat([x[index], y[index]], dim=0).unsqueeze(0)
+            )
+            native_patches.append(native)
+            if y_camera is not None:
+                native = native + y_camera[index]
+            shared.append(native.flatten(2).transpose(1, 2))
+        self.last_native_patches = native_patches
+        tokens = torch.cat(shared, dim=0)
+        for block in self.blocks:
+            tokens = block(tokens)
+        self.last_shared_tokens = tokens
+        self.head(tokens, None)
+        shared_mean = tokens.mean(dim=(1, 2)).reshape(
+            x.shape[0], 1, 1, 1, 1
+        )
+        return self.video_gain * x + shared_mean
+
+
 class _CapturingTFHead(nn.Module):
     def __init__(self, tf_channels=4, patch_size=(1, 2, 2)):
         super().__init__()
         self.tf_channels = tf_channels
         self.patch_size = patch_size
         self.last_tokens = None
+        self.calls = 0
 
     def forward(self, tokens, grid):
         self.last_tokens = tokens
+        self.calls += 1
         pt, ph, pw = self.patch_size
         return tokens.new_zeros(
             tokens.shape[0],
@@ -133,6 +188,12 @@ class _CapturingTFHead(nn.Module):
             grid[1] * ph,
             grid[2] * pw,
         )
+
+
+class _ConstantTFHead(_CapturingTFHead):
+    def forward(self, tokens, grid):
+        output = super().forward(tokens, grid)
+        return torch.ones_like(output)
 
 
 def _make_dual_model(
@@ -144,6 +205,7 @@ def _make_dual_model(
     state_gate_trainable=False,
     clock_gate_init=0.0,
     clock_gate_trainable=True,
+    intra_forward_forcing=False,
 ):
     model = WAN_FORWARD.WanForwardModel.__new__(
         WAN_FORWARD.WanForwardModel
@@ -158,7 +220,14 @@ def _make_dual_model(
         else condition_on_tf_clock
     )
     model.tf_head_condition_on_clock = tf_head_condition_on_clock
-    model.transformer = _FakeTransformer()
+    model.intra_forward_forcing_enabled = intra_forward_forcing
+    model.intra_forward_block_index = 14
+    model.intra_forward_stop_gradient = True
+    model.transformer = (
+        _FakeMidpointTransformer()
+        if intra_forward_forcing
+        else _FakeTransformer()
+    )
     model.action_to_control = _FakeActionToControl()
     model.tf_token_adapter = ZeroInitTFTokenAdapter(
         tf_channels=4,
@@ -175,6 +244,201 @@ def _make_dual_model(
     )
     model.tf_velocity_head = _CapturingTFHead()
     return model
+
+
+def test_intra_forward_forcing_predicts_and_injects_once_inside_one_wan_call():
+    torch.manual_seed(101)
+    model = _make_dual_model(
+        intra_forward_forcing=True,
+        condition_on_tf=True,
+        condition_on_tf_clock=False,
+        state_gate_init=0.2,
+    )
+    video = torch.randn(2, 16, 2, 4, 4)
+    reference = torch.randn_like(video)
+    noisy_tf = torch.randn(2, 4, 2, 4, 4)
+    common = dict(
+        timesteps=torch.tensor([100.0, 200.0]),
+        z_control=torch.randn(2, 2, 3),
+        ref_latents=reference,
+        context=[torch.zeros(1, 4), torch.zeros(1, 4)],
+        noisy_tf=noisy_tf,
+        conditioning_tf=noisy_tf,
+        tf_sigma=torch.ones(2),
+        condition_on_tf=True,
+        condition_on_tf_clock=False,
+    )
+
+    aligned = model(
+        video,
+        common.pop("timesteps"),
+        common.pop("z_control"),
+        common.pop("ref_latents"),
+        common.pop("context"),
+        intra_forward_condition_source="aligned",
+        **common,
+    )
+
+    assert model.tf_velocity_head.calls == 1
+    assert aligned.tf_velocity.shape == noisy_tf.shape
+    assert torch.count_nonzero(aligned.tf_condition_tokens) > 0
+    assert aligned.tf_condition_telemetry["midpoint_head_calls"].item() == 1
+    assert aligned.tf_condition_telemetry["midpoint_block_index"].item() == 14
+    assert (
+        aligned.tf_condition_telemetry["midpoint_overhead_latency_ms"].item()
+        == 0
+    )
+    # The residual produced after block 14 is the exact change seen by block 15.
+    block_14 = model.transformer.blocks[14]
+    block_15 = model.transformer.blocks[15]
+    torch.testing.assert_close(
+        block_15.last_input - block_14.last_output,
+        aligned.tf_condition_tokens,
+    )
+    assert not model.transformer.blocks[14]._forward_hooks
+
+
+def test_intra_forward_clean_estimate_has_registered_flow_sign_and_endpoints():
+    torch.manual_seed(202)
+    model = _make_dual_model(
+        intra_forward_forcing=True,
+        condition_on_tf=True,
+        condition_on_tf_clock=False,
+        state_gate_init=0.2,
+    )
+    model.tf_velocity_head = _ConstantTFHead()
+    projected_inputs = []
+    original_project = model.tf_token_adapter.project_tokens
+
+    def record_project(value):
+        projected_inputs.append(value.detach().clone())
+        return original_project(value)
+
+    model.tf_token_adapter.project_tokens = record_project
+    noisy_tf = torch.randn(2, 4, 2, 4, 4)
+    model(
+        torch.randn(2, 16, 2, 4, 4),
+        torch.tensor([0.0, 1000.0]),
+        torch.randn(2, 2, 3),
+        torch.randn(2, 16, 2, 4, 4),
+        [torch.zeros(1, 4), torch.zeros(1, 4)],
+        noisy_tf=noisy_tf,
+        tf_sigma=torch.tensor([0.0, 1.0]),
+        intra_forward_condition_source="aligned",
+    )
+
+    # First projection is q_sigma for the head; the final projection is the
+    # stopped q0_hat injected into block 15.
+    injected_clean = projected_inputs[-1]
+    torch.testing.assert_close(injected_clean[0], noisy_tf[0])
+    torch.testing.assert_close(injected_clean[1], noisy_tf[1] - 1.0)
+
+
+def test_intra_forward_off_and_shuffle_are_same_checkpoint_interventions():
+    torch.manual_seed(303)
+    model = _make_dual_model(
+        intra_forward_forcing=True,
+        condition_on_tf=True,
+        condition_on_tf_clock=False,
+        state_gate_init=0.25,
+    )
+    video = torch.randn(2, 16, 2, 4, 4)
+    reference = torch.randn_like(video)
+    noisy_tf = torch.randn(2, 4, 2, 4, 4)
+    args = (
+        video,
+        torch.tensor([100.0, 200.0]),
+        torch.randn(2, 2, 3),
+        reference,
+        [torch.zeros(1, 4), torch.zeros(1, 4)],
+    )
+    kwargs = dict(
+        noisy_tf=noisy_tf,
+        conditioning_tf=noisy_tf,
+        tf_sigma=torch.ones(2),
+        condition_on_tf=True,
+        condition_on_tf_clock=False,
+    )
+
+    aligned = model(
+        *args, intra_forward_condition_source="aligned", **kwargs
+    )
+    off = model(*args, intra_forward_condition_source="off", **kwargs)
+    shuffled = model(
+        *args, intra_forward_condition_source="shuffled", **kwargs
+    )
+
+    assert torch.count_nonzero(off.tf_condition_tokens) == 0
+    assert not torch.equal(aligned.video_velocity, off.video_velocity)
+    assert not torch.equal(aligned.video_velocity, shuffled.video_velocity)
+    assert model.tf_velocity_head.calls == 3
+    assert not model.transformer.blocks[14]._forward_hooks
+
+
+def test_intra_forward_forcing_rejects_unregistered_source():
+    model = _make_dual_model(intra_forward_forcing=True)
+    with pytest.raises(ValueError, match="aligned, off, or shuffled"):
+        model(
+            torch.randn(2, 16, 2, 4, 4),
+            torch.tensor([100.0, 200.0]),
+            torch.randn(2, 2, 3),
+            torch.randn(2, 16, 2, 4, 4),
+            [torch.zeros(1, 4), torch.zeros(1, 4)],
+            noisy_tf=torch.randn(2, 4, 2, 4, 4),
+            tf_sigma=torch.tensor([0.3, 0.6]),
+            intra_forward_condition_source="oracle",
+        )
+
+
+def test_intra_forward_video_path_stops_gradient_at_generated_clean_estimate():
+    torch.manual_seed(707)
+    model = _make_dual_model(
+        intra_forward_forcing=True,
+        condition_on_tf=True,
+        condition_on_tf_clock=False,
+        state_gate_init=0.2,
+    )
+    model.tf_velocity_head = TFVelocityHead(
+        hidden_size=8, tf_channels=4, patch_size=(1, 2, 2)
+    )
+    output = model(
+        torch.randn(2, 16, 2, 4, 4),
+        torch.tensor([100.0, 200.0]),
+        torch.randn(2, 2, 3),
+        torch.randn(2, 16, 2, 4, 4),
+        [torch.zeros(1, 4), torch.zeros(1, 4)],
+        noisy_tf=torch.randn(2, 4, 2, 4, 4),
+        tf_sigma=torch.tensor([0.3, 0.6]),
+        intra_forward_condition_source="aligned",
+    )
+
+    output.video_velocity.sum().backward()
+
+    # The video objective may train the post-stop adapter and gate, but must
+    # not train the velocity head through q0_hat.
+    assert model.tf_velocity_head.linear.weight.grad is None
+    assert model.tf_velocity_head.linear.bias.grad is None
+    assert model.tf_token_adapter.projection.weight.grad is not None
+    assert torch.count_nonzero(
+        model.tf_token_adapter.projection.weight.grad
+    ) > 0
+
+
+def test_intra_forward_training_rejects_gradient_checkpoint_recomputation():
+    model = _make_dual_model(intra_forward_forcing=True)
+    model.transformer.gradient_checkpointing = True
+
+    with pytest.raises(RuntimeError, match="cannot train with gradient checkpointing"):
+        model(
+            torch.randn(2, 16, 2, 4, 4),
+            torch.tensor([100.0, 200.0]),
+            torch.randn(2, 2, 3),
+            torch.randn(2, 16, 2, 4, 4),
+            [torch.zeros(1, 4), torch.zeros(1, 4)],
+            noisy_tf=torch.randn(2, 4, 2, 4, 4),
+            tf_sigma=torch.tensor([0.3, 0.6]),
+            intra_forward_condition_source="aligned",
+        )
 
 
 def _rms(value):

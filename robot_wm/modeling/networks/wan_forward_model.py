@@ -11,6 +11,7 @@
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -26,6 +27,9 @@ from robot_wm.modeling.dual_diffusion.adapters import (
     TFSigmaTokenEmbedding,
     TFVelocityHead,
     ZeroInitTFTokenAdapter,
+)
+from robot_wm.modeling.dual_diffusion.conditioning import (
+    roll_across_global_batch,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,6 +132,19 @@ class WanForwardModel(nn.Module):
         self.tf_head_condition_on_clock = bool(
             dual_config.get("head_condition_on_tf_clock", False)
         )
+        intra_forward_config = dict(
+            dual_config.get("intra_forward_forcing") or {}
+        )
+        self.intra_forward_forcing_enabled = bool(
+            intra_forward_config.get("enabled", False)
+        )
+        self.intra_forward_block_index = int(
+            intra_forward_config.get("block_index", 14)
+        )
+        self.intra_forward_stop_gradient = bool(
+            intra_forward_config.get("stop_gradient", True)
+        )
+        self.profile_intra_forward_latency = False
         if self.dual_diffusion_enabled:
             if self.transformer.control_adapter is not None:
                 raise RuntimeError(
@@ -160,6 +177,30 @@ class WanForwardModel(nn.Module):
                 tf_channels=tf_channels,
                 patch_size=patch_size,
             )
+            if self.intra_forward_forcing_enabled:
+                blocks = getattr(self.transformer, "blocks", None)
+                if blocks is None or len(blocks) != 30:
+                    raise RuntimeError(
+                        "intra-forward forcing requires exactly 30 Wan blocks"
+                    )
+                if self.intra_forward_block_index != 14:
+                    raise ValueError(
+                        "the frozen intra-forward screen requires block index 14"
+                    )
+                if not self.intra_forward_stop_gradient:
+                    raise ValueError(
+                        "the frozen intra-forward screen requires stop_gradient=true"
+                    )
+                # The intervention is installed as a scoped block hook.  Wan's
+                # non-reentrant checkpoint wrapper would execute block 14 again
+                # during backward, after this forward has removed the hook.
+                # That would differentiate a different function from the one
+                # used to compute the loss.  Keep the quick screen correct and
+                # fail closed instead of silently accepting that mismatch.
+                if bool(getattr(self.transformer, "gradient_checkpointing", False)):
+                    raise RuntimeError(
+                        "intra-forward forcing requires gradient_checkpointing=false"
+                    )
 
     def init_weights(self):
         self.action_to_control.init_weights()
@@ -177,6 +218,7 @@ class WanForwardModel(nn.Module):
         tf_sigma: torch.Tensor = None,
         condition_on_tf: bool | None = None,
         condition_on_tf_clock: bool | None = None,
+        intra_forward_condition_source: str | None = None,
     ) -> torch.Tensor | DualWanOutput:
         n, c, fp, h, w = noisy_latents.shape
         control = self.action_to_control(z_control, h, w).to(noisy_latents.dtype)
@@ -251,14 +293,49 @@ class WanForwardModel(nn.Module):
             if condition_on_tf_clock is None
             else bool(condition_on_tf_clock)
         )
-        clock_tokens = (
-            gated_clock.mul(float(use_tf_clock))
-            .unsqueeze(1)
-            .expand(-1, seq_len, -1)
+        intra_forward_enabled = bool(
+            getattr(self, "intra_forward_forcing_enabled", False)
         )
-        state_residual = self.tf_token_adapter.residual_tokens(
-            condition_state_tokens
-        ) * float(use_tf)
+        if (
+            intra_forward_enabled
+            and torch.is_grad_enabled()
+            and bool(getattr(self.transformer, "gradient_checkpointing", False))
+        ):
+            raise RuntimeError(
+                "intra-forward forcing cannot train with gradient checkpointing"
+            )
+        if intra_forward_enabled:
+            if intra_forward_condition_source is None:
+                intra_forward_condition_source = "aligned" if use_tf else "off"
+            if intra_forward_condition_source not in {
+                "aligned",
+                "off",
+                "shuffled",
+            }:
+                raise ValueError(
+                    "intra_forward_condition_source must be aligned, off, or shuffled"
+                )
+            # The frozen screen forbids input-level state/clock conditioning.
+            # The generated clean estimate first enters after block 14.
+            clock_tokens = condition_state_tokens.new_zeros(
+                condition_state_tokens.shape
+            )
+            state_residual = condition_state_tokens.new_zeros(
+                condition_state_tokens.shape
+            )
+        else:
+            if intra_forward_condition_source is not None:
+                raise ValueError(
+                    "intra_forward_condition_source requires intra-forward forcing"
+                )
+            clock_tokens = (
+                gated_clock.mul(float(use_tf_clock))
+                .unsqueeze(1)
+                .expand(-1, seq_len, -1)
+            )
+            state_residual = self.tf_token_adapter.residual_tokens(
+                condition_state_tokens
+            ) * float(use_tf)
         injected_tokens = clock_tokens + state_residual
         features = injected_tokens.transpose(1, 2).reshape(
             n, injected_tokens.shape[-1], *grid
@@ -267,6 +344,10 @@ class WanForwardModel(nn.Module):
 
         captured_tokens = []
         native_patch_embeddings = []
+        midpoint_velocities = []
+        midpoint_generated = []
+        midpoint_residuals = []
+        midpoint_latency_ms = []
 
         def capture_shared_tokens(_module, inputs):
             if not inputs or not isinstance(inputs[0], torch.Tensor):
@@ -278,12 +359,83 @@ class WanForwardModel(nn.Module):
                 raise RuntimeError("Wan patch embedding hook did not receive a tensor")
             native_patch_embeddings.append(output)
 
+        def predict_and_inject_midpoint(_module, _inputs, output):
+            if not isinstance(output, torch.Tensor):
+                raise RuntimeError("Wan midpoint block did not return tokens")
+            if output.shape != noisy_state_tokens.shape:
+                raise RuntimeError(
+                    "Wan midpoint-token shape does not match the auxiliary grid: "
+                    f"{tuple(output.shape)} != {tuple(noisy_state_tokens.shape)}"
+                )
+            profile_midpoint = bool(
+                getattr(self, "profile_intra_forward_latency", False)
+            )
+            if profile_midpoint:
+                if not output.is_cuda:
+                    raise RuntimeError("midpoint latency profiling requires CUDA")
+                torch.cuda.synchronize(output.device)
+                midpoint_started_ns = time.perf_counter_ns()
+            head_tokens = output + noisy_state_tokens
+            if getattr(self, "tf_head_condition_on_clock", False):
+                head_tokens = head_tokens + raw_clock.unsqueeze(1)
+            velocity = self.tf_velocity_head(head_tokens, grid)
+            if velocity.shape != noisy_tf.shape:
+                raise RuntimeError("midpoint auxiliary velocity shape changed")
+            sigma = tf_sigma.reshape(tf_sigma.shape[0], 1, 1, 1, 1).to(
+                device=noisy_tf.device, dtype=noisy_tf.dtype
+            )
+            generated_clean = noisy_tf - sigma * velocity
+            source = intra_forward_condition_source
+            if source == "shuffled":
+                injected_clean = roll_across_global_batch(generated_clean)
+            else:
+                injected_clean = generated_clean
+            if getattr(self, "intra_forward_stop_gradient", True):
+                injected_clean = injected_clean.detach()
+            generated_tokens, generated_grid = self.tf_token_adapter.project_tokens(
+                injected_clean
+            )
+            if generated_grid != grid:
+                raise RuntimeError("midpoint generated-token grid changed")
+            residual = self.tf_token_adapter.residual_tokens(generated_tokens)
+            residual = residual * float(source != "off" and use_tf)
+            if not all(
+                bool(torch.isfinite(value).all())
+                for value in (velocity, generated_clean, residual)
+            ):
+                raise FloatingPointError(
+                    "intra-forward auxiliary prediction is non-finite"
+                )
+            midpoint_velocities.append(velocity)
+            midpoint_generated.append(injected_clean)
+            midpoint_residuals.append(residual)
+            if profile_midpoint:
+                torch.cuda.synchronize(output.device)
+                midpoint_latency_ms.append(
+                    (time.perf_counter_ns() - midpoint_started_ns) / 1_000_000.0
+                )
+            return output + residual
+
         head_handle = self.transformer.head.register_forward_pre_hook(
             capture_shared_tokens
         )
         patch_handle = self.transformer.patch_embedding.register_forward_hook(
             capture_native_patch_embedding
         )
+        midpoint_handle = None
+        if intra_forward_enabled:
+            blocks = getattr(self.transformer, "blocks", None)
+            if blocks is None or len(blocks) != 30:
+                raise RuntimeError(
+                    "intra-forward forcing requires exactly 30 Wan blocks"
+                )
+            if getattr(self, "intra_forward_block_index", None) != 14:
+                raise RuntimeError(
+                    "the frozen intra-forward midpoint must remain block index 14"
+                )
+            midpoint_handle = blocks[14].register_forward_hook(
+                predict_and_inject_midpoint
+            )
         try:
             out = self.transformer(
                 x=noisy_latents,
@@ -297,6 +449,8 @@ class WanForwardModel(nn.Module):
         finally:
             head_handle.remove()
             patch_handle.remove()
+            if midpoint_handle is not None:
+                midpoint_handle.remove()
         if len(captured_tokens) != 1:
             raise RuntimeError(
                 f"expected one Wan shared-token capture, got {len(captured_tokens)}"
@@ -309,12 +463,34 @@ class WanForwardModel(nn.Module):
                 "Wan shared-token shape does not match TF token grid: "
                 f"{tuple(shared_tokens.shape)} != {tuple(noisy_state_tokens.shape)}"
             )
-        # Both ablation arms give the TF head its own noisy state.  The causal
-        # difference is only whether that state entered the shared video trunk.
-        tf_head_tokens = shared_tokens + noisy_state_tokens
-        if getattr(self, "tf_head_condition_on_clock", False):
-            tf_head_tokens = tf_head_tokens + raw_clock.unsqueeze(1)
-        tf_velocity = self.tf_velocity_head(tf_head_tokens, grid)
+        if intra_forward_enabled:
+            if not (
+                len(midpoint_velocities)
+                == len(midpoint_generated)
+                == len(midpoint_residuals)
+                == 1
+            ):
+                raise RuntimeError(
+                    "expected exactly one midpoint auxiliary prediction per Wan call"
+                )
+            tf_velocity = midpoint_velocities[0]
+            injected_tokens = midpoint_residuals[0]
+            # ``midpoint_generated`` is already the exact stopped tensor used
+            # by the injection path.  Avoid an otherwise redundant third
+            # adapter projection solely for telemetry.
+            condition_state_tokens = midpoint_generated[0]
+            state_residual = midpoint_residuals[0]
+            clock_tokens = midpoint_residuals[0].new_zeros(
+                midpoint_residuals[0].shape
+            )
+        else:
+            # Both ablation arms give the TF head its own noisy state.  The
+            # causal difference is only whether that state entered the shared
+            # video trunk.
+            tf_head_tokens = shared_tokens + noisy_state_tokens
+            if getattr(self, "tf_head_condition_on_clock", False):
+                tf_head_tokens = tf_head_tokens + raw_clock.unsqueeze(1)
+            tf_velocity = self.tf_velocity_head(tf_head_tokens, grid)
         video_velocity = out[0] if isinstance(out, (list, tuple)) else out
 
         def rms(value):
@@ -340,6 +516,20 @@ class WanForwardModel(nn.Module):
             "combined_to_native_ratio": combined_rms
             / native_patch_rms.clamp_min(torch.finfo(torch.float32).tiny),
         }
+        if intra_forward_enabled:
+            telemetry.update(
+                {
+                    "midpoint_head_calls": combined_rms.new_tensor(1.0),
+                    "midpoint_generated_rms": rms(midpoint_generated[0]),
+                    "midpoint_injected_rms": rms(midpoint_residuals[0]),
+                    "midpoint_block_index": combined_rms.new_tensor(14.0),
+                    "midpoint_overhead_latency_ms": combined_rms.new_tensor(
+                        midpoint_latency_ms[0]
+                        if midpoint_latency_ms
+                        else 0.0
+                    ),
+                }
+            )
         return DualWanOutput(
             video_velocity=video_velocity,
             tf_velocity=tf_velocity,
