@@ -1,0 +1,9 @@
+defaults:
+  - dual_explicit_action_dit_vjepa
+  - _self_
+
+_target_: lam.video_residual_anchor_model.VideoResidualAnchorVPM
+
+video_residual_anchor:
+  mode: absolute
+  normalization: none

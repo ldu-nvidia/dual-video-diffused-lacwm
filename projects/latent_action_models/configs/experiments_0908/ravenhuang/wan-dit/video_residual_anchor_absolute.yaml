@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /experiments_0908/video_residual_anchor_common
+  - _self_
+
+name: video-residual-anchor-vpm-abs-seed1234-u000200
+model:
+  video_residual_anchor:
+    mode: absolute
+    normalization: none
+wandb:
+  tags: [abc, vpm, video-residual-anchor, absolute-control, seed-1234]
