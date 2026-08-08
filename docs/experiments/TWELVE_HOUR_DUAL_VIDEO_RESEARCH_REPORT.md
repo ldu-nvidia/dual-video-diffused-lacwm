@@ -125,7 +125,11 @@ depth, link-ID, and robot-flow scaffold for a controlled screen. It does not
 complete the full calibration gate: the camera model still uses nominal
 extrinsics, a centered principal point, and no D405 distortion; observed edges
 are not robot masks; and the +4 control is roughly 0.667 seconds rather than a
-sub-frame perturbation. The immutable evidence is documented in
+sub-frame perturbation. A post-hoc signed timing audit sharpened this warning:
+non-wrapping ±2-step controls passed, as did -1 step, but the +1-step
+approximately 0.167-second interval narrowly crossed zero (`[-0.018,1.108]`
+px). The direction asymmetry is compatible with the known next/ceiling state
+resampling but is not causally identified. The immutable evidence is documented in
 `ABC_D405_NOMINAL_GEOMETRY_PROBE.md`.
 
 The current DROID LeRobot cache is also not renderer-ready: it lacks

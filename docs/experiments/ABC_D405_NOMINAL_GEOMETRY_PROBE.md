@@ -196,6 +196,41 @@ frames from each clip left 27 frames and also passed: delta `+4.790` px,
 95% CI `[3.067,6.525]`, support `+5.788` pp. These sensitivity checks were
 added for audit after the preregistered primary gate; they do not replace it.
 
+### Post-hoc bidirectional timing sensitivity
+
+Commit `4391bec` extended the evaluator to signed, non-wrapping controls and
+fixed the control-dependent audit text (tool SHA-256
+`6148bceaa0781edb274eeec8e9d58b10e053efe8a2762e99f64989c26123ef91`).
+The same three train clips were re-evaluated; no model was selected or trained
+from these results. The non-wrapping endpoint is the relevant sensitivity:
+
+| Pose shift | Median time | Non-wrap frames | Shifted-minus-aligned Chamfer | 95% frame-bootstrap CI | 3-px support delta |
+|---:|---:|---:|---:|---:|---:|
+| -2 clip steps | -0.333 s | 33 | +2.114 px | `[1.419,2.867]` | +2.238 pp |
+| -1 clip step | -0.167 s | 36 | +1.068 px | `[0.627,1.572]` | +1.789 pp |
+| +1 clip step | +0.167 s | 36 | +0.537 px | `[-0.018,1.108]` | +2.192 pp |
+| +2 clip steps | +0.333 s | 33 | +2.029 px | `[1.029,3.118]` | +3.473 pp |
+| +4 clip steps | +0.667 s | 27 | +4.790 px | `[3.067,6.525]` | +5.788 pp |
+
+Thus ±2 and the negative one-step controls remain distinguishable, but the
+positive one-step non-wrap interval narrowly crosses zero. This is stronger
+evidence that the nominal geometry carries frame-specific signal, while also
+showing that fine timing is not yet calibrated symmetrically. The asymmetry is
+compatible with the next/ceiling state resampling described below, but these
+three clips cannot identify its cause; motion direction and image-edge clutter
+are alternatives. It is a reason to correct timestamp interpolation before
+Gate 1, not a reason to weaken the gate.
+
+The signed-control `analysis.json` SHA-256 values for shifts
+`[-2,-1,+1,+2,+4]` are respectively
+`6dcdb5884bddd37e3c5c210acd4e6c4261094e50c780948ee98fa8da49e513fd`,
+`e8487b26fe07a069ff5f60c704b0a744fd334c8bf7d051fb9601305ac380f5ff`,
+`bd4127bc81c7eec9032927d0db0ed1d32ad362c67dcf38a53bc6be53bdd97c55`,
+`a00ca03a0029f8e5d95c492003bcf0622448490b43de455ddaa8ccfc036bf7f5`,
+and `b83d6e122ced90ccd9f5a81221f61d944ddd903ccd5766d45a340606a5a21194`.
+They live under sibling `results_shift*_4391bec/` directories beside the
+original artifact.
+
 At 640x480 on a workstation hosting NVIDIA RTX PRO 6000 Blackwell GPUs,
 driver 580.173.02, MuJoCo 3.3.7/EGL rendered each pose at mean 2.415 ms,
 p50 2.355 ms and p95 2.769 ms (`~414` pose renders/s). This is renderer-only

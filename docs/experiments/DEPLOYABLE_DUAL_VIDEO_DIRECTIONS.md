@@ -537,6 +537,13 @@ masks, and a coarse approximately 0.667-second time shift. See
 `ABC_D405_NOMINAL_GEOMETRY_PROBE.md` for hashes, camera matrices, overlays, and
 the ABC next/ceiling timestamp-resampling caveat.
 
+A post-hoc signed non-wrap sensitivity strengthens the spatial result but leaves
+fine timing open: shifts `-2/-1/+1/+2` clip steps changed Chamfer by
+`+2.114/+1.068/+0.537/+2.029` px, respectively. Every paired lower bound was
+positive except the +1-step approximately 0.167-second control, whose interval
+was `[-0.018,1.108]`. Correct timestamp interpolation and finer controls remain
+mandatory before this becomes a Wan condition.
+
 The existing DROID LeRobot cache is not a shortcut. It has three RGB streams
 and Cartesian end-effector action/state, but no camera calibration, joint
 positions, robot model, depth, or masks. A read-only schema audit also found

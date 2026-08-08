@@ -122,6 +122,12 @@ fit/refine calibration on train data only and run non-wrapping fine time shifts,
 wrong-calibration controls, and planned-action controller replay. Full evidence
 and hashes are in `ABC_D405_NOMINAL_GEOMETRY_PROBE.md`.
 
+A post-hoc signed sensitivity has since run on the same three clips. Non-wrap
+Chamfer deltas for shifts `[-2,-1,+1,+2]` were respectively
+`[+2.114,+1.068,+0.537,+2.029]` px; all paired lower bounds were positive
+except `+1`, whose interval was `[-0.018,1.108]`. This directional asymmetry
+keeps timestamp interpolation/fine timing explicitly open before Gate 1.
+
 ## Gate 1: fixed causal flow conditioning
 
 Use one parent snapshot, identical data order/noise/optimizer, equal trainable
