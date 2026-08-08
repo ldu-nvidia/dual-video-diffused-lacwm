@@ -1,0 +1,103 @@
+# @package _global_
+defaults:
+  - override /datasets@dataset: transformed_causal_motion_plan_abc
+  - override /datasets@val_dataset: transformed_causal_motion_plan_abc
+  - override /datasets@viz_dataset: transformed_causal_motion_plan_abc
+  - override /models@model: causal_motion_planner_calibration
+  - override /tokenizers/rgb@model.rgb_tokenizer: wan_vae
+  - override /optimizers@optimizer_factory: adamw
+  - override /lr_schedulers@lr_scheduler_factory: linear_warmup_cosine_decay
+
+name: camp-planner-train-only-calibration-seed1234-u000400
+seed: 1234
+
+dataset: &planner_dataset
+  padding_dim: 157
+  seed: ${seed}
+  infinite: true
+  img_augment: false
+  emit_crop_rgb: false
+  transform: {sample_size: 13, chunk_size: 5}
+  future_validity: {enabled: false, max_retries: 0}
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:CAMP_TRAIN_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:CAMP_TRAIN_CACHE_METADATA}
+      split_role: planner_fit
+val_dataset:
+  <<: *planner_dataset
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:CAMP_TRAIN_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:CAMP_TRAIN_CACHE_METADATA}
+      split_role: planner_calibration
+viz_dataset:
+  <<: *planner_dataset
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:CAMP_TRAIN_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:CAMP_TRAIN_CACHE_METADATA}
+      split_role: planner_calibration
+
+data_loader:
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+val_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${val_dataset}
+    batch_size: 2
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: false
+viz_data_loader: []
+
+model:
+  rgb_tokenizer:
+    output_dim: 16
+    input_mean: [0.5, 0.5, 0.5]
+    input_std: [0.5, 0.5, 0.5]
+
+optimizer_factory: {lr: 3.0e-4, betas: [0.9, 0.95]}
+lr_scheduler_factory:
+  lr_lambda:
+    warmup_steps: 20
+    total_steps: ${trainer.config.max_iter}
+    final_learning_rate: 1.0e-5
+
+wandb:
+  enabled: true
+  mode: online
+  entity: zijiandu
+  project: dual-video-diffusion-private
+  group: null
+  name: ${name}
+  tags: [abc, camp, causal-motion-planner, train-only-calibration, seed-1234]
+  settings:
+    start_method: thread
+    save_code: false
+    finish_timeout: 120.0
+    finish_timeout_raises: false
+
+trainer:
+  config:
+    max_iter: 400
+    gradient_accumulation_steps: 1
+    throughput_warmup_steps: 20
+    load_path: null
+    logging: {log_every: 5}
+    saving: {save_every: 400}
+    # This is the fixed 64-row subset of the 512 registered training clips,
+    # never val64. Metrics are diagnostic and cannot select an endpoint.
+    validation: {val_every: 100, n_val_samples: 4, save_best: false}
+    visualization: {viz_every: 400, require_success: false}
+    gradient_clipping: {max_norm: 1.0}
+
+hydra:
+  run:
+    dir: ${oc.env:CAMP_PLANNER_RUN_ROOT}/${name}
+  sweep:
+    dir: ${oc.env:CAMP_PLANNER_RUN_ROOT}/${name}

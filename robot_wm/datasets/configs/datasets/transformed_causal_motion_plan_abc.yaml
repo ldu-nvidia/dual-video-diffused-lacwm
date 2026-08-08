@@ -1,0 +1,19 @@
+_target_: robot_wm.datasets.multi_dataset.MultiDataset
+padding_dim: 157
+seed: ${seed}
+infinite: true
+img_augment: false
+emit_crop_rgb: false
+transform:
+  sample_size: 13
+  chunk_size: 5
+future_validity: {enabled: false, max_retries: 0}
+datasets:
+  ABC:
+    _target_: robot_wm.datasets.abc.causal_motion_plan_dataset.ABCCausalMotionPlanDataset
+    clip_manifest: ???
+    cache_metadata: ???
+    split_role: all
+    seed: ${seed}
+    infinite: ${dataset.infinite}
+    transform: null

@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /experiments_0908/causal_motion_plan_common
+  - _self_
+
+name: camp-plan-on-seed1234-u000200
+model:
+  causal_motion_plan:
+    fuse_generated_plan: true
+wandb:
+  tags: [abc, vpm, camp, PLAN-ON, aligned-generated-plan, seed-1234]

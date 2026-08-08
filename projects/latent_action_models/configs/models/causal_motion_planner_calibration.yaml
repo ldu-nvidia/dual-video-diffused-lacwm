@@ -1,0 +1,23 @@
+defaults:
+  - _self_
+  - /tokenizers/rgb@rgb_tokenizer: ???
+
+_target_: lam.causal_motion_plan_model.CausalMotionPlannerCalibrationModel
+rgb_tokenizer: ${rgb_tokenizer}
+rollout_loss_weight: 0.25
+motion_plan_normalizer:
+  _target_: robot_wm.modeling.dual_diffusion.causal_motion_plan.load_motion_plan_normalizer
+  path: ${oc.env:CAMP_PLAN_STATS}
+  expected_sha256: ${oc.env:CAMP_PLAN_STATS_SHA256}
+causal_motion_planner:
+  _target_: robot_wm.modeling.dual_diffusion.causal_motion_plan.CausalMotionPlanner
+  action_dim: 157
+  chunk_size: 5
+  morphology_count: 10
+  morphology_dim: 64
+  action_token_dim: 64
+  action_hidden: 256
+  action_map_channels: 32
+  hidden_size: 128
+  num_blocks: 4
+  sigma_dim: 128

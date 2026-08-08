@@ -1,0 +1,49 @@
+defaults:
+  - dual_explicit_action_dit_vjepa
+  - _self_
+
+_target_: lam.causal_motion_plan_model.CausalMotionPlanVPM
+time_frequency_transform: null
+motion_plan_normalizer:
+  _target_: robot_wm.modeling.dual_diffusion.causal_motion_plan.load_motion_plan_normalizer
+  path: ${oc.env:CAMP_PLAN_STATS}
+  expected_sha256: ${oc.env:CAMP_PLAN_STATS_SHA256}
+causal_motion_planner:
+  _target_: robot_wm.modeling.dual_diffusion.causal_motion_plan.CausalMotionPlanner
+  action_dim: 157
+  chunk_size: 5
+  morphology_count: 10
+  morphology_dim: 64
+  action_token_dim: 64
+  action_hidden: 256
+  action_map_channels: 32
+  hidden_size: 128
+  num_blocks: 4
+  sigma_dim: 128
+causal_motion_plan:
+  fuse_generated_plan: false
+  require_planner_checkpoint: true
+  planner_checkpoint: ${oc.env:CAMP_PLANNER_SNAPSHOT}
+  planner_checkpoint_sha256: ${oc.env:CAMP_PLANNER_SNAPSHOT_SHA256}
+  planner_expected_updates: 400
+dual_diffusion:
+  enabled: true
+  auxiliary_history_mode: diffuse_all
+  tf_channels: 16
+  head_condition_on_tf_clock: false
+  condition_on_tf_clock: false
+  condition_on_tf: false
+  condition_mode: "off"
+  schedule_mode: aligned
+  tf_lead_logit: 0.0
+  tf_loss_weight: 0.0
+  video_only_control: false
+  parameter_matched_control: false
+  state_gate_init: 0.02
+  state_gate_trainable: true
+  clock_gate_init: 0.0
+  clock_gate_trainable: true
+  capture_latent_trajectories: false
+  artifact_batch_limit: null
+  evaluation_nfe_steps: [1, 2, 4]
+  evaluation_condition_sources: [autonomous]
