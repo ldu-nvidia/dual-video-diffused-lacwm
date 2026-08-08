@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /experiments_0908/action_token_common
+  - _self_
+
+name: action-token-at-off-seed1234-u000200
+model:
+  action_token:
+    enabled: false
+wandb:
+  tags: [abc, vpm, action-token, control, seed-1234]

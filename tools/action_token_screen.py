@@ -1,0 +1,867 @@
+#!/usr/bin/env python3
+"""Fit train-only action statistics and register the paired token screen."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from robot_wm.modeling.networks.action_token_context import (  # noqa: E402
+    ACTION_TOKEN_STATS_SCHEMA,
+)
+from tools import dual_abc_pilot  # noqa: E402
+from tools import two_clock_consistency_evaluate as base  # noqa: E402
+from tools import vpm_phaselock_probe as phase  # noqa: E402
+
+SCHEMA_VERSION = 1
+KIND_REGISTRATION = "action_token_registration"
+KIND_STATS = ACTION_TOKEN_STATS_SCHEMA
+KIND_RUNTIME_RECEIPT = "action_token_b200_runtime_receipt"
+RUNTIME_RECEIPT_STATUS = "verified_before_arm_plan_training_or_metrics"
+PARENT_SNAPSHOT_SHA256 = base.PARENT_SNAPSHOT_SHA256
+HISTORICAL_TRAINING_COMMIT = base.TRAINING_COMMIT
+EXPECTED_WORLD_SIZE = 8
+EXPECTED_VALIDATION_CLIPS = 64
+NFE_GRID = (1, 2, 4)
+PROTOCOL_PATH = REPO_ROOT / "docs" / "experiments" / "VPM_ACTION_TOKEN_PROTOCOL.md"
+
+
+class ActionTokenScreenError(RuntimeError):
+    """Prospective action-token evidence changed or is unsafe."""
+
+
+@dataclass(frozen=True)
+class Arm:
+    code: str
+    config_name: str
+    run_name: str
+    action_token_enabled: bool
+
+
+ARMS = (
+    Arm(
+        "AT-OFF",
+        "ravenhuang/wan-dit/action_token_off",
+        "action-token-at-off-seed1234-u000200",
+        False,
+    ),
+    Arm(
+        "AT-ON",
+        "ravenhuang/wan-dit/action_token_on",
+        "action-token-at-on-seed1234-u000200",
+        True,
+    ),
+)
+ARM_BY_CODE = {arm.code: arm for arm in ARMS}
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    code: str
+    nfe: int
+    action_source: str
+    token_mode: str
+    primary_gate: bool
+
+
+ENDPOINTS = tuple(
+    Endpoint(f"aligned_nfe_{nfe}", nfe, "aligned", "native", True) for nfe in NFE_GRID
+) + (
+    Endpoint("zero_nfe_1", 1, "zero", "native", False),
+    Endpoint("episode_shuffled_nfe_1", 1, "episode_shuffled", "native", False),
+    Endpoint("aligned_tokens_masked_nfe_1", 1, "aligned", "hard_mask", False),
+)
+ENDPOINT_BY_CODE = {endpoint.code: endpoint for endpoint in ENDPOINTS}
+
+
+def endpoint_records() -> list[dict[str, Any]]:
+    """Return the one canonical serialized endpoint grid used by every boundary."""
+
+    return [asdict(endpoint) for endpoint in ENDPOINTS]
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def identity_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    unsigned = dict(payload)
+    return {
+        **unsigned,
+        "identity_sha256": hashlib.sha256(_canonical_json(unsigned)).hexdigest(),
+    }
+
+
+def identity_valid(payload: Mapping[str, Any]) -> bool:
+    identity = payload.get("identity_sha256")
+    unsigned = dict(payload)
+    unsigned.pop("identity_sha256", None)
+    return (
+        isinstance(identity, str)
+        and len(identity) == 64
+        and hashlib.sha256(_canonical_json(unsigned)).hexdigest() == identity
+    )
+
+
+CONFIG_CONTRACT_KEYS = (
+    "name",
+    "seed",
+    "debug",
+    "dataset",
+    "val_dataset",
+    "viz_dataset",
+    "data_loader",
+    "val_data_loader",
+    "viz_data_loader",
+    "model",
+    "optimizer_factory",
+    "lr_scheduler_factory",
+    "trainer",
+    "wandb",
+)
+
+
+def _config_value(config: Any, *path: str) -> Any:
+    value = config
+    for key in path:
+        if isinstance(value, Mapping):
+            value = value[key]
+        else:
+            value = getattr(value, key)
+    return value
+
+
+def canonical_config_contract(config: Any) -> dict[str, Any]:
+    """Hash the complete resolved scientific job config plus external paths.
+
+    Hydra's runtime output resolver is intentionally left as its raw expression;
+    every scientific/runtime input path is separately resolved in ``bindings``.
+    This lets the pre-training workflow and the saved Hydra config produce the
+    same canonical identity.
+    """
+
+    if (
+        isinstance(config, Mapping)
+        and type(config).__module__ != "omegaconf.dictconfig"
+    ):
+        raw = json.loads(json.dumps(config))
+    else:
+        try:
+            from omegaconf import DictConfig, OmegaConf
+        except ImportError as exc:  # pragma: no cover - cluster runtime dependency
+            raise ActionTokenScreenError(
+                "OmegaConf is required for config binding"
+            ) from exc
+        if not isinstance(config, DictConfig):
+            raise ActionTokenScreenError("resolved config must be a mapping")
+        raw = OmegaConf.to_container(config, resolve=False)
+    if not isinstance(raw, dict) or any(key not in raw for key in CONFIG_CONTRACT_KEYS):
+        raise ActionTokenScreenError(
+            "resolved config lacks a canonical job section"
+        )
+    selected = {key: raw[key] for key in CONFIG_CONTRACT_KEYS}
+    bindings = {
+        "train_manifest": str(
+            _config_value(config, "dataset", "datasets", "ABC", "clip_manifest")
+        ),
+        "train_cache_metadata": str(
+            _config_value(config, "dataset", "datasets", "ABC", "cache_metadata")
+        ),
+        "validation_manifest": str(
+            _config_value(config, "val_dataset", "datasets", "ABC", "clip_manifest")
+        ),
+        "validation_cache_metadata": str(
+            _config_value(config, "val_dataset", "datasets", "ABC", "cache_metadata")
+        ),
+        "viz_manifest": str(
+            _config_value(config, "viz_dataset", "datasets", "ABC", "clip_manifest")
+        ),
+        "viz_cache_metadata": str(
+            _config_value(config, "viz_dataset", "datasets", "ABC", "cache_metadata")
+        ),
+        "action_stats": str(
+            _config_value(config, "model", "action_token", "stats_path")
+        ),
+        "parent_snapshot": str(_config_value(config, "trainer", "config", "load_path")),
+        "save_path": str(
+            _config_value(config, "trainer", "config", "saving", "save_path")
+        ),
+        "wandb_id": str(_config_value(config, "wandb", "id")),
+    }
+    return identity_payload(
+        {
+            "schema_version": 1,
+            "kind": "action_token_resolved_config_contract",
+            "selected_config": selected,
+            "resolved_bindings": bindings,
+        }
+    )
+
+
+def fixed_protocol() -> dict[str, Any]:
+    return {
+        "question": (
+            "does retaining all requested future action substeps as native Wan "
+            "cross-attention context improve causal few-step VPM video?"
+        ),
+        "arms": [asdict(arm) for arm in ARMS],
+        "parent_snapshot_sha256": PARENT_SNAPSHOT_SHA256,
+        "continuation_updates": 200,
+        "seed": 1234,
+        "world_size": EXPECTED_WORLD_SIZE,
+        "local_batch_size": 1,
+        "global_batch_size": 8,
+        "train_clips": 512,
+        "validation_clips": EXPECTED_VALIDATION_CLIPS,
+        "optimizer_state_policy": "fresh_identical_adamw",
+        "ema_policy": "none",
+        "action_token_route": {
+            "source": "requested_actions_only",
+            "future_chunks": [4, 12],
+            "num_transitions": 8,
+            "substeps_per_transition": 5,
+            "token_count": 40,
+            "padding_dim": 157,
+            "normalization": "per_coordinate_population_mean_std_fit_on_train_only",
+            "inactive_coordinate_rule": "std<=1e-6_maps_to_exact_zero",
+            "clip_value": 8.0,
+            "adapter_hidden": 256,
+            "raw_context_dim": 4096,
+            "initialization_seed": 20_260_808,
+            "gate": "tanh_scalar_initialized_exact_zero",
+            "injection": (
+                "add_transition_major_8x5_tokens_to_last_40_null_context_"
+                "positions_before_frozen_wan_text_embedding"
+            ),
+            "native_wan_cross_attention": True,
+            "pretrained_parameter_shapes_changed": False,
+            "runtime_hard_mask": True,
+            "same_schema_and_forward_compute": True,
+            "current_code_parent_path_no_op_at_initialization": True,
+            "historical_forward_bit_identity_claimed": False,
+        },
+        "training_model_calls_per_update": 1,
+        "pre_torchrun_input_revalidation": "full_sha256_single_process",
+        "runtime_verification_receipt": (
+            "identity_sealed_per_arm_and_bound_through_final_analysis"
+        ),
+        "nfe_grid": list(NFE_GRID),
+        "endpoints": endpoint_records(),
+        "evaluation_noise_seed": 20_260_726,
+        "bootstrap_samples": 10_000,
+        "bootstrap_seed": 20_260_808,
+        "primary_metric": "decoded_temporal_difference_mse_unit_range",
+        "guardrail_metrics": ["video_future_nmse", "decoded_mse_unit_range"],
+        "action_attribution_endpoints": ["zero_nfe_1", "episode_shuffled_nfe_1"],
+        "trained_candidate_token_ablation": "aligned_tokens_masked_nfe_1",
+        "causal_attribution": {
+            "interaction": (
+                "(candidate_diagnostic-candidate_aligned)-"
+                "(control_diagnostic-control_aligned)"
+            ),
+            "normalizer": "mean_control_aligned",
+            "primary_minimum_relative_improvement": 0.005,
+            "trained_candidate_hard_mask_minimum_relative_improvement": 0.005,
+        },
+        "evaluation_local_batch_size": 1,
+        "latency_warmup": "one_unmeasured_aligned_nfe_1_rollout_per_rank",
+        "latency_reporting": (
+            "descriptive_per_endpoint_batch_one_component_sum_not_contiguous_wall_clock"
+        ),
+        "protected_test_access_allowed": False,
+        "future_rgb_or_feature_allowed_at_sampling": False,
+        "wandb": {
+            "entity": "zijiandu",
+            "project": "dual-video-diffusion-private",
+            "group": None,
+        },
+    }
+
+
+def _validate_stats(path: Path) -> dict[str, Any]:
+    path = path.expanduser().resolve(strict=True)
+    payload = base._read_json(path, "action-token statistics")
+    if (
+        not identity_valid(payload)
+        or payload.get("schema") != KIND_STATS
+        or payload.get("split") != "train"
+        or payload.get("protected_test_accessed") is not False
+        or payload.get("future_action_chunks") != [4, 12]
+        or payload.get("chunk_size") != 5
+        or payload.get("num_transitions") != 8
+        or payload.get("token_count") != 40
+        or payload.get("padding_dim") != 157
+        or payload.get("fit_observations") != 512 * 8 * 5
+        or payload.get("std_floor") != 1e-6
+    ):
+        raise ActionTokenScreenError("action-token statistics contract differs")
+    for key in ("mean", "std", "active"):
+        if not isinstance(payload.get(key), list) or len(payload[key]) != 157:
+            raise ActionTokenScreenError(f"statistics {key} shape differs")
+    return payload
+
+
+def _computed_action_token_stats(actions_path: Path) -> dict[str, Any]:
+    """Deterministically derive every fitted value from the pinned train array."""
+
+    actions = np.load(actions_path, mmap_mode="r", allow_pickle=False)
+    if actions.shape != (512, 13, 5, 23) or actions.dtype != np.float32:
+        raise ActionTokenScreenError(
+            "registered train action array shape/type differs"
+        )
+    future = np.asarray(actions[:, 4:12], dtype=np.float64)
+    flat = future.reshape(-1, future.shape[-1])
+    if flat.shape != (512 * 8 * 5, 23) or not np.isfinite(flat).all():
+        raise ActionTokenScreenError("train action tokens are invalid")
+    raw_mean = flat.mean(axis=0)
+    raw_std = flat.std(axis=0, ddof=0)
+    active_raw = raw_std > 1e-6
+    if not bool(active_raw.any()):
+        raise ActionTokenScreenError(
+            "train action tokens have no active coordinate"
+        )
+    mean = np.zeros(157, dtype=np.float64)
+    std = np.ones(157, dtype=np.float64)
+    active = np.zeros(157, dtype=bool)
+    mean[:23][active_raw] = raw_mean[active_raw]
+    std[:23][active_raw] = raw_std[active_raw]
+    active[:23] = active_raw
+    whitened = np.zeros_like(flat)
+    whitened[:, active_raw] = (flat[:, active_raw] - raw_mean[active_raw]) / raw_std[
+        active_raw
+    ]
+    return {
+        "fit_clips": 512,
+        "fit_observations": int(flat.shape[0]),
+        "std_floor": 1e-6,
+        "active_dimensions": int(active.sum()),
+        "mean": [float(value) for value in mean],
+        "std": [float(value) for value in std],
+        "active": [bool(value) for value in active],
+        "whitened_active_mean_abs_max": float(
+            np.abs(whitened[:, active_raw].mean(axis=0)).max()
+        ),
+        "whitened_active_std_error_max": float(
+            np.abs(whitened[:, active_raw].std(axis=0) - 1.0).max()
+        ),
+    }
+
+
+def _validate_stats_against_train(
+    stats: Mapping[str, Any], train: Mapping[str, Any]
+) -> None:
+    """Reject relabeled/stale statistics even when their self-hash is valid."""
+
+    expected_source = {
+        "manifest": train["manifest"],
+        "cache_metadata": train["cache_metadata"],
+        "actions": train["actions"],
+        "rgb_opened": False,
+        "auxiliary_target_opened": False,
+    }
+    expected_values = _computed_action_token_stats(Path(train["actions"]["path"]))
+    if stats.get("source") != expected_source:
+        raise ActionTokenScreenError(
+            "statistics source is not the complete registered train source"
+        )
+    mismatched = [
+        key for key, value in expected_values.items() if stats.get(key) != value
+    ]
+    if mismatched:
+        raise ActionTokenScreenError(
+            f"statistics were not recomputed from registered train actions: {mismatched}"
+        )
+
+
+def command_fit_stats(args: argparse.Namespace) -> int:
+    train = base._validate_train_inputs(args.train_manifest, args.train_cache_metadata)
+    fitted = _computed_action_token_stats(Path(train["actions"]["path"]))
+    payload = identity_payload(
+        {
+            "schema": KIND_STATS,
+            "created_at_utc": _now(),
+            "split": "train",
+            "protected_test_accessed": False,
+            "future_action_chunks": [4, 12],
+            "chunk_size": 5,
+            "num_transitions": 8,
+            "token_count": 40,
+            "padding_dim": 157,
+            **fitted,
+            "source": {
+                "manifest": train["manifest"],
+                "cache_metadata": train["cache_metadata"],
+                "actions": train["actions"],
+                "rgb_opened": False,
+                "auxiliary_target_opened": False,
+            },
+        }
+    )
+    output = args.output.expanduser()
+    if not output.is_absolute() or output.exists() or output.is_symlink():
+        raise ActionTokenScreenError("stats output must be a fresh absolute path")
+    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    base._exclusive_json(output, payload)
+    print(json.dumps({"stats": base._file_record(output), **payload}, sort_keys=True))
+    return 0
+
+
+def arm_run_identity(registration: Mapping[str, Any], arm: Arm) -> str:
+    return identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "action_token_arm_identity",
+            "registration_identity_sha256": registration["identity_sha256"],
+            "tool_git_commit": registration["tool_repository"]["git_commit"],
+            "parent_snapshot_sha256": PARENT_SNAPSHOT_SHA256,
+            "stats_sha256": registration["action_token_stats"]["file"]["sha256"],
+            "arm": asdict(arm),
+            "updates": 200,
+            "seed": 1234,
+            "world_size": 8,
+            "local_batch_size": 1,
+        }
+    )["identity_sha256"]
+
+
+def command_register(args: argparse.Namespace) -> int:
+    tool_repo = args.tool_repo.expanduser().resolve(strict=True)
+    historical_repo = args.historical_repo.expanduser().resolve(strict=True)
+    source = base._clean_source(tool_repo, args.expected_commit, "tool")
+    historical = base._clean_source(
+        historical_repo, HISTORICAL_TRAINING_COMMIT, "historical model"
+    )
+    base._git(
+        tool_repo,
+        "merge-base",
+        "--is-ancestor",
+        HISTORICAL_TRAINING_COMMIT,
+        args.expected_commit,
+    )
+    if (
+        tool_repo != REPO_ROOT
+        or not PROTOCOL_PATH.is_file()
+        or PROTOCOL_PATH.is_symlink()
+    ):
+        raise ActionTokenScreenError("registered tool/protocol path differs")
+    output_root = base._fresh_lustre_root(args.output_root)
+    validated = phase._validate_study_metadata(
+        args.study_root.expanduser().resolve(strict=True),
+        historical_repo,
+        rehash_snapshot=True,
+    )
+    if validated["snapshot_sha256"] != PARENT_SNAPSHOT_SHA256:
+        raise ActionTokenScreenError("parent VPM snapshot changed")
+    train = base._validate_train_inputs(args.train_manifest, args.train_cache_metadata)
+    train_descriptors = train.pop("descriptors")
+    stats = _validate_stats(args.stats)
+    stats_record = base._file_record(args.stats.expanduser().resolve(strict=True))
+    _validate_stats_against_train(stats, train)
+    validation_descriptors = base._manifest_descriptors(
+        Path(validated["validation"]["manifest"]["path"]),
+        expected_split="val",
+        expected_count=EXPECTED_VALIDATION_CLIPS,
+    )
+    if validation_descriptors != validated["descriptors"]:
+        raise ActionTokenScreenError("validation descriptors differ")
+    if {row["clip_id"] for row in train_descriptors} & {
+        row["clip_id"] for row in validation_descriptors
+    } or {row["episode_dir"] for row in train_descriptors} & {
+        row["episode_dir"] for row in validation_descriptors
+    }:
+        raise ActionTokenScreenError("train and validation overlap")
+    train["validation_disjointness"] = {
+        "clip_id": True,
+        "episode_dir": True,
+        "episode_dir_and_start": True,
+    }
+    wandb = dual_abc_pilot._wandb_private_project(
+        "zijiandu", "dual-video-diffusion-private"
+    )
+    wandb.pop("viewer_email", None)
+    python = args.python.expanduser()
+    if (
+        not python.is_absolute()
+        or Path(os.path.abspath(python)) != python
+        or not python.is_file()
+        or not os.access(python, os.X_OK)
+    ):
+        raise ActionTokenScreenError("runtime Python is not executable")
+    python_file = python.resolve(strict=True)
+    payload = identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": KIND_REGISTRATION,
+            "created_at_utc": _now(),
+            "status": "registered_before_candidate_metrics",
+            "output_root": str(output_root),
+            "tool_repository": source,
+            "historical_model_repository": historical,
+            "protocol": base._file_record(PROTOCOL_PATH),
+            "controlled_study": {
+                "study_root": str(args.study_root.resolve(strict=True)),
+                "study_identity_sha256": validated["study"]["identity_sha256"],
+                "arm_identity_sha256": validated["arm"]["identity_sha256"],
+                "stage_identity_sha256": validated["stage"]["identity_sha256"],
+                "parent_snapshot": base._file_record(validated["paths"]["snapshot"]),
+                "parent_completed_updates": 1000,
+                "parent_total_observations": 8000,
+            },
+            "training": train,
+            "validation": validated["validation"],
+            "validation_descriptors": validation_descriptors,
+            "action_token_stats": {"file": stats_record, "payload": stats},
+            "runtime": {
+                **validated["runtime"],
+                # Preserve the virtual-environment launcher path.  Invoking the
+                # resolved interpreter directly bypasses pyvenv.cfg and loses
+                # the registered environment's site-packages.
+                "python": str(python),
+                "python_file": base._file_record(python_file),
+            },
+            "fixed_protocol": fixed_protocol(),
+            "wandb": {**wandb, "group": None, "mode": "online"},
+            "protected_test_accessed": False,
+        }
+    )
+    output_root.mkdir(mode=0o700)
+    base._exclusive_json(output_root / "registration.json", payload)
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def validate_registration(path: Path) -> dict[str, Any]:
+    path = path.expanduser().resolve(strict=True)
+    registration = base._read_json(path, "action-token registration")
+    stats_record = registration.get("action_token_stats", {}).get("file", {})
+    if (
+        not identity_valid(registration)
+        or registration.get("kind") != KIND_REGISTRATION
+        or registration.get("status") != "registered_before_candidate_metrics"
+        or registration.get("fixed_protocol") != fixed_protocol()
+        or registration.get("protected_test_accessed") is not False
+        or registration.get("controlled_study", {})
+        .get("parent_snapshot", {})
+        .get("sha256")
+        != PARENT_SNAPSHOT_SHA256
+        or registration.get("wandb", {}).get("entity") != "zijiandu"
+        or registration.get("wandb", {}).get("project")
+        != "dual-video-diffusion-private"
+        or registration.get("wandb", {}).get("access") != "PRIVATE"
+        or registration.get("wandb", {}).get("viewer_username") != "zijiandu"
+        or registration.get("wandb", {}).get("group") is not None
+        or Path(registration.get("tool_repository", {}).get("path", "")).resolve()
+        != REPO_ROOT
+    ):
+        raise ActionTokenScreenError("registration identity/protocol differs")
+    canonical = Path(registration["output_root"]) / "registration.json"
+    if path != canonical.resolve(strict=True) or stats_record.get(
+        "sha256"
+    ) != base._sha256(Path(stats_record.get("path", ""))):
+        raise ActionTokenScreenError("registration/statistics artifact changed")
+    _validate_stats(Path(stats_record["path"]))
+    _validate_stats_against_train(
+        registration["action_token_stats"]["payload"], registration["training"]
+    )
+    return registration
+
+
+def revalidate_execution_environment(
+    registration: Mapping[str, Any], *, include_historical: bool = True
+) -> dict[str, Any]:
+    """Bind the code/runtime actually executing each study boundary."""
+
+    source = registration["tool_repository"]
+    if base._clean_source(Path(source["path"]), source["git_commit"], "tool") != source:
+        raise ActionTokenScreenError("executing tool checkout differs")
+    records: dict[str, Any] = {"tool_repository": source}
+    if include_historical:
+        historical = registration["historical_model_repository"]
+        if (
+            base._clean_source(
+                Path(historical["path"]), historical["git_commit"], "historical model"
+            )
+            != historical
+        ):
+            raise ActionTokenScreenError("historical model checkout differs")
+        records["historical_model_repository"] = historical
+    runtime = registration["runtime"]
+    videox_raw = Path(runtime["videox_home"])
+    videox = videox_raw.resolve(strict=True)
+    if (
+        not videox.is_dir()
+        or videox_raw.is_symlink()
+        or base._git(videox, "rev-parse", "HEAD") != runtime["videox_commit"]
+        or base._git(videox, "status", "--porcelain", "--untracked-files=all")
+    ):
+        raise ActionTokenScreenError("VideoX runtime changed after registration")
+    wan = Path(runtime["wan_dir"])
+    if (
+        not wan.is_absolute()
+        or wan.resolve(strict=True) != wan
+        or not wan.is_dir()
+        or wan.is_symlink()
+    ):
+        raise ActionTokenScreenError("Wan runtime directory changed")
+    python_record = runtime.get("python_file")
+    python_launcher = Path(runtime.get("python", ""))
+    if (
+        not isinstance(python_record, Mapping)
+        or base._revalidate_record(python_record, "runtime Python") != python_record
+        or not python_launcher.is_absolute()
+        or not python_launcher.is_file()
+        or python_launcher.resolve(strict=True) != Path(python_record["path"])
+        or not os.access(python_launcher, os.X_OK)
+        or not os.access(Path(python_record["path"]), os.X_OK)
+    ):
+        raise ActionTokenScreenError("runtime Python changed")
+    protocol = registration["protocol"]
+    if base._revalidate_record(protocol, "prospective protocol") != protocol:
+        raise ActionTokenScreenError("prospective protocol changed")
+    records.update(
+        {
+            "videox_home": str(videox),
+            "videox_commit": runtime["videox_commit"],
+            "wan_dir": str(wan),
+            "python": python_record,
+            "protocol": protocol,
+        }
+    )
+    return records
+
+
+def registered_input_records(registration: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the exact registered records without reopening large artifacts."""
+
+    def digest_record(record: Mapping[str, Any]) -> dict[str, Any]:
+        # `_revalidate_record` intentionally emits only these cryptographic
+        # fields.  Some inherited validation records also carry audit
+        # annotations such as `full_sha256_verified`; those remain sealed in
+        # the registration but are not part of the live rehash receipt.
+        return {key: record[key] for key in ("path", "bytes", "sha256")}
+
+    return {
+        "parent_snapshot": digest_record(
+            registration["controlled_study"]["parent_snapshot"]
+        ),
+        "train_manifest": digest_record(registration["training"]["manifest"]),
+        "train_metadata": digest_record(
+            registration["training"]["cache_metadata"]
+        ),
+        "train_rgb": digest_record(registration["training"]["rgb"]),
+        "train_actions": digest_record(registration["training"]["actions"]),
+        "validation_manifest": digest_record(
+            registration["validation"]["manifest"]
+        ),
+        "validation_metadata": digest_record(
+            registration["validation"]["cache_metadata"]
+        ),
+        "validation_rgb": digest_record(
+            registration["validation"]["arrays"]["rgb"]
+        ),
+        "validation_actions": digest_record(
+            registration["validation"]["arrays"]["actions"]
+        ),
+        "action_token_stats": digest_record(
+            registration["action_token_stats"]["file"]
+        ),
+    }
+
+
+def validate_registered_input_revalidation(
+    receipt: Mapping[str, Any], registration: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate a sealed pre-torchrun rehash receipt without hashing it again."""
+
+    expected = registered_input_records(registration)
+    if not isinstance(receipt, Mapping) or dict(receipt) != expected:
+        raise ActionTokenScreenError(
+            "pre-torchrun registered-input revalidation differs"
+        )
+    return expected
+
+
+def revalidate_registered_inputs(registration: Mapping[str, Any]) -> dict[str, Any]:
+    records = registered_input_records(registration)
+    return {
+        key: base._revalidate_record(record, key) for key, record in records.items()
+    }
+
+
+def runtime_receipt_path(registration: Mapping[str, Any], arm: Arm) -> Path:
+    return (
+        Path(registration["output_root"])
+        / "runtime_receipts"
+        / f"{arm.code.lower()}.json"
+    )
+
+
+def runtime_verifier_identity(payload: Mapping[str, Any]) -> str:
+    if not isinstance(payload, Mapping):
+        raise ActionTokenScreenError(
+            "B200 runtime verifier output is not a mapping"
+        )
+    return hashlib.sha256(_canonical_json(dict(payload))).hexdigest()
+
+
+def validate_runtime_verifier_output(
+    payload: Mapping[str, Any], registration: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the successful verifier's deployment-critical observations."""
+
+    runtime = registration["runtime"]
+    environment = payload.get("environment")
+    weights = payload.get("weights")
+    gpus = payload.get("gpus")
+    devices = gpus.get("devices") if isinstance(gpus, Mapping) else None
+    if (
+        payload.get("python") != "3.10.20"
+        or not isinstance(environment, Mapping)
+        or environment.get("sys_executable") != runtime["python"]
+        or payload.get("videox_commit") != runtime["videox_commit"]
+        or payload.get("videox_status") != "clean"
+        or not isinstance(weights, Mapping)
+        or weights.get("root") != runtime["wan_dir"]
+        or not isinstance(gpus, Mapping)
+        or gpus.get("count") != EXPECTED_WORLD_SIZE
+        or gpus.get("nccl_available") is not True
+        or gpus.get("inaccessible_peer_pairs") != []
+        or not isinstance(devices, list)
+        or len(devices) != EXPECTED_WORLD_SIZE
+        or any(
+            not isinstance(device, Mapping)
+            or "B200" not in str(device.get("name", "")).upper()
+            or device.get("capability") != [10, 0]
+            for device in devices
+        )
+    ):
+        raise ActionTokenScreenError("B200 runtime verifier output differs")
+    return dict(payload)
+
+
+def validate_runtime_receipt(
+    registration: Mapping[str, Any],
+    arm: Arm,
+    *,
+    require_current_slurm: bool = False,
+) -> dict[str, Any]:
+    """Validate and bind the immutable per-arm pre-torchrun runtime receipt."""
+
+    path = runtime_receipt_path(registration, arm)
+    if not path.is_file() or path.is_symlink():
+        raise ActionTokenScreenError("per-arm runtime receipt is absent")
+    receipt = base._read_json(path, "action-token runtime receipt")
+    verifier = receipt.get("verifier_output")
+    slurm = receipt.get("slurm")
+    implementation = receipt.get("verifier_implementation")
+    expected_task = list(ARM_BY_CODE).index(arm.code)
+    if (
+        not identity_valid(receipt)
+        or receipt.get("kind") != KIND_RUNTIME_RECEIPT
+        or receipt.get("status") != RUNTIME_RECEIPT_STATUS
+        or receipt.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or receipt.get("tool_git_commit")
+        != registration["tool_repository"]["git_commit"]
+        or receipt.get("arm") != asdict(arm)
+        or receipt.get("run_identity_sha256") != arm_run_identity(registration, arm)
+        or not isinstance(verifier, Mapping)
+        or receipt.get("verifier_identity_sha256")
+        != runtime_verifier_identity(verifier)
+        or not isinstance(slurm, Mapping)
+        or not str(slurm.get("job_id", "")).isdigit()
+        or not str(slurm.get("array_job_id", "")).isdigit()
+        or slurm.get("array_task_id") != expected_task
+        or slurm.get("restart_count") != 0
+        or not isinstance(slurm.get("node_list"), str)
+        or not slurm["node_list"]
+        or not isinstance(implementation, Mapping)
+        or base._revalidate_record(implementation, "B200 runtime verifier")
+        != implementation
+        or receipt.get("protected_test_accessed") is not False
+    ):
+        raise ActionTokenScreenError("per-arm runtime receipt differs")
+    if require_current_slurm:
+        try:
+            current_job_id = os.environ.get("SLURM_JOB_ID", "")
+            current_slurm = {
+                "job_id": current_job_id,
+                "array_job_id": os.environ.get(
+                    "SLURM_ARRAY_JOB_ID", current_job_id
+                ),
+                "array_task_id": int(
+                    os.environ.get("SLURM_ARRAY_TASK_ID", str(expected_task))
+                ),
+                "restart_count": int(os.environ.get("SLURM_RESTART_COUNT", "0")),
+                "node_list": os.environ.get(
+                    "SLURM_JOB_NODELIST", os.environ.get("SLURM_NODELIST", "")
+                ),
+            }
+        except ValueError as exc:
+            raise ActionTokenScreenError(
+                "current Slurm task identity is invalid"
+            ) from exc
+        if dict(slurm) != current_slurm:
+            raise ActionTokenScreenError(
+                "per-arm runtime receipt belongs to a different Slurm task"
+            )
+    validate_runtime_verifier_output(verifier, registration)
+    return {
+        "record": base._file_record(path),
+        "identity_sha256": receipt["identity_sha256"],
+        "verifier_identity_sha256": receipt["verifier_identity_sha256"],
+    }
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    fit = sub.add_parser("fit-stats")
+    fit.add_argument("--train-manifest", type=Path, required=True)
+    fit.add_argument("--train-cache-metadata", type=Path, required=True)
+    fit.add_argument("--output", type=Path, required=True)
+    fit.set_defaults(func=command_fit_stats)
+    register = sub.add_parser("register")
+    register.add_argument("--tool-repo", type=Path, required=True)
+    register.add_argument("--historical-repo", type=Path, required=True)
+    register.add_argument("--expected-commit", required=True)
+    register.add_argument("--study-root", type=Path, required=True)
+    register.add_argument("--train-manifest", type=Path, required=True)
+    register.add_argument("--train-cache-metadata", type=Path, required=True)
+    register.add_argument("--stats", type=Path, required=True)
+    register.add_argument("--python", type=Path, required=True)
+    register.add_argument("--output-root", type=Path, required=True)
+    register.set_defaults(func=command_register)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
