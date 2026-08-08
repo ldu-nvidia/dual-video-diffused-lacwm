@@ -95,6 +95,18 @@ def _valid_rows(arm):
                     "arm": arm.code,
                     "clip_index": clip,
                     "action_control": control,
+                    "action_donor_clip_index": (
+                        clip
+                        if control == "aligned"
+                        else (clip + 1) % contract.VALIDATION_CLIPS
+                        if control == "episode_shuffled"
+                        else None
+                    ),
+                    "action_tensor_shape": list(contract.ACTION_SAMPLE_SHAPE),
+                    "action_tensor_dtype": "torch.float32",
+                    "action_tensor_sha256": (
+                        contract.ZERO_ACTION_SHA256 if control == "zero" else control
+                    ),
                     "nfe": 1,
                     "wan_calls": 1,
                     "history_rgb_frames_received": 5,

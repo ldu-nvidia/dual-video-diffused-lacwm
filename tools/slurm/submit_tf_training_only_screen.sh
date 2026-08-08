@@ -33,6 +33,9 @@ done
   die "--registration must be an absolute regular file"
 [[ "$PYTHON_BIN" == /* && -x "$PYTHON_BIN" ]] || die "--python is unavailable"
 [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "--expected-commit is invalid"
+if [[ "$QOS" == short && "$TIME_LIMIT" != 02:00:00 ]]; then
+  die "short QOS requires --time 02:00:00"
+fi
 [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" == "$EXPECTED_COMMIT" ]] || \
   die "repository commit differs"
 [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] || \
@@ -62,7 +65,13 @@ if (( ! EXECUTE )); then
   exit 0
 fi
 command -v sbatch >/dev/null || die "sbatch unavailable"
+command -v squeue >/dev/null || die "squeue unavailable"
 [[ ! -e "$LOG_DIR" && ! -L "$LOG_DIR" ]] || die "fresh Slurm log directory exists"
+while IFS= read -r active_name; do
+  case "$active_name" in
+    "$JOB_BASE"|"$JOB_BASE-"*) die "same-name workflow is already active: $active_name" ;;
+  esac
+done < <(squeue -h -u "${USER:?}" -o '%j')
 mkdir -m 700 "$LOG_DIR"
 CANARY_ID="$(sbatch "${BASE[@]}" --job-name "$JOB_BASE-canary" --gpus-per-node 1 \
   --output "$LOG_DIR/%x-%j.out" --error "$LOG_DIR/%x-%j.err" \

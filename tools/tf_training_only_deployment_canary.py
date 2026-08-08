@@ -97,9 +97,9 @@ def command_run(args: argparse.Namespace) -> int:
     removed_parent_keys = _load_parent(
         model, Path(registration["parent_snapshot"]["path"])
     )
-    if removed_parent_keys <= 0:
+    if removed_parent_keys != 14:
         raise DeploymentCanaryError(
-            "parent did not contain the expected legacy TF keys"
+            "parent did not contain exactly 14 legacy TF state entries"
         )
     inference_parameters = [
         name

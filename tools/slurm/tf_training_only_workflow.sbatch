@@ -131,6 +131,7 @@ export TFREG_TRAIN_METADATA="$TRAIN_METADATA"
 export TFREG_VAL_MANIFEST="$VAL_MANIFEST"
 export TFREG_VAL_METADATA="$VAL_METADATA"
 export TFREG_RUN_IDENTITY="$RUN_IDENTITY"
+export TFREG_RUN_ROOT="$STUDY_ROOT/training"
 
 if [[ "$MODE" == canary ]]; then
   [[ "$GPU_COUNT" == 1 ]] || die "deployment canary requires exactly one B200"
@@ -140,8 +141,10 @@ if [[ "$MODE" == canary ]]; then
 fi
 
 if [[ "$MODE" == evaluate ]]; then
-  [[ "$GPU_COUNT" == 8 ]] || die "evaluation requires exactly eight B200s"
-  [[ ! -e "$EVAL_DIR" && ! -L "$EVAL_DIR" ]] || die "evaluation output exists"
+    [[ "$GPU_COUNT" == 8 ]] || die "evaluation requires exactly eight B200s"
+    [[ ! -e "$EVAL_DIR" && ! -L "$EVAL_DIR" ]] || die "evaluation output exists"
+    "$PYTHON_BIN" "$HELPER" verify-arm --registration "$REGISTRATION" \
+        --arm "$ARM_CODE" >/dev/null
   export WANDB_MODE=disabled WANDB_DISABLED=true
   unset WANDB_RUN_ID WANDB_RUN_GROUP WANDB_NAME WANDB_RESUME WANDB_TAGS
   cd "$REPO_ROOT"
@@ -155,7 +158,6 @@ fi
 "$PYTHON_BIN" "$HELPER" verify-canary --registration "$REGISTRATION" >/dev/null
 [[ ! -e "$RUN_DIR" && ! -L "$RUN_DIR" ]] || die "training output exists"
 "$PYTHON_BIN" "$HELPER" plan --registration "$REGISTRATION" --arm "$ARM_CODE" >/dev/null
-export TFREG_RUN_ROOT="$STUDY_ROOT/training"
 export LACWM_RUN_IDENTITY_SHA256="$RUN_IDENTITY"
 export WANDB_ENTITY=zijiandu
 export WANDB_PROJECT=dual-video-diffusion-private

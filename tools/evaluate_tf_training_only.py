@@ -328,6 +328,10 @@ def command_evaluate(args: argparse.Namespace) -> int:
                             "action_control": control,
                             "action_donor_clip_index": controls[control][1],
                             "action_tensor_sha256": action_hashes[control],
+                            "action_tensor_shape": [
+                                int(value) for value in controls[control][0][0].shape
+                            ],
+                            "action_tensor_dtype": str(controls[control][0].dtype),
                             "nfe": 1,
                             "noise_seed": contract.EVALUATION_NOISE_SEED + clip_index,
                             "latent_nmse": float(latent_nmse),

@@ -36,6 +36,10 @@ TRAIN_CLIPS = 512
 VALIDATION_CLIPS = 64
 EVALUATION_NOISE_SEED = 20_260_808
 ACTION_CONTROLS = ("aligned", "episode_shuffled", "zero")
+ACTION_SAMPLE_SHAPE = (13, 5, 157)
+ZERO_ACTION_SHA256 = hashlib.sha256(
+    bytes(ACTION_SAMPLE_SHAPE[0] * ACTION_SAMPLE_SHAPE[1] * ACTION_SAMPLE_SHAPE[2] * 4)
+).hexdigest()
 METRICS = ("latent_nmse", "decoded_mse", "temporal_mse")
 WANDB_ENTITY = "zijiandu"
 WANDB_PROJECT = "dual-video-diffusion-private"
@@ -45,6 +49,11 @@ PARENT_SNAPSHOT_SHA256 = (
 )
 PARENT_RUN_IDENTITY_SHA256 = (
     "649a2c11a0a77091ed6e8d54073dd45a825239dfe3b0245ca5a55876c4df9fba"
+)
+LEGACY_TF_PREFIXES = (
+    "forward_model.tf_token_adapter",
+    "forward_model.tf_clock_embedding",
+    "forward_model.tf_velocity_head",
 )
 SPLIT_IDENTITIES = {
     "train": {
@@ -297,11 +306,28 @@ def _snapshot_record(path: Path):
     ):
         raise TFREGContractError("parent snapshot metadata differs")
     keys = sorted(snapshot["model"])
+    deployable_keys = [
+        key
+        for key in keys
+        if not any(key.startswith(prefix) for prefix in LEGACY_TF_PREFIXES)
+    ]
+    removed_keys = sorted(set(keys) - set(deployable_keys))
+    if len(removed_keys) != 14:
+        raise TFREGContractError("parent legacy TF key count differs")
+    deployable_schema = [
+        [key, list(snapshot["model"][key].shape), str(snapshot["model"][key].dtype)]
+        for key in deployable_keys
+    ]
     return {
         **record,
         "completed_updates": 1000,
         "run_identity_sha256": PARENT_RUN_IDENTITY_SHA256,
         "model_keyset_sha256": hashlib.sha256(_canonical(keys)).hexdigest(),
+        "legacy_tf_keys_discarded": len(removed_keys),
+        "deployable_model_key_count": len(deployable_keys),
+        "deployable_model_schema_sha256": hashlib.sha256(
+            _canonical(deployable_schema)
+        ).hexdigest(),
     }
 
 
@@ -466,6 +492,8 @@ def validate_result_rows(rows, arm: Arm) -> None:
             or row.get("cached_vjepa_target_opened") is not False
             or row.get("protected_test_accessed") is not False
             or row.get("noise_seed") != EVALUATION_NOISE_SEED + key[0]
+            or row.get("action_tensor_shape") != list(ACTION_SAMPLE_SHAPE)
+            or row.get("action_tensor_dtype") != "torch.float32"
             or any(
                 not isinstance(row.get(metric), float)
                 or not math.isfinite(row[metric])
@@ -474,6 +502,24 @@ def validate_result_rows(rows, arm: Arm) -> None:
             )
         ):
             raise TFREGContractError(f"invalid {arm.code} evaluation row")
+        donor = row.get("action_donor_clip_index")
+        if (
+            (key[1] == "aligned" and donor != key[0])
+            or (
+                key[1] == "episode_shuffled"
+                and (
+                    not isinstance(donor, int)
+                    or not 0 <= donor < VALIDATION_CLIPS
+                    or donor == key[0]
+                )
+            )
+            or (key[1] == "zero" and donor is not None)
+            or (
+                key[1] == "zero"
+                and row.get("action_tensor_sha256") != ZERO_ACTION_SHA256
+            )
+        ):
+            raise TFREGContractError(f"invalid {arm.code} action-control provenance")
     expected_keys = {
         (clip, control)
         for clip in range(VALIDATION_CLIPS)
@@ -695,8 +741,10 @@ def command_seal(args) -> int:
     from omegaconf import OmegaConf
 
     registration = load_registration(args.registration)
+    revalidate(registration, "train")
     _verified_canary(registration)
     sealed_arms = []
+    observed_schemas = []
     for arm in ARMS:
         paths = arm_paths(registration, arm)
         plan = _read_json(Path(paths["plan"]), f"{arm.code} plan")
@@ -722,6 +770,31 @@ def command_seal(args) -> int:
             or snapshot.get("run_identity_sha256") != expected_identity
         ):
             raise TFREGContractError(f"{arm.code} snapshot metadata differs")
+        state = snapshot.get("model")
+        if not isinstance(state, Mapping):
+            raise TFREGContractError(f"{arm.code} snapshot model state differs")
+        if any(
+            "spectral" in key.lower()
+            or any(key.startswith(prefix) for prefix in LEGACY_TF_PREFIXES)
+            for key in state
+        ):
+            raise TFREGContractError(
+                f"{arm.code} contains an inference spectral/TF parameter"
+            )
+        model_schema = [
+            [key, list(state[key].shape), str(state[key].dtype)]
+            for key in sorted(state)
+        ]
+        schema_sha256 = hashlib.sha256(_canonical(model_schema)).hexdigest()
+        if (
+            len(state) != registration["parent_snapshot"]["deployable_model_key_count"]
+            or schema_sha256
+            != registration["parent_snapshot"]["deployable_model_schema_sha256"]
+        ):
+            raise TFREGContractError(
+                f"{arm.code} parameter schema differs from stripped parent"
+            )
+        observed_schemas.append(schema_sha256)
         config_record = file_record(
             Path(paths["run_dir"]) / ".hydra/config.yaml", f"{arm.code} resolved config"
         )
@@ -735,8 +808,11 @@ def command_seal(args) -> int:
                 "snapshot": snapshot_record,
                 "resolved_config": config_record,
                 "completion": completion,
+                "model_schema_sha256": schema_sha256,
             }
         )
+    if len(set(observed_schemas)) != 1:
+        raise TFREGContractError("OFF/ON parameter schemas differ")
     payload = identity(
         {
             "schema_version": 1,
@@ -757,6 +833,31 @@ def command_seal(args) -> int:
     return 0
 
 
+def command_verify_arm(args) -> int:
+    registration = load_registration(args.registration)
+    seal = load_seal(registration)
+    arm = ARM_BY_CODE[args.arm]
+    entry = next(item for item in seal["arms"] if item["arm"] == arm.code)
+    for key, label in (("snapshot", "snapshot"), ("resolved_config", "config")):
+        observed = file_record(Path(entry[key]["path"]), f"{arm.code} {label}")
+        if observed != entry[key]:
+            raise TFREGContractError(f"sealed {arm.code} {label} changed")
+    completion = _read_json(
+        Path(arm_paths(registration, arm)["run_dir"]) / "training_complete.json",
+        f"{arm.code} completion",
+    )
+    if completion != entry["completion"]:
+        raise TFREGContractError(f"sealed {arm.code} completion changed")
+    result = {
+        "arm": arm.code,
+        "run_identity_sha256": arm_identity(registration, arm),
+        "verified_at": _now(),
+        "protected_test_accessed": False,
+    }
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def _bootstrap_improvement(off, on, *, seed: int = 20_260_808, draws: int = 10_000):
     import numpy as np
 
@@ -764,6 +865,8 @@ def _bootstrap_improvement(off, on, *, seed: int = 20_260_808, draws: int = 10_0
     on = np.asarray(on, dtype=np.float64)
     if off.shape != (VALIDATION_CLIPS,) or on.shape != off.shape:
         raise TFREGContractError("paired bootstrap requires val64 vectors")
+    if not np.isfinite(off).all() or not np.isfinite(on).all() or off.mean() <= 0:
+        raise TFREGContractError("paired bootstrap inputs must be finite/positive")
     point = 100.0 * (off.mean() - on.mean()) / off.mean()
     rng = np.random.default_rng(seed)
     indexes = rng.integers(0, VALIDATION_CLIPS, size=(draws, VALIDATION_CLIPS))
@@ -778,15 +881,47 @@ def _bootstrap_improvement(off, on, *, seed: int = 20_260_808, draws: int = 10_0
 def command_analyze(args) -> int:
     registration = load_registration(args.registration)
     seal = load_seal(registration)
+    with Path(registration["validation"]["manifest"]["path"]).open(
+        encoding="utf-8"
+    ) as handle:
+        episode_rows = [json.loads(line) for line in handle if line.strip()]
     rows_by_arm = {}
     for arm in ARMS:
         path = Path(arm_paths(registration, arm)["evaluation_dir"]) / "rows.jsonl"
         rows = _read_rows(path)
         validate_result_rows(rows, arm)
+        expected_run_identity = arm_identity(registration, arm)
+        for row in rows:
+            donor = row["action_donor_clip_index"]
+            if (
+                row.get("registration_identity_sha256")
+                != registration["identity_sha256"]
+                or row.get("seal_identity_sha256") != seal["identity_sha256"]
+                or row.get("run_identity_sha256") != expected_run_identity
+                or any(
+                    SHA_RE.fullmatch(str(row.get(field, ""))) is None
+                    for field in (
+                        "action_tensor_sha256",
+                        "initial_noise_sha256",
+                        "video_latent_sha256",
+                        "decoded_sha256",
+                        "score_target_sha256",
+                    )
+                )
+                or (
+                    row["action_control"] == "episode_shuffled"
+                    and episode_rows[row["clip_index"]]["episode_dir"]
+                    == episode_rows[donor]["episode_dir"]
+                )
+            ):
+                raise TFREGContractError(f"{arm.code} sealed row provenance differs")
         inventory = _read_json(path.parent / "inventory.json", f"{arm.code} inventory")
         if (
             not _valid_identity(inventory)
             or inventory.get("rows") != file_record(path)
+            or inventory.get("registration_identity_sha256")
+            != registration["identity_sha256"]
+            or inventory.get("seal_identity_sha256") != seal["identity_sha256"]
             or inventory.get("spectral_loss_calls_at_inference") != 0
             or inventory.get("auxiliary_modules_at_inference") != 0
         ):
@@ -908,6 +1043,10 @@ def build_parser():
     seal = sub.add_parser("seal")
     seal.add_argument("--registration", type=Path, required=True)
     seal.set_defaults(func=command_seal)
+    verify_arm = sub.add_parser("verify-arm")
+    verify_arm.add_argument("--registration", type=Path, required=True)
+    verify_arm.add_argument("--arm", choices=tuple(ARM_BY_CODE), required=True)
+    verify_arm.set_defaults(func=command_verify_arm)
     analyze = sub.add_parser("analyze")
     analyze.add_argument("--registration", type=Path, required=True)
     analyze.set_defaults(func=command_analyze)
