@@ -48,6 +48,8 @@ def option(command: list[str], name: str) -> str:
 
 def test_sbatch_routes_workdir_and_logs_outside_checkout() -> None:
     text = SBATCH.read_text(encoding="utf-8")
+    assert "TEMPORAL_DOE_REPO_ROOT" in text
+    assert "BASH_SOURCE" not in text
     directives = {
         line.split("=", 1)[0]: line.split("=", 1)[1]
         for line in text.splitlines()

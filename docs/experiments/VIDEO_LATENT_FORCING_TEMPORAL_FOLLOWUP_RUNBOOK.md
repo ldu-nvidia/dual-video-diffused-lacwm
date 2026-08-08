@@ -104,6 +104,7 @@ allocations for training and evaluation because the latter runs all 63
 arm/control/NFE cells per arm.
 
 ```bash
+export TEMPORAL_DOE_REPO_ROOT="$REPO"
 export TEMPORAL_DOE_PYTHON="$PYTHON"
 mkdir -p "$BASE/artifacts/dual_video_diffusion/temporal_followup/_slurm_logs"
 sbatch "$REPO/tools/slurm/temporal_followup_doe.sbatch" \
@@ -132,4 +133,6 @@ nonzero command, nonfinite training receipt, wrong source/config/checkpoint,
 input hash mismatch, unexpected W&B group, or protected-test evidence. It
 never deletes, overwrites, resumes, requeues, or silently skips a partial run.
 An operational retry must use a fresh study ID and retain the failed artifact;
-the protocol's byte-identity and no-new-look rules still apply.
+the protocol's byte-identity and no-new-look rules still apply. Slurm executes
+a private spool copy of an sbatch script, so the script intentionally requires
+`TEMPORAL_DOE_REPO_ROOT`; it never infers the checkout from `BASH_SOURCE`.
