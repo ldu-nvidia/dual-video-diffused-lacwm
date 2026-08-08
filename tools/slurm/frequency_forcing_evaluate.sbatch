@@ -67,9 +67,12 @@ OUTPUT_DIR="$STUDY_ROOT/evaluation/$ARM_SLUG"
   die "arm training is incomplete"
 [[ ! -e "$OUTPUT_DIR" ]] || die "fresh evaluation output already exists"
 
-source "$REPO_ROOT/tools/env/activate_b200.sh"
+# The activation guard validates these paths while it is sourced.  They must
+# come from the immutable cluster registration, never its workstation defaults.
 export WAN_DIR="$WAN_DIR_VALUE"
 export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
+source "$REPO_ROOT/tools/env/activate_b200.sh"
+
 export FREQ_TRAIN_CLIP_MANIFEST="$TRAIN_MANIFEST"
 export FREQ_TRAIN_CACHE_METADATA="$TRAIN_METADATA"
 export FREQ_VAL_CLIP_MANIFEST="$VAL_MANIFEST"

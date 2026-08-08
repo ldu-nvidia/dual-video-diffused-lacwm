@@ -332,6 +332,23 @@ def test_frequency_wandb_finish_is_bounded_and_preserves_local_sync_files():
     assert "must not be deleted" in runbook
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "tools/slurm/frequency_forcing_screen.sbatch",
+        "tools/slurm/frequency_forcing_evaluate.sbatch",
+    ],
+)
+def test_frequency_launcher_exports_registered_runtime_before_activation(
+    relative_path,
+):
+    source = (screen.REPO_ROOT / relative_path).read_text(encoding="utf-8")
+    activation = source.index("source ")
+    assert source.index('export WAN_DIR="$WAN_DIR_VALUE"') < activation
+    assert source.index('export VIDEOX_HOME="$VIDEOX_HOME_VALUE"') < activation
+    assert "/mnt/data2/" not in source
+
+
 def test_completion_receipt_must_be_final_and_identity_bound(tmp_path):
     snapshot = tmp_path / "snapshot.pt"
     identity = "a" * 64

@@ -96,10 +96,12 @@ VERIFY_RUNTIME="$BOOTSTRAP_REPO/tools/env/verify_b200_runtime.py"
 WARMSTART_PREFLIGHT="$BOOTSTRAP_REPO/tools/validate_frequency_forcing_warmstart.py"
 [[ -f "$ACTIVATE" && -f "$VERIFY_RUNTIME" && -f "$WARMSTART_PREFLIGHT" ]] || \
   die "B200 runtime/preflight tools are missing"
-source "$ACTIVATE"
-
+# The activation guard validates these paths while it is sourced.  They must
+# come from the immutable cluster registration, never its workstation defaults.
 export WAN_DIR="$WAN_DIR_VALUE"
 export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
+source "$ACTIVATE"
+
 export FREQ_WARM_START="$WARMSTART"
 export FREQ_TRAIN_CLIP_MANIFEST="$TRAIN_MANIFEST"
 export FREQ_TRAIN_CACHE_METADATA="$TRAIN_METADATA"
