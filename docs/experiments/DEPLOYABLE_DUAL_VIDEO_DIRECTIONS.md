@@ -617,6 +617,29 @@ first helps and if a generated residual beats zero/mean/shuffled residuals at
 equal calls. Otherwise it repeats the already failed autonomous-feature path
 with a more elaborate parameterization.
 
+The training formulation should explicitly separate a future-aware posterior
+from the deployed causal prior:
+
+\[
+q_\phi(r\mid h,a,x_{future}),\qquad
+p_\psi(r\mid h,a,u_{robot}),\qquad
+x\sim p_\theta(x\mid h,a,u_{robot},r).
+\]
+
+The posterior may discover object/contact modes from training video, but at
+serving the prior samples its own mode and RGB is generated from that **same**
+sample. A KL, diffusion-prior, or distribution-matching objective aligns the
+two distributions; per-example regression that asks the causal prior to name
+the dataset's irreducible realized future recreates the failed oracle problem.
+Use a severe object-centric bottleneck—particles, object SE(3), contact onset/
+release, attachment, and visibility—rather than another global V-JEPA or FFT
+tensor. [Latent Particle World Models](https://arxiv.org/abs/2603.04553)
+provide close external evidence for self-supervised object discovery and
+stochastic particle dynamics, so object-centric stochastic dynamics alone is
+not a novelty claim. The differentiated test is whether this compact posterior-
+prior interaction state improves equal-call, action-conditioned robot **video**
+generation when layered on the deterministic renderer.
+
 ## Direction 11b: privileged on-policy teacher distillation
 
 The oracle-clean result can be used without putting an unavailable feature in

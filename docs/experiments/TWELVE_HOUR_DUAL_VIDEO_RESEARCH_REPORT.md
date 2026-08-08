@@ -338,6 +338,19 @@ does not reject confidence gating for a future auxiliary that emits calibrated,
 inference-observable uncertainty and first shows material sample-specific
 utility.
 
+For options 1--3, the principled stochastic version is a posterior--prior
+factorization, not per-sample oracle imitation. During training a posterior
+`q(r|history, actions, future video)` can identify the realized object/contact
+mode; the deployed prior `p(r|history, actions, rendered robot flow)` samples a
+mode, and RGB must share that same sample. Distribution matching can teach the
+prior without pretending it can identify the held-out realization. The state
+should be a severe object/contact bottleneck—particles, object pose, contact
+onset/release, attachment, visibility—not another global FFT/V-JEPA tensor.
+[Latent Particle World Models](https://arxiv.org/abs/2603.04553) already show
+self-supervised object-centric stochastic dynamics, so the contribution would
+have to be the renderer-anchored dual video-generation and low-call robotics
+result, not object-centric modeling by itself.
+
 Few-step self-/causal-forcing is an acceleration layer after one of these
 mechanisms produces a stronger teacher; it is not a substitute for a causally
 informative state.
