@@ -182,7 +182,10 @@ def test_slurm_contract_is_one_gpu_encode_then_cpu_analysis() -> None:
     assert "#SBATCH --gpus-per-node=8" in encode
     assert "--nproc_per_node=8" in encode
     assert "#SBATCH --qos=short" in encode and "#SBATCH --time=02:00:00" in encode
-    assert "--gpus" not in analyze
+    assert "#SBATCH --gpus-per-node=1" in analyze
+    assert probe.fixed_protocol()["analysis_device"] == "cpu"
+    assert probe.fixed_protocol()["analysis_scheduler_bookkeeping_gpus"] == 1
+    assert probe.fixed_protocol()["analysis_cuda_usage_allowed"] is False
     assert "analyze --registration" in analyze
     assert '--dependency="afterok:$ENCODE_JOB"' in submit
     assert "--kill-on-invalid-dep=yes" in submit

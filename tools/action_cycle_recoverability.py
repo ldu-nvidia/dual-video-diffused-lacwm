@@ -403,6 +403,8 @@ def fixed_protocol() -> dict[str, Any]:
         ),
         "distributed_encode_world_size": 8,
         "analysis_device": "cpu",
+        "analysis_scheduler_bookkeeping_gpus": 1,
+        "analysis_cuda_usage_allowed": False,
         "wandb": {
             "entity": EXPECTED_ENTITY,
             "project": EXPECTED_PROJECT,

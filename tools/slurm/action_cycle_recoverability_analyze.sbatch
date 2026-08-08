@@ -6,6 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
+#SBATCH --gpus-per-node=1
 #SBATCH --mem=256G
 #SBATCH --time=02:00:00
 #SBATCH --exclude=pool0-0081,pool0-0089,pool0-0200,pool0-0343

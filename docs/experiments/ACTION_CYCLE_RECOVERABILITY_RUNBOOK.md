@@ -4,6 +4,10 @@ The submission wrapper preregisters first, runs one 8×B200 encode job for both
 splits, then submits CPU ridge analysis with an `afterok` dependency. It never
 opens the cached V-JEPA target or protected test.
 
+The `batch` partition rejects zero-GPU submissions. Consequently the analysis
+job requests one GPU only as scheduler bookkeeping; fitting and bootstrap
+remain explicitly CPU-only.
+
 ```bash
 BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
 REPO=$BASE/src/action-cycle-recoverability/dual-video-diffused-lacwm

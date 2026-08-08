@@ -13,6 +13,11 @@ The cached V-JEPA target and every protected-test artifact are forbidden.
 Validation contributes zero observations to normalization, ridge fitting, or
 regularization selection.
 
+The analysis mathematics remains CPU-only. The cluster `batch` partition
+nevertheless requires every submission to request a GPU, so its Slurm job asks
+for exactly one bookkeeping GPU. The analyzer never selects CUDA or moves a
+ridge tensor to that device.
+
 ## Audited temporal alignment
 
 The actual pinned `AutoencoderKLWan_.encode` implementation consumes a
