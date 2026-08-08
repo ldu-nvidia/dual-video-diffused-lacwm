@@ -37,6 +37,17 @@ before Wan (the causal action motion-plan screen) or predict and inject it
 between early and late blocks of the same Wan evaluation (the intra-forward
 latent-forcing screen).
 
+This is a materially harder latency target than the published Latent Forcing
+result. Its best cascaded image sampler uses 50 Heun steps, with 25 latent
+steps followed by 25 pixel steps; during pixel training the latent is normally
+clean and the pixel loss is trained separately. The paper also reports that
+DINOv2 features do not inform pixels well while the pixel state is still at
+very high noise. Thus, a synchronous one-call video implementation is not a
+faithful low-cost reproduction of the paper's successful causal ordering. It
+removes precisely the interval in which the generated latent becomes a usable
+condition. CAMP tests an explicit cheap pre-Wan phase; intra-forward forcing
+tests whether that phase can be compressed inside one Wan evaluation.
+
 ## Constraint exposed by the completed screens
 
 A clean feature of the unknown future can be used as a training target or an
