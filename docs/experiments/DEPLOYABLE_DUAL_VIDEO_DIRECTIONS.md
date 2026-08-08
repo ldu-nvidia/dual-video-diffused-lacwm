@@ -2,9 +2,40 @@
 
 Date: 2026-08-07
 
-Status: prospective research map; observations are separated from hypotheses;
-only the temporal-target and observed-anchor protocols are presently frozen
-experiments
+Status: living research map; completed observations are separated from
+prospective hypotheses and every result retains its protocol-specific claim
+boundary
+
+## Completed deployable evidence through 2026-08-08
+
+All results below are one-seed development-validation evidence on the frozen
+ABC screen, not protected-test or general video-quality claims.
+
+| Intervention | Primary observation | Decision |
+|---|---|---|
+| generated full-clip V-JEPA state | autonomous conditioning was indistinguishable from fusion-off and shuffled state; J1 video-flow loss was 31.6% worse than VPM | no deployable mechanism |
+| PhaseLock-style generated motion prior | stabilized an ordinary multi-call trajectory, but did not beat the one-call VPM frontier and aligned was indistinguishable from shuffled | no sample-specific guidance |
+| temporal semantic target DOE | absolute, delta, temporal, and self-roll-in variants failed; more calls generally worsened prediction | no passing semantic motion state |
+| video residual coordinates | worse latent/decoded quality at every NFE; a +7.90% NFE-4 latent-temporal effect came with substantial appearance regressions | rejected |
+| LaMo macro-motion drift loss | effects were approximately neutral; best temporal point effect was +0.47% at NFE 4 with a negative simultaneous bound | rejected at this budget |
+| two-clock consistency | NFE-1 latent/decoded MSE improved +0.49%/+0.68%, but temporal MSE worsened 0.28%; all metrics worsened by NFE 4 | rejected at this budget |
+| observed V-JEPA anchor plus generated increments | semantic NMSE improved 46--49%, but increment NMSE was 1.00--1.17, temporal attribution versus shuffled/donor controls was below 0.3%, and a mean/static increment was as good or better | static identity works; future motion does not |
+
+Across the residual, LaMo, two-clock, and observed-anchor screens, action or
+sample shuffling changes the relevant outputs by at most small fractions of a
+percent. The recurring failure is therefore not merely a bad Fourier basis.
+The learned future variable is weakly action-sensitive and its autonomous
+sample identity is not causally used by video.
+
+There is also a one-call ordering problem in the existing synchronous joint
+sampler. At NFE 1, both video and auxiliary enter the sole Wan evaluation at
+their noise endpoint. The video velocity can see the auxiliary's input noise,
+but not the clean auxiliary estimate produced by that same call, because both
+Euler updates occur afterward. A schedule can make the auxiliary useful only
+on a later call. A true one-call dual mechanism must instead generate its plan
+before Wan (the causal action motion-plan screen) or predict and inject it
+between early and late blocks of the same Wan evaluation (the intra-forward
+latent-forcing screen).
 
 ## Constraint exposed by the completed screens
 
