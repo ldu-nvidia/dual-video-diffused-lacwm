@@ -641,11 +641,16 @@ not match the privileged teacher's actual denoising policy on the causal
 student's rollout distribution.  Current external evidence is relevant but
 not dispositive: [branch-aware on-policy diffusion distillation](https://arxiv.org/html/2607.24731)
 transfers dense control to sparse-control video students, while
+[Privileged Foresight Distillation](https://arxiv.org/html/2604.25859)
+transfers a true-future-induced **action-denoising** residual into a current-
+only robotics adapter, and
 [future-privileged self-distillation](https://arxiv.org/html/2607.27055) uses a
 reachability gate for a causal student in sequential recommendation.  The
 former also warns that classifier-free positive/negative branches must be
 matched separately when privileged conditioning makes their information
-asymmetric.
+asymmetric. These precedents make privileged transfer credible but narrow our
+novelty to target-video semantic/TF supervision of on-policy **video** velocity,
+low-NFE generation, and closed-loop attribution.
 
 The exact train-only teacher eligibility gate, five controlled arms, leakage
 assertions, and development thresholds are frozen in

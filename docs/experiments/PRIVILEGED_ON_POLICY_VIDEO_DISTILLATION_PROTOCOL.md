@@ -170,14 +170,19 @@ future information.
 [Rethinking CFG in On-Policy Diffusion Distillation](https://arxiv.org/html/2607.24731)
 already demonstrates privileged dense-to-sparse transfer for video controls
 and motivates student-visited states plus branch-aware matching.
+[Privileged Foresight Distillation](https://arxiv.org/html/2604.25859)
+is closer in robotics: a full-future attention mask defines a shared-backbone
+teacher, and a small current-only adapter learns the detached teacher-minus-
+student **action-denoising** residual, with no future video at inference.
 [Privileged Self-Distillation](https://arxiv.org/html/2607.27055) demonstrates
 future-aware teacher to causal-student transfer and a reachability gate in a
 different sequential domain.  These are external results, not evidence for
 ABC/LACWM.  A defensible contribution here would require action-conditioned
-robot video, a target-video semantic/TF privileged teacher, explicit
+robot **video-velocity** generation rather than action prediction, a target-
+video semantic/TF teacher queried on student-visited video states, explicit
 reachable-versus-unreachable attribution, equal-cost one/two-call sampling,
-and closed-loop world-model utility.  Plain privileged distillation is not by
-itself novel.
+and closed-loop world-model utility.  Plain privileged distillation or a
+teacher-minus-student residual adapter is not by itself novel.
 
 ## Stop rules
 

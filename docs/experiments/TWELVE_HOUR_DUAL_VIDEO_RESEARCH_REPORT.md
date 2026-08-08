@@ -336,11 +336,17 @@ actual denoising policy.
 Recent external evidence makes this a credible controlled experiment rather
 than a guarantee.  [Branch-aware on-policy diffusion distillation](https://arxiv.org/html/2607.24731)
 transfers dense controls to sparse-control video students, and
+[Privileged Foresight Distillation](https://arxiv.org/html/2604.25859)
+distills a full-future teacher-minus-student residual into a current-only
+adapter for **action denoising**, while
 [Privileged Self-Distillation](https://arxiv.org/html/2607.27055) uses a
 future-aware teacher plus a reachability gate for causal sequential prediction.
-Neither is an ABC/LACWM result, and a causal student cannot recover irreducible
-future detail.  The exact eligibility gate, arms, leakage assertions, and stop
-rules are frozen in `PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`.
+None demonstrates target-video semantic/TF transfer into an on-policy causal
+**video-velocity** student for low-NFE robot video, but together they mean that
+plain privileged-to-causal distillation is no longer a novelty claim. A causal
+student also cannot recover irreducible future detail. The exact eligibility
+gate, arms, leakage assertions, and stop rules are frozen in
+`PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`.
 
 ## Phased execution decision
 
