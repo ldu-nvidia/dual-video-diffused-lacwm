@@ -33,6 +33,12 @@ Chamfer distance (95% paired interval 3.32--5.86) at 2.77 ms p95 render
 latency. This is a calibration-feasibility result, not a generation gain; exact
 evidence and limitations are in
 [`ABC_D405_NOMINAL_GEOMETRY_PROBE.md`](docs/experiments/ABC_D405_NOMINAL_GEOMETRY_PROBE.md).
+A separate leakage-controlled Stage-0 now shows that observed history plus
+planned actions predicts the compact 14-D command-tracking residual: validation
+standardized MSE improved 60.08% over history and 72.45% over shuffled actions,
+with all registered lower bounds positive. This is a `GO` only for rendering
+the predicted corrected trajectory—not for Wan integration; see
+[`NOMINAL_TRACKING_RESIDUAL_STAGE0_RESULT.md`](docs/experiments/NOMINAL_TRACKING_RESIDUAL_STAGE0_RESULT.md).
 The sealed dense proxy result and post-hoc horizon diagnostics are in
 [`DENSE_TOP_FLOW_STAGE0.md`](docs/experiments/DENSE_TOP_FLOW_STAGE0.md).
 A complementary training-only route that distills a privileged clean-feature

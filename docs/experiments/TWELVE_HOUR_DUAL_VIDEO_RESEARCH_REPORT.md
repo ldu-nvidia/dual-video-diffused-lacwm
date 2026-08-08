@@ -17,12 +17,14 @@ frequency states, one-call scratchpads, explicit action tokens, or the tested
 training-only relation/spectrum losses as quality-improving mechanisms at this
 budget. The most credible remaining **technical** route is:
 
-1. compute robot-only image motion from the proposed joint trajectory, robot
+1. predict the compact command-to-realized robot tracking correction from
+   observed state/history and planned actions;
+2. render robot-only image motion from that corrected trajectory, the robot
    model, and calibrated cameras before RGB denoising;
-2. hold that causal flow scaffold fixed while RGB is generated;
-3. if needed, generate a small stochastic residual-flow state for object/contact
+3. hold that causal flow scaffold fixed while RGB is generated;
+4. if needed, generate a small stochastic residual-flow state for object/contact
    consequences before RGB;
-4. distill a demonstrably stronger flow-conditioned teacher to two or four RGB
+5. distill a demonstrably stronger flow-conditioned teacher to two or four RGB
    calls with inference-consistent/self-forced training.
 
 This is not merely conceptual. A leakage-controlled train512/val64 proxy screen
@@ -33,6 +35,12 @@ That first train-only diagnostic now passes: nominal top-camera YAM rendering
 is significantly closer to observed image edges than a +4-clip-step wrong-pose
 control and is cheap enough to be causal. It remains a three-clip nominal-
 calibration feasibility result, not evidence that rendered flow improves Wan.
+A separate train512/val64 Stage-0 now shows that this nominal trajectory should
+not simply equal the raw command: an inference-causal 14-D tracking-correction
+predictor improved standardized residual MSE 60.08% over history-only and
+72.45% over shuffled planned actions, with physically nontrivial 3.54-degree
+joint residual RMS. This passes a strict predictor gate but still must improve
+rendered alignment before it can condition Wan.
 A current literature audit also shows that nominal robot rendering is now an
 important baseline rather than a standalone novelty claim; the publishable
 increment would need generated uncertainty/contact residuals, privileged-to-
@@ -48,6 +56,7 @@ causal transfer, or a demonstrated low-call closed-loop advantage.
 | training-only relation/spectrum/motion loss | no | TRD, TFREG, and low-frequency motion regularization negative |
 | learned action-to-dense-flow proxy | no | real direction signal, but failed the strict generator-handoff gate |
 | nominal D405 robot geometry | no | first three-clip train-only alignment diagnostic passed; finer timing/calibration and generator gates remain |
+| predicted command-tracking correction | no | strict train512/val64 predictability gate passed; renderer attribution is next, no video claim yet |
 | analytic planned-action robot-only flow | no | strongest next generator-conditioning baseline; not yet evaluated in Wan |
 | physics-anchored stochastic residual flow | no | prospective genuine dual-diffusion extension |
 | privileged teacher to on-policy video-only student | no | strongest training-only salvage of the oracle gain; newly frozen, not yet run |
@@ -110,6 +119,7 @@ long-horizon, protected-test, or closed-loop task claims.
 | action-to-dense-top-flow proxy | +2.91% dense MSE versus history and +2.94% versus shuffled; cosine 0.040 to 0.216 | genuine action-specific direction, but both preregistered 10% handoff gates failed |
 | confidence gate over midpoint scratchpad | no valid inference confidence was preserved; a forbidden perfect temporal oracle gained only +0.0447% | always-off is the only honest no-regret policy for this auxiliary |
 | nominal D405/YAM geometry | correct-pose Chamfer 8.444 px versus 13.025 px at +4 clip steps; shifted-minus-aligned +4.581 px [3.320, 5.865] | narrow train-only feasibility pass; 3/3 clips positive and render p95 2.769 ms, but no masks, calibrated distortion, flow, or video-generation endpoint |
+| nominal-to-realized tracking residual | aligned standardized MSE 0.3719 versus 0.9316 history, 1.3499 shuffled, 1.1812 raw-command/zero residual, and 14.245 hold-current; gains +60.08%/+72.45%/+68.52%/+97.39% with positive paired intervals | strongest compact inference-causal signal; predicts robot command-tracking error, not object/contact motion, and advances only to corrected-render alignment |
 
 ## Why image Latent Forcing and these video attempts diverged
 

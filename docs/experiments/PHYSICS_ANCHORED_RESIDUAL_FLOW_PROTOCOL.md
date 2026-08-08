@@ -128,6 +128,26 @@ Chamfer deltas for shifts `[-2,-1,+1,+2]` were respectively
 except `+1`, whose interval was `[-0.018,1.108]`. This directional asymmetry
 keeps timestamp interpolation/fine timing explicitly open before Gate 1.
 
+### Gate 0b: predicted command-tracking correction (2026-08-08)
+
+The leakage-controlled train512/validation64 Stage-0 passed all four registered
+10% gates. A ridge predictor using measured history through frame 4 and planned
+commands only reached standardized residual MSE 0.371876, improving 60.08%
+`[54.38,65.04]` over history-only, 72.45% `[67.29,77.18]` over episode-
+shuffled actions, 68.52% `[63.73,72.35]` over raw-command/zero residual, and
+97.39% `[96.22,98.08]` over hold-current. Future measured states were target-
+only. Joint tracking residual RMS was 0.06180 rad (3.54 degrees), and candidate
+joint RMSE was 0.03305 rad (1.89 degrees).
+
+This compact state can refine `u_robot`, but it is not yet the stochastic
+object/contact residual `r`. It also uses independently ceiling-resampled raw
+state/command streams and does not replay a controller. Before Gate 1, render
+raw-command, predicted-corrected, hold-current, shuffled-correction, and
+measured-state-oracle trajectories. Proceed only if the predicted correction
+improves silhouette/flow alignment over raw and shuffled controls with positive
+paired lower bounds. Full evidence is in
+`NOMINAL_TRACKING_RESIDUAL_STAGE0_RESULT.md`.
+
 ## Gate 1: fixed causal flow conditioning
 
 Use one parent snapshot, identical data order/noise/optimizer, equal trainable
