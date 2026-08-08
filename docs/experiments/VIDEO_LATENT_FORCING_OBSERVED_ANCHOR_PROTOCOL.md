@@ -209,6 +209,21 @@ EMA, training geometry, seeds, evaluator, and paired clip-addressed noise.
 This is a prospective repair of experimental matching, not a response to an
 observed AINC result.
 
+### Operational evaluation-recovery compatibility
+
+The five-arm temporal DOE was trained at the frozen authorization commit, but
+its first evaluation attempts failed before sampling because of evaluator-only
+distributed metadata and receipt-path defects.  Its completed validation-only
+no-pass record was therefore produced by a clean descendant checkout.  This
+does not change the contingency: the observed-anchor workflow may accept that
+record only when every immutable input summary proves that the original
+authorization commit is an ancestor and that every inference-critical Git
+object is byte-identical between training and evaluation.  The workflow binds
+both commits and the hashed no-pass analysis.  A dirty checkout, changed model,
+sampler, representation, dataset bridge, or runner object still fails closed.
+This operational allowance changes neither an arm, metric, threshold,
+selection rule, nor protected-test policy.
+
 If multiple cells pass, select smallest NFE, then lowest temporal NMSE, then
 lowest ordinary NMSE. Select at most one cell. Only it may receive the same
 one-shot protected-test procedure and thresholds as the temporal follow-up;

@@ -210,6 +210,150 @@ def test_execution_condition_accepts_only_frozen_temporal_no_pass(
         )
 
 
+def test_execution_condition_accepts_byte_identical_evaluation_recovery(
+    tmp_path: Path,
+) -> None:
+    evaluator_commit = "1" * 40
+    source = {
+        "commit": evaluator_commit,
+        "branch": "",
+        "dirty": False,
+    }
+    input_evaluations = {}
+    for arm in ainc.TEMPORAL_ARMS:
+        summary = tmp_path / f"{arm}-recovered-summary.json"
+        summary.write_text(
+            json.dumps(
+                {
+                    "arm": arm,
+                    "training_source_compatibility": {
+                        "training_commit": ainc.TEMPORAL_AUTHORIZATION_COMMIT,
+                        "evaluator_commit": evaluator_commit,
+                        "training_is_ancestor": True,
+                        "inference_critical_paths_unchanged": True,
+                        "paths": {
+                            "model.py": {
+                                "training_object": "2" * 40,
+                                "evaluator_object": "2" * 40,
+                                "unchanged": True,
+                            }
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        input_evaluations[arm] = {
+            "summary": ainc.vlf.file_record(summary),
+            "target_mode": "absolute",
+        }
+    candidate_cells = [
+        {"arm": arm, "nfe": nfe, "composite_gate_passed": False}
+        for arm in ainc.TEMPORAL_CANDIDATE_ARMS
+        for nfe in ainc.TEMPORAL_SELECTION_NFE
+    ]
+    analysis_unsigned = {
+        "schema": ainc.TEMPORAL_ANALYSIS_SCHEMA,
+        "status": "no_candidate_passed",
+        "source": source,
+        "selected_cell": None,
+        "selection_count": 0,
+        "split": "val",
+        "paired_clips": ainc.screen.FROZEN_VALIDATION_CLIPS,
+        "input_evaluations": input_evaluations,
+        "candidate_cells": candidate_cells,
+        "bootstrap": {
+            "samples": 10_000,
+            "seed": 20260807,
+            "bonferroni_candidate_cells": len(candidate_cells),
+            "common_indices_across_all_metrics_cells_controls": True,
+        },
+        "development_selection_split": True,
+        "protected_test_accessed": False,
+        "protected_test_cache_opened": False,
+        "protocol_frozen": True,
+    }
+    analysis = {
+        **analysis_unsigned,
+        "identity_sha256": ainc.screen.sha256_json(analysis_unsigned),
+    }
+    analysis_path = tmp_path / "recovered-analysis.json"
+    analysis_path.write_text(json.dumps(analysis), encoding="utf-8")
+    selection_unsigned = {
+        "schema": ainc.TEMPORAL_SELECTION_SCHEMA,
+        "status": "frozen_no_selection",
+        "development_analysis": ainc.vlf.file_record(analysis_path),
+        "development_analysis_identity_sha256": analysis["identity_sha256"],
+        "selected_cell": None,
+        "selection_count": 0,
+        "selection_split": "val",
+        "selection_used_protected_test": False,
+        "protected_test_accessed": False,
+        "lockbox_may_open": False,
+        "input_evaluations": input_evaluations,
+    }
+    selection = {
+        **selection_unsigned,
+        "identity_sha256": ainc.screen.sha256_json(selection_unsigned),
+    }
+    selection_path = tmp_path / "recovered-selection.json"
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+
+    condition = ainc._execution_condition(  # noqa: SLF001
+        SimpleNamespace(
+            execution_mode="post-temporal-no-pass",
+            temporal_selection_record=str(selection_path),
+        )
+    )
+    assert condition["temporal_evaluation_source_commit"] == evaluator_commit
+    assert (
+        condition["temporal_evaluation_source_mode"]
+        == "immutable_operational_recovery"
+    )
+    assert condition["temporal_inference_critical_paths_unchanged"] is True
+
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    payload["training_source_compatibility"]["paths"]["model.py"][
+        "evaluator_object"
+    ] = "3" * 40
+    summary.write_text(json.dumps(payload), encoding="utf-8")
+    bad_inputs = dict(input_evaluations)
+    bad_inputs[arm] = {
+        "summary": ainc.vlf.file_record(summary),
+        "target_mode": "absolute",
+    }
+    bad_analysis_unsigned = {
+        **analysis_unsigned,
+        "input_evaluations": bad_inputs,
+    }
+    bad_analysis = {
+        **bad_analysis_unsigned,
+        "identity_sha256": ainc.screen.sha256_json(bad_analysis_unsigned),
+    }
+    analysis_path.write_text(json.dumps(bad_analysis), encoding="utf-8")
+    bad_selection_unsigned = {
+        **selection_unsigned,
+        "development_analysis": ainc.vlf.file_record(analysis_path),
+        "development_analysis_identity_sha256": bad_analysis["identity_sha256"],
+        "input_evaluations": bad_inputs,
+    }
+    bad_selection = {
+        **bad_selection_unsigned,
+        "identity_sha256": ainc.screen.sha256_json(bad_selection_unsigned),
+    }
+    selection_path.write_text(json.dumps(bad_selection), encoding="utf-8")
+    with pytest.raises(
+        ainc.ObservedAnchorScreenError,
+        match="does not prove a frozen validation-only no-pass result",
+    ):
+        ainc._execution_condition(  # noqa: SLF001
+            SimpleNamespace(
+                execution_mode="post-temporal-no-pass",
+                temporal_selection_record=str(selection_path),
+            )
+        )
+
+
 def test_training_step_diffuses_q_without_passing_anchor_to_model() -> None:
     torch.manual_seed(12)
     model = _ZeroCleanModel()

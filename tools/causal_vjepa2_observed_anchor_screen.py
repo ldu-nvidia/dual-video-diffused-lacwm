@@ -154,6 +154,7 @@ def _execution_condition(args: argparse.Namespace) -> dict[str, Any]:
             "temporal no-pass analysis has malformed candidate cells"
         ) from exc
     input_summaries_are_current = isinstance(input_evaluations, Mapping)
+    temporal_source_compatibility: dict[str, Mapping[str, Any]] = {}
     if input_summaries_are_current:
         for arm in TEMPORAL_ARMS:
             evaluation = input_evaluations.get(arm)
@@ -175,6 +176,57 @@ def _execution_condition(args: argparse.Namespace) -> dict[str, Any]:
             ):
                 input_summaries_are_current = False
                 break
+            summary = vlf.load_json(summary_path, f"temporal {arm} evaluation")
+            compatibility = summary.get("training_source_compatibility")
+            if summary.get("arm") != arm:
+                input_summaries_are_current = False
+                break
+            if isinstance(compatibility, Mapping):
+                temporal_source_compatibility[arm] = compatibility
+
+    evaluation_source_commit = (
+        str(authorization_source.get("commit"))
+        if isinstance(authorization_source, Mapping)
+        else ""
+    )
+    same_commit_evaluation = (
+        evaluation_source_commit == TEMPORAL_AUTHORIZATION_COMMIT
+    )
+    recovered_evaluation = not same_commit_evaluation
+    recovery_source_is_valid = (
+        recovered_evaluation
+        and re.fullmatch(r"[0-9a-f]{40}", evaluation_source_commit) is not None
+        and set(temporal_source_compatibility) == set(TEMPORAL_ARMS)
+    )
+    if recovery_source_is_valid:
+        for arm in TEMPORAL_ARMS:
+            compatibility = temporal_source_compatibility[arm]
+            paths = compatibility.get("paths")
+            if (
+                compatibility.get("training_commit")
+                != TEMPORAL_AUTHORIZATION_COMMIT
+                or compatibility.get("evaluator_commit")
+                != evaluation_source_commit
+                or compatibility.get("training_is_ancestor") is not True
+                or compatibility.get("inference_critical_paths_unchanged")
+                is not True
+                or not isinstance(paths, Mapping)
+                or not paths
+                or any(
+                    not isinstance(record, Mapping)
+                    or record.get("unchanged") is not True
+                    or re.fullmatch(
+                        r"[0-9a-f]{40}", str(record.get("training_object", ""))
+                    )
+                    is None
+                    or record.get("training_object")
+                    != record.get("evaluator_object")
+                    for record in paths.values()
+                )
+            ):
+                recovery_source_is_valid = False
+                break
+    temporal_source_is_valid = same_commit_evaluation or recovery_source_is_valid
     if (
         selection.get("schema") != TEMPORAL_SELECTION_SCHEMA
         or selection.get("status") != "frozen_no_selection"
@@ -195,7 +247,7 @@ def _execution_condition(args: argparse.Namespace) -> dict[str, Any]:
         or analysis.get("protected_test_cache_opened") is not False
         or analysis.get("protocol_frozen") is not True
         or not isinstance(authorization_source, Mapping)
-        or authorization_source.get("commit") != TEMPORAL_AUTHORIZATION_COMMIT
+        or not temporal_source_is_valid
         or authorization_source.get("dirty") is not False
         or analysis.get("paired_clips") != screen.FROZEN_VALIDATION_CLIPS
         or not isinstance(input_evaluations, Mapping)
@@ -235,6 +287,13 @@ def _execution_condition(args: argparse.Namespace) -> dict[str, Any]:
         "external_temporal_abs_numeric_baseline_allowed": False,
         "temporal_no_pass_is_authorization_only": True,
         "temporal_authorization_source_commit": TEMPORAL_AUTHORIZATION_COMMIT,
+        "temporal_evaluation_source_commit": evaluation_source_commit,
+        "temporal_evaluation_source_mode": (
+            "same_commit"
+            if same_commit_evaluation
+            else "immutable_operational_recovery"
+        ),
+        "temporal_inference_critical_paths_unchanged": True,
         "temporal_selection": vlf.file_record(selection_path),
         "temporal_selection_identity_sha256": selection["identity_sha256"],
         "temporal_development_analysis": dict(analysis_record),
