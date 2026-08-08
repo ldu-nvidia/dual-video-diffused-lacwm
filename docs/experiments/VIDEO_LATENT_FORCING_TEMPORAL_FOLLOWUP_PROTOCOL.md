@@ -44,8 +44,12 @@ A target-only audit performed before choosing the candidate arms found that
 the validation target has mean square `0.983072`; `88.4731%` of its energy is
 in the per-clip temporal mean and only `11.5269%` in within-clip temporal
 variation. Adjacent differences contain `17.0629%` as much energy per temporal
-slot as the absolute target. This audit contains no prediction and cannot
-select a model.
+slot as the absolute target. Although this audit contains no prediction, it
+influenced the decision to test delta packing. Validation is therefore a
+**development/selection split**, not an untouched test split. The same audit
+will be recomputed and reported on training targets only; no confirmatory claim
+may rely on the validation audit. Exactly one selected arm/NFE pair may later
+be evaluated once on the protected test split as described in D3.
 
 The design is motivated by trajectory-consistency and on-policy video work,
 including [Consistency Models](https://arxiv.org/abs/2303.01469),
@@ -59,38 +63,68 @@ candidate mechanisms but do not substitute for the frozen DROID controls.
 ## Stage D0: denoiser-versus-trajectory diagnosis
 
 Use every validation clip and the same clip-addressed Gaussian auxiliary noise
-for all comparisons. At clean times
-`{0,.025,.05,.10,.20,.35,.50,.65,.80,.90,.95}`, construct the diagnostic
-on-manifold state
+for all comparisons. A training-distribution diagnostic state at clean time
+`t` is
 
 \[
 z_t=t s+(1-t)\epsilon.
 \]
 
-Query the frozen model once and report clean-state NMSE, token cosine,
+This state is labelled **training-distribution**, not "on-manifold": it follows
+the training corruption law, but may still be statistically atypical. Query
+the frozen model and report clean-state NMSE, token cosine,
 temporal-difference NMSE/cosine, and velocity MSE. Separately roll out from
-`epsilon`, never using `s`, and query the same model at matched times. Repeat
-the autonomous path with destination actions and episode-disjoint shuffled
-actions.
+`epsilon`, never using `s`, and query the same model at matched pre-update
+states. The frozen primary comparison is the state before call 2 on the exact
+uniform-Euler four-call trajectory, namely `t=.25`; call 1 at `t=0` is shared.
+Also report every pre-call node from the exact original uniform-Euler call
+budgets `C in {2,4,8}`. At `t=0`, the training-distribution and autonomous
+state and prediction must be bit-identical. A supplemental dense Euler trace
+uses the registered grid
+`{0,.025,.05,.10,.20,.35,.50,.65,.80,.90,.95}` but cannot determine the
+primary diagnosis. Repeat autonomous paths with the true actions and three
+fixed, episode-disjoint action permutations with manifest offsets
+`{1,17,101}` modulo 890.
 
-From identical noise, compare direct clean prediction, uniform Euler, midpoint
-second-order integration, and a low-noise-dense schedule at nominal NFE
-`{1,2,4,8}`. Record actual transformer calls separately from nominal steps.
-The on-manifold arm is nondeployable and diagnostic only. Its target hash must
-never occur in any autonomous sampler-input hash chain.
+From identical noise, compare solvers at equal **actual transformer-call**
+budgets. Direct-x is exactly one call at `t=0` and has no multi-call variant.
+Euler uses `C in {1,2,4,8}` intervals and call times `t_i=i/C`, followed by an
+Euler update to `(i+1)/C`. Explicit midpoint uses even call budgets
+`C in {2,4,8}` and `M=C/2` intervals: for each interval of width `h=1/M`, call
+at `t`, Euler-predict the state at `t+h/2`, call there, and update the interval
+start with that midpoint velocity to `t+h`. It has no one-call entry. The
+low-noise-dense Euler schedule uses the same actual call budgets and boundaries
+`t_i=1-(1-i/C)^2`. Any Heun result is supplemental and must obey the same
+actual-call accounting. Record nominal intervals and actual calls separately;
+exclude duplicate one-call schedule labels from statistical comparisons. The
+training-distribution arm is nondeployable and diagnostic only. Its target hash
+must never occur in an autonomous sampler-input hash chain. Autonomous calls
+must use a separate target-free call graph, preserve hashes of all fixed inputs,
+and reject any changed state/noise/context/action hash unexpectedly. Signature
+inspection is an additional guard, not proof of no leakage. Applicable metrics
+must be finite; inapplicable fields serialize as JSON `null`, never NaN.
 
-Classify rollout drift as the primary failure only if an on-manifold state at
-`t <= .50` reaches temporal NMSE at most `0.50` while its paired autonomous
-state is at least 25% worse with a positive 95% bootstrap lower bound. If no
-such cell exists, classify endpoint/representation learning as the primary
-failure. Both may coexist and all raw cells remain reportable.
+Classify rollout drift as the primary failure only from the preregistered
+uniform-Euler-four primary cell at `t=.25`: training-distribution temporal NMSE
+must be at most `0.50`, and autonomous temporal NMSE must be at least 25% worse
+with the paired 95% bootstrap confidence-interval lower bound also at least
+25%. Otherwise report the denoiser and trajectory errors separately without
+declaring that D0 alone has identified a unique primary cause. D0 distinguishes
+training-distribution denoising from failure along a specified numerical
+trajectory; it cannot by itself prove that the endpoint parameterization or
+representation is causal.
 
 ## Stage D1: train-only temporal packing statistics
 
 Fit per-channel anchor and delta mean/standard deviation using only the 64,000
-training targets. Use deterministic float64 accumulation and publish counts,
-moments, source hashes, and an exclusive completion record. Validation and
-protected-test targets must not affect these values.
+training targets stored as float16. For `X` with shape `[N,48,8,H,W]`, anchor
+statistics reduce the `N,H,W` axes of `X[:,:,0]`; delta statistics reduce the
+`N,7,H,W` axes of `X[:,:,1:]-X[:,:,:-1]`. Accumulate sums and squared sums in
+float64 and use population variance `E[x^2]-E[x]^2`, clamped below at zero,
+with `std=max(sqrt(var),1e-6)`. Publish the resulting double-precision JSON
+values, counts, source hashes, and an exclusive completion record. Encoding
+and decoding use float32. Validation and protected-test targets must not affect
+these values.
 
 Define the invertible delta pack `y` from absolute semantic tokens `s`:
 
@@ -101,9 +135,10 @@ y_j=((s_j-s_{j-1})-\mu_d)/\sigma_d,\quad j>0.
 \]
 
 Decode with the inverse affine transforms followed by a cumulative sum. Tests
-must require bit-stable round-trip accuracy within the declared storage
-precision. Unlike temporal de-meaning, this transform retains the entire clean
-target while representing static content once instead of eight times.
+must require tolerance-stable float32 round-trip maximum absolute error at most
+`2e-5` from the declared float16 source storage. Unlike temporal de-meaning,
+this transform retains the entire clean target while representing static
+content once instead of eight times.
 
 ## Stage D2: controlled representation and trajectory DOE
 
@@ -119,40 +154,78 @@ and 5,000-update budget:
 | `DELTA-T` | normalized invertible delta pack | normalized temporal-velocity loss, weight 1 |
 | `DELTA-R` | normalized invertible delta pack | 50% stopped one-step self-roll-in plus the same clean target |
 
-For `DELTA-R`, the first prediction is stop-gradient. Its Euler state at a
-later randomly sampled time is fed back to the model, and the second prediction
-is supervised against the same clean packed target. This deliberately trains
-on model-induced errors without making a clean target an inference input.
+For all arms, temporal-velocity loss is defined only after decoding predicted
+and target representation-space velocities into absolute semantic-space
+velocities. Take their temporal first differences, normalize each original
+semantic channel with the train delta standard deviation, and then compute
+MSE. This avoids accidentally comparing second differences for delta-packed
+arms.
 
-An action-swap margin may be evaluated as a diagnostic arm, but it is not
-eligible for promotion because DROID supplies no ground-truth counterfactual
-future for the shuffled action. It cannot be used to manufacture apparent
-action sensitivity.
+For `DELTA-R`, the ordinary final supervised clock `t_1` is drawn by the exact
+incumbent auxiliary-clock law, with the same clean target, Gaussian noise, and
+data order as `DELTA`. A counter/hash RNG keyed by `(seed, update,
+global_sample_id)`—without consuming the baseline RNG stream—draws a Bernoulli
+mask with probability `.5` and `u ~ Uniform[0,1]`; selected samples set
+`t_0=u*t_1`. Construct the true forward state `z(t_0)`, make one no-gradient
+prediction, detach it, and apply
+
+\[
+z_R(t_1)=z(t_0)+(t_1-t_0)
+          \frac{\hat{x}(z(t_0),t_0)-z(t_0)}{1-t_0}.
+\]
+
+Replace the true `z(t_1)` by `z_R(t_1)` only for selected samples. Unselected
+samples retain the exact true `z(t_1)`. One gradient-bearing forward/loss on
+this mixed batch at `t_1` is supervised against the same clean packed target.
+Thus half the examples add one stopped call; report both gradient-bearing and
+total transformer calls, wall time, and GPU-hours.
+
+Action shuffling is evaluated with the three frozen episode-disjoint manifest
+permutations above and labelled only **factual action attribution**. It is not
+counterfactual-causal evidence because DROID supplies no ground-truth future
+for a changed action, and it is not a promotion criterion. An action-swap
+training loss is not a primary arm and cannot manufacture apparent action
+sensitivity.
 
 ## Stage D3: generated-only gate
 
-Evaluate every primary arm on all 890 validation clips using NFE
+Evaluate every primary arm on all 890 development/validation clips using NFE
 `{1,2,4,8,12,20,25}` and the previous controls: autonomous, donor-target,
 context-shuffled, history-shuffled, actions-shuffled, zero, and oracle-clean.
 Delta predictions are decoded to absolute semantic space before applying the
 existing semantic gate; packed-space errors are additional diagnostics.
+Only NFE `{1,2,4}` is eligible for selection; larger budgets are descriptive.
 
 An arm is eligible only at NFE at most 4 and must satisfy all prior requirements:
 
 - autonomous NMSE at most `0.50`, cosine at least `0.70`, and temporal NMSE at
   most `0.50`;
 - at least 5% paired improvement in ordinary and temporal NMSE over both
-  donor-target and context-shuffled, with positive 95% confidence lower bounds;
-  and
+  donor-target and context-shuffled, with the simultaneous confidence lower
+  bound also at least 5%; and
 - positive paired cosine advantages over both controls.
 
-This follow-up additionally requires actions-shuffled temporal NMSE to be at
-least 5% worse than autonomous with a positive paired 95% confidence lower
-bound. The bootstrap uses 10,000 clip-level resamples and seed 20260807.
+The five arms and three selectable NFEs create 15 candidate cells. Development
+gates use 10,000 paired clip-level bootstrap resamples, seed 20260807, and
+Bonferroni simultaneous confidence `1-.05/15 = .996666...`. If multiple cells
+pass, select deterministically by: smallest NFE, lowest temporal NMSE, lowest
+ordinary NMSE, then arm order `ABS`, `ABS-T`, `DELTA`, `DELTA-T`, `DELTA-R`.
+No alternative tie-break or additional arm may be introduced after metrics are
+visible.
+
+After selection of exactly one arm/NFE pair, create the protected-test semantic
+cache with the already frozen PCA/teacher pipeline. Evaluate the incumbent and
+the selected pair exactly once on the protected clips with the same
+clip-addressed noise and nominal 95% paired bootstrap interval. Do not tune,
+rerun with another seed, or inspect other candidate arms on this lockbox. A
+claim and D4 require the selected pair to retain positive ordinary and temporal
+NMSE improvements over the incumbent on this one-shot test. If no development
+cell passes, do not open the lockbox.
 
 ## Stage D4: video experiment, conditional on D3
 
-Do not enable video training if no arm passes D3. If one passes, run fresh
+Do not enable video training if no arm passes D3 including lockbox confirmation.
+If one passes, run fresh
 parameter-matched video-only, generated-auxiliary, auxiliary-shuffled, and
 oracle-clean controls. The training video branch must receive stopped
 self-generated or calibrated forward-corrupted auxiliary states, not only
