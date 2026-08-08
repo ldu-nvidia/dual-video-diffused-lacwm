@@ -301,8 +301,18 @@ def test_normalized_training_receipt_binds_augmented_record_and_checkpoint_bytes
             "later_time_rule": "sampled_final_clock_fraction",
         },
         "datasets": {
-            "train": workflow.file_record(value.train_manifest),
-            "validation": workflow.file_record(value.validation_manifest),
+            "train": {
+                **workflow.file_record(value.train_manifest),
+                "split": "train",
+                "clips": 64_000,
+                "episodes": 8_000,
+            },
+            "validation": {
+                **workflow.file_record(value.validation_manifest),
+                "split": "val",
+                "clips": 890,
+                "episodes": 890,
+            },
             "semantic_cache": {
                 "train": {
                     "target_sha256": workflow.TRAIN_TARGET_SHA256,

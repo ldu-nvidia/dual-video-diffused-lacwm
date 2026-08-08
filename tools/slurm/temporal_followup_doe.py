@@ -196,6 +196,21 @@ def normalization_file_record(path: Path) -> dict[str, Any]:
     return {**file_record(path), "payload_sha256": sha256_json(payload)}
 
 
+def contains_file_record(value: Any, path: Path) -> bool:
+    """Accept a provenance record that contains the immutable file receipt.
+
+    The trainer intentionally augments manifest file receipts with split,
+    clip, episode, and ordered-identity metadata.  Receipt validation must
+    bind the immutable ``path``/``sha256``/``bytes`` fields without requiring
+    the enriched record to equal the smaller bare file record exactly.
+    """
+
+    if not isinstance(value, Mapping):
+        return False
+    expected = file_record(path)
+    return all(value.get(key) == expected_value for key, expected_value in expected.items())
+
+
 def read_json(path: Path, label: str) -> dict[str, Any]:
     try:
         with path.open(encoding="utf-8") as handle:
@@ -878,8 +893,10 @@ def validate_training_receipt(
         or source.get("commit") != inputs.expected_commit
         or source.get("dirty") is not False
         or not _arm_config_valid(config, arm)
-        or manifests.get("train") != file_record(inputs.train_manifest)
-        or manifests.get("validation") != file_record(inputs.validation_manifest)
+        or not contains_file_record(manifests.get("train"), inputs.train_manifest)
+        or not contains_file_record(
+            manifests.get("validation"), inputs.validation_manifest
+        )
         or train_cache.get("target_sha256") != TRAIN_TARGET_SHA256
         or validation_cache.get("target_sha256") != VALIDATION_TARGET_SHA256
         or train_cache.get("pca_sha256") != PCA_SHA256
