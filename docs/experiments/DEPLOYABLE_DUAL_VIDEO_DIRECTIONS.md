@@ -38,9 +38,11 @@ ABC screen, not protected-test or general video-quality claims.
 | training-only video relation distillation (weight 0.5) | the student relation L1 fell 90.2%, from 0.9033 to 0.0889, proving that the privileged clean-video target was learnable, but video-flow loss rose 6.62%; at NFE 1 latent/decoded/temporal error was 3.08%/0.98%/0.21% worse than the matched loss-off arm, with the latent regression's paired interval entirely below zero | rejected at this dose; successful representation imitation did not improve deployable generation and conflicted with the primary flow objective |
 | training-only video relation distillation (weight 0.05) | the relation L1 still fell 84.1%, but flow loss rose 0.84%; the registered mean-of-clip-relative NFE-1 effects were -3.09%/-0.65%/-1.12% in latent/decoded/temporal error, all six point/lower-bound gates failed, and the temporal interval was entirely below zero | rejected at this lower dose; reducing the auxiliary-loss conflict did not expose a deployable quality gain, and this adaptive val64 reuse is exploratory |
 | training-only 3-D spectral endpoint loss (weight 0.05) | aligned NFE-1 latent/decoded/temporal error changed by -0.564%/-0.134%/-0.110%, with paired intervals crossing zero; training flow loss and teacher-forced clean-latent NMSE were also 1.44%/1.74% worse | rejected for this low-band log-amplitude/phase objective; a preregistered H=23 versus actual padded H=24 geometry mismatch makes the otherwise identity-verified result exploratory |
+| training-only per-view low-frequency motion loss (weight 0.05) | aligned NFE-1 latent/decoded/temporal error changed by -0.256%/+0.662%/+0.099%, with paired intervals [-1.065, +0.549]/[-0.222, +1.497]/[-0.100, +0.293]%; treatment effects were nearly identical under aligned, episode-shuffled, and zero actions | all registered gates failed; reject this composite low-pass endpoint plus one future-transition objective at this budget, without generalizing to dense or physics-derived motion states |
 | clean-latent inverse-action recoverability | a frozen train-only ridge probe achieved future-transition cosine 0.118, but a train-mean action predictor had much lower standardized MSE (1.070 versus 1.995), same-clip temporal misalignment was nearly as good (cosine 0.104), retrieval was 4.69%, and the 16-comparison simultaneous gate failed | stop the action-cycle generator continuation; this Wan displacement representation does not identify the requested within-clip action strongly enough |
 | causal spectral-information probe (CSIP) | spectral angle improved target cosine over a matched magnitude/support-only probe by +0.127 (simultaneous lower bound +0.023), but improved MSE only 1.57% with a negative lower bound (-7.61%); aligned actions were 314% worse than raw-no-action in relative MSE | phase is partly informative, but no action-specific causal spectral route was demonstrated; stop this generator path |
 | causal action-to-motion-summary Stage 0 | a train-only ridge model using observed motion plus planned actions improved val64 standardized future Farneback-summary MSE by 6.59% over history-only (paired 95% interval 4.96--8.05%) and by 9.04% over the same model with episode-shuffled actions (7.19--11.10%); aggregate R2 rose from 0.098 to 0.158 | passes its preregistered exploratory 1% information/specificity gates, but not the later proposed 10% all-view integration gate; supports a calibrated dense-flow follow-up, not a generator-quality claim |
+| causal action-to-dense-top-flow Stage 0 | planned actions improved raw dense-flow MSE by 2.91% over history-only (paired interval 2.49--3.40%) and 2.94% over shuffled actions (2.41--3.60%); directional cosine rose from 0.040 to 0.216, but endpoint error improved only 1.71%/2.24% | `NO_GO`: the action signal is real and directional, but both preregistered 10% dense-MSE handoff gates failed; use an analytic kinematic scaffold rather than this learned proxy for the generator test |
 
 Across the residual, LaMo, two-clock, and observed-anchor screens, action or
 sample shuffling changes the relevant outputs by at most small fractions of a
@@ -536,6 +538,21 @@ would justify the more faithful and expensive per-block joint-attention port.
 For deployment, analytical rasterized scene flow from link depth/IDs is likely
 preferable to SAPIEN RGB, RAFT, HSV encoding, and a second VAE pass.
 
+The preregistered dense top-view follow-up made the learned-proxy decision
+sharper. It used only observed top RGB frames 0--4 and planned action chunks
+4--11 to predict eight future `12x20` raw directional Farneback fields; future
+RGB was target/scoring-only. Aligned actions improved dense MSE by 2.91%
+[2.49, 3.40] versus history-only and 2.94% [2.41, 3.60] versus an
+episode-shuffled action. Directional cosine improved by +0.175, from 0.040 to
+0.216, and every validation clip favored aligned actions over history in dense
+MSE. However, endpoint-error gains were only 1.71%/2.24%, and both registered
+10% dense-MSE gates failed. A train-only PCA192 oracle retained 98.60% of target
+variance and reached validation cosine 0.911, making target compression an
+unlikely primary cause. This is positive causal-information evidence but a
+`NO_GO` for using the learned field as Wan's condition. The next condition must
+come from kinematics/calibration, not from extrapolating the full future field
+with this ridge proxy.
+
 The more novel second stage is a physics-anchored residual motion diffusion:
 
 \[
@@ -559,32 +576,38 @@ only two future Wan tokens. A narrower training-only follow-up splits the three
 views, prepends the last observed latent token, applies a fixed per-view Gaussian
 low-pass, and supervises the two adjacent signed motion deltas of `x0_hat` with
 target-RMS-normalized Smooth-L1. It has no auxiliary parameters, teacher, FFT,
-or inference call. The paired loss-off/on screen is preregistered at weight
-0.05, 200 updates, one seed, train512/val64, and NFE 1. Because eight future RGB
-frames compress to two future Wan tokens, it can test only coarse latent motion;
-it cannot support a contact-timing or general time-frequency claim. The shared
-anchor also cancels algebraically inside the first delta error, so the objective
-combines a low-pass endpoint loss for future token zero with one genuine
-future-to-future motion-difference loss. Any positive result must be described
-as composite structural regularization rather than pure motion supervision.
+or inference call. The paired loss-off/on screen used weight 0.05, 200 updates,
+one seed, train512/val64, and NFE 1. Because eight future RGB frames compress to
+two future Wan tokens, it tests only coarse latent motion; it cannot support a
+contact-timing or general time-frequency claim. The shared anchor also cancels
+algebraically inside the first delta error, so the objective combines a low-pass
+endpoint loss for future token zero with one genuine future-to-future
+motion-difference loss.
+
+The registered decision was `FAIL`. Relative to loss-off, the aligned loss-on
+arm changed latent NMSE by -0.256% (95% paired interval -1.065 to +0.549),
+decoded MSE by +0.662% (-0.222 to +1.497), and temporal MSE by +0.099% (-0.100
+to +0.293). None met the 3% point/1% lower-bound quality gates, and the latent
+point estimate regressed. Aligned, episode-shuffled, and zero-action treatment
+effects were nearly identical, indicating generic structural regularization
+rather than action-attributed motion learning. This closes the cheap
+training-only two-token motion-loss route, not dense causal motion scaffolds.
 
 ## Execution priority
 
-1. Finish and audit the per-view low-frequency motion screen. Treat it as the
-   last cheap training-only structural-loss test on the two-token ABC latent.
-2. Acquire or recover the exact robot URDF, joint mapping, base pose, and camera
+1. Acquire or recover the exact robot URDF, joint mapping, base pose, and camera
    calibration for one robot dataset, then run the action-to-flow causality gate
    before modifying the RGB generator.
-3. If that gate passes, run flow-off/aligned/shuffled/oracle conditioning at
+2. If that gate passes, run flow-off/aligned/shuffled/oracle conditioning at
    equal Wan calls and report both end-to-end scaffold cost and RGB quality.
-4. Distill only a demonstrably stronger causal flow-conditioned teacher with an
+3. Distill only a demonstrably stronger causal flow-conditioned teacher with an
    inference-consistent/self-forced objective to two or four calls. The current
    VPM NFE-4 trajectory is worse than NFE 1 and is not a valid teacher.
-5. In parallel, prototype a policy adapter over generated Wan latents and
+4. In parallel, prototype a policy adapter over generated Wan latents and
    measure closed-loop task utility at the observed latent-only p95 latency.
    Optimize or distill the VAE decoder separately if RGB is operationally
    required at 5--10 Hz.
-6. Advance a mechanism to multi-seed DROID and one untouched lockbox only after
+5. Advance a mechanism to multi-seed DROID and one untouched lockbox only after
    it passes action-attribution, latency, and quality gates on development data.
 
 Every comparison must report quality at the same total transformer calls,

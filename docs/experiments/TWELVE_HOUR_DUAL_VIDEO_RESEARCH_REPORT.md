@@ -37,8 +37,9 @@ and exact ABC rendering first requires a robot/camera calibration gate.
 | target-video TF/V-JEPA condition | yes | oracle upper bound only |
 | autonomous semantic/frequency branch before RGB | no | tested variants negative |
 | same-call midpoint scratchpad | no | tested variant negative and sample-insensitive |
-| training-only relation/spectrum/motion loss | no | TRD and TFREG negative; per-view motion result pending |
-| planned-action robot-only flow | no | strongest next route; geometry/calibration prerequisite |
+| training-only relation/spectrum/motion loss | no | TRD, TFREG, and low-frequency motion regularization negative |
+| learned action-to-dense-flow proxy | no | real direction signal, but failed the strict generator-handoff gate |
+| analytic planned-action robot-only flow | no | strongest next route; geometry/calibration prerequisite |
 | physics-anchored stochastic residual flow | no | prospective genuine dual-diffusion extension |
 | consistency/self-forcing distillation | no auxiliary required | primary speed route after a stronger teacher exists |
 | latent-only policy adapter | no decoded RGB for policy | measured systems fallback near 8.49 rollouts/s p95 |
@@ -58,7 +59,9 @@ long-horizon, protected-test, or closed-loop task claims.
 | fixed-dose ordered action tokens | +0.405% latent, +0.259% decoded, -0.086% temporal; all gates failed | route opened, but action-specific effect remained near zero |
 | VideoREPA relation loss, 0.5/0.05 | teacher relation improved 90.2%/84.1%, while deployable video worsened at both doses | representation imitation conflicted with or failed to help flow learning |
 | TF spectral loss, 0.05 | -0.564%/-0.134%/-0.110% | zero inference dependency, but no quality gain; exploratory geometry mismatch |
+| per-view low-frequency motion loss, 0.05 | -0.256% latent, +0.662% decoded, +0.099% temporal; every registered gate failed | tiny uncertain appearance/motion points, latent regression, and the same effect under aligned/shuffled/zero actions |
 | action-to-Farneback-summary proxy | +6.59% versus history-only; +9.04% versus shuffled actions | planned actions contain incremental motion information, but target is coarse |
+| action-to-dense-top-flow proxy | +2.91% dense MSE versus history and +2.94% versus shuffled; cosine 0.040 to 0.216 | genuine action-specific direction, but both preregistered 10% handoff gates failed |
 
 ## Why image Latent Forcing and these video attempts diverged
 
@@ -128,6 +131,21 @@ and supports a top-view directional-flow first experiment. Because the slice
 was not the registered all-view endpoint, it is hypothesis-selection evidence,
 not a passing confirmatory gate.
 
+The preregistered dense top-view follow-up did not reproduce that coarse 12.61%
+effect. It predicted eight raw `(u,v)` Farneback fields at `12x20` from observed
+top-view motion plus planned actions. Aligned actions improved dense MSE by
+2.91% [2.49, 3.40] over history-only and 2.94% [2.41, 3.60] over shuffled
+actions, below both 10% gates. Endpoint error improved 1.71%/2.24%. There is a
+real signed-direction signal: cosine increased from 0.040 to 0.216, a +0.175
+absolute gain with a positive paired interval, and aligned dense MSE beat
+history for all 64 clips. A PCA192 oracle retained 98.60% of train variance and
+reconstructed validation flow at cosine 0.911, so output compression is not the
+main explanation. The result is nevertheless `NO_GO` for a learned proxy: it
+does not predict flow magnitude/detail strongly enough to condition Wan under
+the registered handoff rule. It strengthens the case for an analytic kinematic
+scaffold while weakening the case for learning the entire flow field from this
+small screen.
+
 ## Recommended architecture
 
 First deployable stage:
@@ -152,15 +170,69 @@ x\sim p_\theta(x\mid h,a,u_{robot}+r),
 
 where `r` captures object motion/contact residuals. Require generated residuals
 to beat zero, train-mean, and shuffled residuals at equal total calls.
+The leakage contract, state channels, attribution arms, thresholds, and stop
+rules are frozen in `PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md`.
+
+## Novelty boundary
+
+“Condition video on optical flow” is no longer a sufficient contribution:
+[FlowWAM](https://arxiv.org/html/2607.13017) and
+[RealWonder](https://arxiv.org/html/2603.05449) already occupy that space.
+[iMaC](https://arxiv.org/html/2606.09813) further conditions video on
+URDF/FK-rendered motion plus deterministic robot--scene contact-distance images,
+and [EA-WM](https://arxiv.org/html/2605.06192) uses structured kinematic visual
+fields with event-supervised fusion gates. A defensible new claim would need the
+combination of:
+
+- a **physics-anchored stochastic residual motion state** that separates known
+  robot kinematics from uncertain object/contact consequences;
+- attributed quality gains from generated rather than oracle residuals;
+- two- or four-call inference including scaffold cost;
+- measured 5--10 Hz closed-loop DAgger utility rather than video metrics alone;
+- calibration/command-tracking uncertainty that survives robot, view, and task
+  transfer.
+
+That would be a substantive physical-AI/world-model contribution. A modest
+MSE gain from fixed clean flow alone would be useful engineering evidence but
+not, by itself, a major algorithmic innovation.
+
+## Other inference-causal directions
+
+Ranked after the completed evidence and prior-art audit:
+
+1. **Interaction-residual motion forcing.** Subtract analytic robot flow from
+   target scene flow during training, then generate the uncertain residual for
+   objects, contact, occlusion, and tracking error before RGB. This is the main
+   dual-diffusion hypothesis; raw pixelwise subtraction must be confidence- and
+   occlusion-masked.
+2. **Generated contact/event tokens.** If a dense residual is too hard, predict
+   an 8--32-token state for contacted object/slot, onset/release, attachment,
+   signed displacement, and visibility change. The novelty would be generating
+   the uncertain outcome before RGB, not iMaC-style deterministic proximity or
+   EA-WM-style training supervision. Require action-shuffle sensitivity before
+   generator integration.
+3. **Cross-view 3-D interaction tracks.** Generate a compact, view-consistent
+   object-trajectory state and project it into all three cameras. This may be
+   lower entropy than RGB but carries substantially higher calibration/tracking
+   risk and follows the first two options.
+4. **Confidence-gated no-regret forcing.** Predict per-token auxiliary
+   reliability and train with dropout, shuffling, time shifts, and corruption so
+   unreliable states fall back to the video-only path. This can make a partly
+   useful auxiliary safe, but it cannot manufacture missing information.
+
+Few-step self-/causal-forcing is an acceleration layer after one of these
+mechanisms produces a stronger teacher; it is not a substitute for a causally
+informative state.
 
 ## Phased execution decision
 
 1. Pin official YAM assets; reconstruct D405 top-view timing/intrinsics and pass
    a silhouette/flow alignment gate on train/val only.
-2. Run the dense action-to-flow information gate, including aligned, shuffled,
-   time-shifted, history-only, and latency controls.
-3. Run paired `FLOW-OFF/CAUSAL/SHUFFLED/ORACLE` generator arms at NFE 1/2/4.
-4. If causal flow has an attributed quality gain, port full per-block joint
+2. Render robot-only top-view flow analytically, and require it to beat
+   wrong-calibration/time-shifted controls on observed video before integration.
+3. Only after that gate, run paired `FLOW-OFF/CAUSAL/SHUFFLED/ORACLE` generator
+   arms at NFE 1/2/4; do not use the failed learned dense proxy as the condition.
+4. If analytic causal flow has an attributed quality gain, port full per-block joint
    RGB/flow attention and test the physics-anchored residual state.
 5. Distill only the strongest causal teacher to two/four calls; report complete
    rendering, flow, Wan, and decode latency.

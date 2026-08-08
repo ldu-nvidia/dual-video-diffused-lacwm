@@ -23,6 +23,10 @@ losses have not improved the low-NFE generator. The selected next hypothesis is
 an inference-causal robot-only flow scaffold computed from planned actions,
 robot geometry, and calibrated cameras; its staged gate is specified in
 [`ACTION_DERIVED_FLOW_PROTOCOL.md`](docs/experiments/ACTION_DERIVED_FLOW_PROTOCOL.md).
+After the learned dense-flow proxy failed its strict handoff threshold, the
+selected analytic-flow, stochastic-residual, and few-call generator protocol is
+frozen in
+[`PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md`](docs/experiments/PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md).
 
 The prefix-causal V-JEPA 2 semantic representation screen is complete. It
 learned history-specific scene semantics but failed the frozen temporal and

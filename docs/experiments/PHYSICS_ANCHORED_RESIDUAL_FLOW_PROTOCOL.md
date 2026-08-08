@@ -1,0 +1,198 @@
+# Physics-anchored residual-flow protocol
+
+Date: 2026-08-08
+
+Status: prospective protocol selected after the learned dense-flow Stage-0
+`NO_GO`; no generator-quality claim is made here
+
+## Research question
+
+Can an inference-causal motion state improve low-call action-conditioned video
+generation when clean features of the unknown future video are unavailable?
+
+The proposed factorization is
+
+\[
+u_{robot}=G(q_0,a_{1:T},\mathcal R,\mathcal C),\qquad
+r\sim p_\psi(r\mid h,a,u_{robot}),\qquad
+x\sim p_\theta(x\mid h,a,u_{robot}+r).
+\]
+
+`G` is deterministic kinematic rendering. It supplies only motion implied by
+the known robot, proposed command sequence, and calibrated cameras. The small
+stochastic state `r` represents object motion, contact consequences,
+command-tracking error, and calibration/model residuals. It must be generated
+before RGB and then held fixed. Neither state may read the future target video
+at inference.
+
+The learned ABC dense-flow proxy is not substituted for `G`: it improved dense
+MSE only 2.91% over history and 2.94% over shuffled actions, below both
+preregistered 10% gates. Its positive directional-cosine signal motivates a
+kinematic scaffold but does not make its predicted field clean enough for the
+generator handoff.
+
+## Causal data contract
+
+At the time a candidate trajectory is scored, the allowed inputs are:
+
+- observed RGB history `h` through frame 4;
+- measured current joint state `q0`;
+- the complete proposed action/joint trajectory for the rollout horizon;
+- a versioned robot model, link geometry, camera calibration, and frame graph;
+- train-split statistics and model parameters.
+
+Future RGB, future optical flow extracted from RGB, future executed joint state,
+target V-JEPA/TF features, object masks derived from future RGB, and future
+contact labels are forbidden predictor inputs. They may be training targets or
+explicitly labelled oracle controls only. If commands do not uniquely determine
+future joint state, `G` must propagate command-tracking uncertainty rather than
+replay recorded future states.
+
+Train, development validation, and final lockbox episodes must remain disjoint.
+All transforms, calibration fitting, PCA/codebooks, normalizers, and thresholds
+are fit or frozen without the lockbox.
+
+## Deterministic state construction
+
+For each future time `t`, use forward kinematics and a z-buffered mesh render to
+obtain the visible robot surface point `P_t(p)` and link identity at pixel `p`.
+Transport that same surface point with its link to time `t+1`, project it through
+camera `C`, and define
+
+\[
+u_t(p)=\pi_C(P_{t+1}(p))-p.
+\]
+
+The minimal per-view field contains:
+
+1. signed horizontal displacement `u_x/W`;
+2. signed vertical displacement `u_y/H`;
+3. visibility/validity in `{0,1}`;
+4. normalized depth change `log((z_{t+1}+eps)/(z_t+eps))`.
+
+Occluded, newly revealed, and out-of-frame points are invalid rather than zero
+motion. Keep values signed; HSV flow images and magnitude-only features discard
+direction or introduce a second image codec. Rasterize directly at a modest
+resolution, then area-pool each view independently to the Wan latent grid. For
+the current ABC layout, concatenate the three views only after per-view
+rendering and normalization; never filter across a view seam.
+
+The existing low-cost LACWM seam can project a tensor
+`[B,4,T_lat,H_lat,W_lat]` to Wan tokens with a small Conv3d adapter. Set its
+clock to clean (`sigma_flow=0`), hold the state fixed, predict no flow velocity,
+and keep the RGB transformer-call count unchanged. This is a conditioning
+screen, not yet dual diffusion. A full separate flow-token stream with joint
+self-attention is justified only after the cheap screen passes.
+
+## Gate 0: geometry and timing
+
+Start with the 456 ABC D405 train/validation clips that have all three
+intrinsics, top camera first. Pin the official YAM MJCF/meshes and nominal D405
+transform. Re-extract raw MCAP timestamps and joint trajectories.
+
+On observed transitions, compare the rendered robot mask/flow against image
+evidence using:
+
+- silhouette edge distance and soft mask IoU;
+- signed flow cosine and endpoint error within the rendered mask;
+- correct calibration versus wrong-station calibration;
+- aligned trajectory versus +/-1, +/-2-frame shifts and episode-shuffled
+  trajectories;
+- median and p95 render-to-latent latency.
+
+Proceed only if aligned rendering beats every wrong-calibration and time-shift
+control with a positive paired lower bound and p95 preprocessing is below 20 ms.
+Failure means calibration must be fitted on train data or the dataset changed;
+it does not authorize an RGB generator run.
+
+## Gate 1: fixed causal flow conditioning
+
+Use one parent snapshot, identical data order/noise/optimizer, equal trainable
+parameter count, equal updates, and equal Wan calls. The mandatory arms are:
+
+| Arm | Flow supplied to RGB | Purpose |
+|---|---|---|
+| `FLOW-OFF` | exact masked no-op | video-only reference |
+| `FLOW-CAUSAL` | aligned rendered robot flow | deployable candidate |
+| `FLOW-SHUFFLED` | another episode's marginally matched flow | sample attribution |
+| `FLOW-TIMESHIFT` | same episode, wrong trajectory time | temporal attribution |
+| `FLOW-WRONG-CAL` | deliberately perturbed extrinsic | geometry attribution |
+| `FLOW-ORACLE` | target-video full-scene flow | non-deployable ceiling only |
+
+Evaluate NFE 1/2/4 without spending a transformer call on flow. Register one
+primary endpoint before training. A reasonable development gate is:
+
+- at least 3% improvement in both decoded and temporal MSE, with paired 95%
+  lower bounds above 1%;
+- nonnegative latent-NMSE point effect and lower bound above -1%;
+- `FLOW-CAUSAL` materially better than shuffled, time-shifted, and wrong-cal;
+- causal retention of at least 25% of the oracle improvement;
+- full render + adapter + Wan + decoder latency reported, not model-only time.
+
+FVD/perceptual metrics, long rollouts, and a lockbox are reserved until this
+development gate passes. Reusing val64 makes the current phase exploratory.
+
+## Gate 2: stochastic residual motion
+
+Only after `FLOW-CAUSAL` improves RGB, define a training target from future RGB
+flow:
+
+\[
+r^* = M_{valid}\odot (u_{scene} - u_{robot}).
+\]
+
+Use confidence and occlusion channels so RAFT/Farneback errors are not treated
+as physical residuals. Train a small residual-state flow/consistency model from
+`h,a,u_robot`; future RGB creates `r*` for supervision only. During RGB
+training, progressively replace clean `r*` with stopped, self-generated
+`r_hat`, ending with the inference distribution. This avoids the exact
+oracle-to-autonomous mismatch that invalidated clean V-JEPA/TF conditioning.
+
+Inference is strictly ordered:
+
+1. render `u_robot`;
+2. generate `r_hat` in one or two small-model calls;
+3. freeze `u_robot+r_hat`;
+4. denoise RGB in one, two, or four Wan calls.
+
+Compare generated residuals against zero, train mean, within-episode time shift,
+episode shuffle, and clean oracle residual at the same total call and latency
+budget. Require generated-residual attribution; an oracle-only gain is not a
+deployable result.
+
+## Gate 3: few-call deployment
+
+Distill only a teacher that passed Gate 1 or Gate 2. Train the student on its own
+generated intermediate states (self-forcing/consistency), not only clean teacher
+states. Compare two and four total Wan calls with the same causal scaffold.
+Report:
+
+- latent NMSE, decoded MSE, temporal MSE, perceptual quality, and FVD;
+- action sensitivity and shuffled-action controls;
+- 10th/50th/95th-percentile end-to-end latency and peak memory;
+- long-horizon drift and closed-loop task success under DAgger;
+- latent-only policy latency separately from decoded-video latency.
+
+The operational success condition is 5--10 Hz end-to-end candidate evaluation
+with no material task-success loss, not merely a fast DiT kernel.
+
+## Stop rules and claim boundary
+
+- Do not launch residual diffusion if fixed causal flow does not improve RGB.
+- Do not distill a teacher that is worse than the NFE-1 video-only frontier.
+- Do not call future-RGB flow, V-JEPA, or TF a deployable condition.
+- Do not claim “optical-flow-conditioned video” as the innovation by itself.
+- Do not access the protected lockbox until a mechanism is frozen.
+
+The potentially novel contribution is the factorization of known embodiment
+motion and uncertain contact/object residuals, generated in causal order and
+validated at a few-call closed-loop robotics latency—not flow conditioning in
+isolation. [FlowWAM](https://arxiv.org/html/2607.13017) already covers dual
+RGB/flow modeling and fixed desired-flow world-model conditioning;
+[RealWonder](https://arxiv.org/html/2603.05449) covers physics flow plus a
+four-step video generator; [iMaC](https://arxiv.org/html/2606.09813) covers
+URDF/FK motion and deterministic contact-distance images; and
+[EA-WM](https://arxiv.org/html/2605.06192) covers event-supervised, gated fusion
+of kinematic visual fields. Our claim therefore requires a **generated
+stochastic interaction residual**, clear generated-versus-oracle attribution,
+and measured few-call closed-loop utility.
