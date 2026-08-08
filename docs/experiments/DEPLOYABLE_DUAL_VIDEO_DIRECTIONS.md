@@ -666,6 +666,34 @@ Thus no student was trained. A schedule-masked early-update residual teacher is
 a post-hoc hypothesis requiring a disjoint train-only gate, not a positive
 deployable result. See `PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`.
 
+## Direction 11c: action-conditioned JEPA predictor, not a future encoder
+
+The completed V-JEPA experiments used encoder targets derived from video and
+asked either a learned auxiliary branch or a partial generated video to recover
+them. That is different from the released
+[**V-JEPA 2-AC predictor**](https://arxiv.org/abs/2506.09985). Its input
+is an observed-video embedding plus candidate robot actions, and its output is
+a predicted future embedding. It therefore imports an action-conditioned
+dynamics prior and is available before RGB generation; it does not encode clean
+future frames at inference. The official V-JEPA 2 release includes the ViT-g
+encoder/predictor code and checkpoint, and reports post-training on DROID.
+
+This is a credible external baseline, not automatically our contribution. Its
+first gate should be feature prediction on disjoint ABC/DROID train clips:
+compare aligned actions with zero, episode-shuffled, and time-shifted actions,
+plus an observed-history-only predictor. Require a material sample-specific
+gain before connecting the predicted tokens to Wan. The generator comparison
+then holds Wan calls and trainable parameters fixed across `OFF`, `AC-PRED`,
+`AC-SHUFFLED`, and target-feature `ORACLE`; complete predictor latency counts
+against the 5--10 Hz budget. A Franka/DROID action interface and single-camera
+pretraining do not directly match ABC's multi-morphology, three-view action
+contract, so action remapping and per-view token alignment are explicit risks.
+
+If this predictor is useful, the cleaner dual design is to generate/sample a
+compact action-conditioned interaction hypothesis first and make RGB share that
+hypothesis. It should not be trained to identify the particular held-out future
+when several futures are compatible with the same history and action.
+
 ## Direction 12: per-view low-frequency motion supervision
 
 The joint-view TFREG screen mixed three camera views along the FFT width and had
@@ -702,14 +730,18 @@ training-only two-token motion-loss route, not dense causal motion scaffolds.
    train-only subset, preregister and test a high-noise-update-only teacher; if
    it passes, compare it with off-policy, shuffled, base, and the mandatory
    `PFD-VIDEO` residual-adapter baseline.
-4. Distill only a demonstrably stronger causal flow-conditioned teacher with an
+4. In parallel, screen the released V-JEPA 2-AC predictor as an inference-
+   causal, action-attributed feature prior before attempting another encoder-
+   feature generator; reject it before Wan if aligned actions do not beat
+   shuffled/zero/time-shifted controls.
+5. Distill only a demonstrably stronger causal flow-conditioned teacher with an
    inference-consistent/self-forced objective to two or four calls. The current
    VPM NFE-4 trajectory is worse than NFE 1 and is not a valid teacher.
-5. In parallel, prototype a policy adapter over generated Wan latents and
+6. In parallel, prototype a policy adapter over generated Wan latents and
    measure closed-loop task utility at the observed latent-only p95 latency.
    Optimize or distill the VAE decoder separately if RGB is operationally
    required at 5--10 Hz.
-6. Advance a mechanism to multi-seed DROID and one untouched lockbox only after
+7. Advance a mechanism to multi-seed DROID and one untouched lockbox only after
    it passes action-attribution, latency, and quality gates on development data.
 
 Every comparison must report quality at the same total transformer calls,

@@ -67,6 +67,7 @@ causal transfer, or a demonstrated low-call closed-loop advantage.
 | analytic planned-action robot-only flow | no | strongest next generator-conditioning baseline; not yet evaluated in Wan |
 | physics-anchored stochastic residual flow | no | prospective genuine dual-diffusion extension |
 | privileged teacher to on-policy video-only student | no | NFE-4 all-step gate stopped at 50% favorable units; high-noise update was 64/64 positive and motivates only a fresh early-step gate |
+| V-JEPA 2-AC future-feature predictor | no | released action-conditioned dynamics prior is distinct from the tested encoder/generator; action-attribution screen not yet run |
 | consistency/self-forcing distillation | no auxiliary required | primary speed route after a stronger teacher exists |
 | latent-only policy adapter | no decoded RGB for policy | measured systems fallback near 8.49 rollouts/s p95 |
 
@@ -382,6 +383,18 @@ early-update-only residual teacher is now a post-hoc follow-up and must pass on
 a disjoint train calibration subset before optimization. Exact evidence is in
 `PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`.
 
+A second inference-causal semantic route remains untested and should not be
+conflated with the failed encoder-feature branch. The official V-JEPA 2 release
+includes [**V-JEPA 2-AC**](https://arxiv.org/abs/2506.09985), which predicts
+future embeddings from an observed video embedding and robot actions after
+DROID post-training. That predictor can
+run before RGB and imports learned dynamics; it does not encode an unknown
+future. It should first face an aligned/zero/shuffled/time-shifted action screen
+on disjoint train data. Only a sample-specific predictive gain authorizes a
+matched `OFF/AC-PRED/AC-SHUFFLED/ORACLE` Wan experiment, with predictor latency
+included. The released Franka/DROID, monocular action contract also creates a
+nontrivial remapping risk for ABC's three views and morphologies.
+
 ## Phased execution decision
 
 1. Extend the passing three-clip nominal-YAM diagnostic to train-only
@@ -398,9 +411,11 @@ a disjoint train calibration subset before optimization. Exact evidence is in
    only teacher gate on a disjoint train subset; proceed only if it preserves
    the aligned-over-off and aligned-over-shuffled effect without using
    validation, then compare against the mandatory `PFD-VIDEO` baseline.
-6. Distill only the strongest causal teacher to two/four calls; report complete
+6. In parallel, screen V-JEPA 2-AC predicted future tokens for action
+   specificity before another semantic Wan integration.
+7. Distill only the strongest causal teacher to two/four calls; report complete
    rendering, flow, Wan, and decode latency.
-7. Evaluate multi-seed DROID/ABC lockbox, perceptual/FVD metrics, long rollouts,
+8. Evaluate multi-seed DROID/ABC lockbox, perceptual/FVD metrics, long rollouts,
    and closed-loop DAgger utility. In parallel, test a latent-only policy path
    to avoid the approximately 0.130-second RGB decoder cost.
 
