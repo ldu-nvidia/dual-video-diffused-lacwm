@@ -19,6 +19,16 @@ generated stochastic interaction residual and privileged on-policy transfer to
 a feature-free student, followed—only if either improves a strong teacher—by
 inference-consistent few-step distillation.
 
+The central information constraint is easy to miss. If an autonomous feature
+is sampled from `G(history, action, fresh_noise)` independently of the one
+future realized in a held-out clip, it contains no additional sample-specific
+future information after conditioning on history/action. It may still improve
+generation as a shared sampled hypothesis, an imported physics computation, or
+an optimization scratchpad, but aligned-versus-shuffled and equal-call controls
+must prove that role. A target-video feature has a different advantage because
+it reads the realization; that advantage is oracle-only unless distilled into
+a feature-free causal policy.
+
 ## Completed deployable evidence through 2026-08-08
 
 All results below are one-seed development-validation evidence on the frozen

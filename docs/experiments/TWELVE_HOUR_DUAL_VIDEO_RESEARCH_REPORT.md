@@ -54,6 +54,42 @@ causal transfer, or a demonstrated low-call closed-loop advantage.
 | consistency/self-forcing distillation | no auxiliary required | primary speed route after a stronger teacher exists |
 | latent-only policy adapter | no decoded RGB for policy | measured systems fallback near 8.49 rollouts/s p95 |
 
+## Information boundary: what an autonomous feature can and cannot do
+
+Let `H,A` be observed video/action context, `X` the particular future recorded
+by the dataset, and let an autonomous feature be sampled as
+`U_hat=G(H,A,epsilon)` with fresh randomness independent of that recorded
+future. For paired held-out data,
+
+\[
+I(X;\hat U\mid H,A)=0
+\]
+
+under that independent-sampling contract. `U_hat` can express a plausible
+future, but it cannot identify which irreducible contact/object outcome the
+recording happened to realize. In contrast, an oracle `U*=E(X)` generally has
+positive conditional mutual information precisely because it reads the target;
+that explains both its large upper bound and its deployment failure.
+
+This does not make an autonomous intermediate useless. It can still help in
+four narrower ways:
+
+1. **shared-hypothesis factorization:** sample `U_hat` first and generate RGB
+   from the same hypothesis, so the model's own `U_hat` and `X_hat` are coupled;
+2. **imported causal computation:** render geometry/physics from `H,A` and
+   calibrated embodiment knowledge, replacing a difficult learned action
+   realization map with a deterministic visual interface;
+3. **privileged training:** project a clean-feature teacher's reachable
+   denoising field into a causal student while accepting that irreducible
+   future identity cannot transfer;
+4. **self-conditioning:** deterministically re-express an earlier generated
+   estimate for a later call; this adds no information, so it must win through
+   optimization/inductive bias at equal total compute.
+
+The failed aligned-versus-shuffled autonomous screens show that the tested
+semantic/TF intermediates did not establish the first mechanism. The geometry
+and on-policy-teacher experiments target mechanisms 2 and 3 directly.
+
 ## Controlled evidence
 
 Positive numbers below mean lower error. All are development evidence, not FVD,
