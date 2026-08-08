@@ -1,0 +1,20 @@
+defaults:
+  - dual_explicit_action_dit_vjepa
+  - _self_
+
+_target_: lam.action_variation_conditioned_model.ActionVariationConditionedVPM
+
+# Arm files change only `enabled`. Both arms instantiate and execute the exact
+# same train-whitened delta branch and begin with its scalar gate at zero.
+action_variation:
+  enabled: false
+  stats_path: ${oc.env:ACTION_VARIATION_STATS}
+  expected_stats_sha256: ${oc.env:ACTION_VARIATION_STATS_SHA256}
+  action_dim: 157
+  chunk_size: 5
+  latent_dim: 64
+  morph_dim: 64
+  hidden: 256
+  num_layers: 3
+  clip_value: 8.0
+  initialization_seed: 20260808

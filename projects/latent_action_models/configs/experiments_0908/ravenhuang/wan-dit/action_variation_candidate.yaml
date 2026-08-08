@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /experiments_0908/action_variation_common
+  - _self_
+
+name: action-variation-av-delta-seed1234-u000200
+model:
+  action_variation:
+    enabled: true
+wandb:
+  tags: [abc, vpm, action-variation, candidate, seed-1234]
