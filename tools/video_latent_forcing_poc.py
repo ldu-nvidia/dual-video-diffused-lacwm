@@ -1257,7 +1257,16 @@ class LocalAndOptionalWandbLogger:
             group=None,
             dir=str(run_dir),
             config=_jsonable(config),
-            settings=wandb.Settings(start_method="thread", save_code=False),
+            # A transient W&B upload failure must not pin a distributed worker
+            # indefinitely after its durable local checkpoint and metrics have
+            # already been written.  The SDK preserves any unsent run data on
+            # disk so it can be uploaded later with ``wandb sync``.
+            settings=wandb.Settings(
+                start_method="thread",
+                save_code=False,
+                finish_timeout=120.0,
+                finish_timeout_raises=False,
+            ),
         )
         self._wandb = wandb
 
