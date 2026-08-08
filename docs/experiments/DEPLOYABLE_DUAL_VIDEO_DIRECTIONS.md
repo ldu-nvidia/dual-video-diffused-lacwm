@@ -652,7 +652,8 @@ asymmetric. These precedents make privileged transfer credible but narrow our
 novelty to target-video semantic/TF supervision of on-policy **video** velocity,
 low-NFE generation, and closed-loop attribution.
 
-The exact train-only teacher eligibility gate, five controlled arms, leakage
+The exact train-only teacher eligibility gate, six controlled arms (including
+a mandatory PFD-style video-residual baseline), leakage
 assertions, and development thresholds are frozen in
 `PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`.  It is a
 prospective training-only alternative, not a completed positive result or an

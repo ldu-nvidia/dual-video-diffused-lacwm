@@ -130,10 +130,18 @@ noise, data order, optimizer, updates, inference parameters, and RGB calls.
 | Arm | Training-only teacher | Student rollout | Purpose |
 |---|---|---|---|
 | `BASE` | none | on-policy | incumbent continuation |
+| `PFD-VIDEO` | aligned oracle residual adapter | target-forward-noised states | mandatory current-literature baseline: zero-initialized adapter predicts stopped `v_T-v_S` without on-policy states or reachability gating |
 | `OFFPOLICY-KD` | aligned oracle | target-forward-noised states | distinguishes state-distribution mismatch |
 | `OPD-ALL` | aligned oracle | on-policy | tests unrestricted privileged transfer |
 | `OPD-GATED` | aligned oracle | on-policy | primary reachable-transfer candidate |
 | `OPD-SHUFFLED` | episode-shuffled oracle feature | on-policy | sample-specific teacher attribution |
+
+All six arms must instantiate the same zero-initialized video-velocity adapter
+and matched trainable backbone subset; `BASE` supplies the capacity control.
+`PFD-VIDEO` adapts the released PFD principle from action velocity to video
+velocity and is now required prior art, not our method. If it matches
+`OPD-GATED`, the supported conclusion is that ordinary residual distillation
+suffices; the on-policy/reachability mechanism is not attributed.
 
 `ORACLE-INFER` is an evaluation-only, explicitly nondeployable ceiling.  It
 cannot satisfy a success gate.  Every deployable evaluation hard-asserts that
@@ -148,15 +156,18 @@ Evaluate NFE 1 and 2 on the paired val64 screen.  Positive means lower error.
   lower bounds above 1%;
 - latent NMSE is nonnegative in point estimate with lower bound above -1%;
 - it beats `OPD-SHUFFLED` by at least 1% decoded and temporal MSE;
+- it beats `PFD-VIDEO` by at least 1% decoded and temporal MSE before claiming
+  that student-visited states/reachability add value;
 - aligned-versus-shuffled and aligned-versus-zero action sensitivity does not
   regress relative to `BASE`;
 - the feature-free sampler graph and transformer-call count are byte-audited;
   and
 - complete NFE latency is unchanged within measurement noise.
 
-Compare `OPD-GATED` with `OPD-ALL` to test the central reachability mechanism,
-not just the existence of another loss.  A point-only gain or an oracle-only
-gain is a `NO_GO`, not a reason to tune on val64.
+Compare `OPD-GATED` with both `OPD-ALL` and `PFD-VIDEO` to test the central
+reachability/on-policy mechanism, not just the existence of another loss. A
+point-only gain or an oracle-only gain is a `NO_GO`, not a reason to tune on
+val64.
 
 ## Interpretation and novelty boundary
 

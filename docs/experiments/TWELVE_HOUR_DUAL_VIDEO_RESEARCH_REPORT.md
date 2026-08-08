@@ -347,6 +347,9 @@ plain privileged-to-causal distillation is no longer a novelty claim. A causal
 student also cannot recover irreducible future detail. The exact eligibility
 gate, arms, leakage assertions, and stop rules are frozen in
 `PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`.
+Any student screen must include a parameter-matched PFD-style video-velocity
+residual adapter; `OPD-GATED` must beat it before student-visited states or the
+reachability gate can be claimed as the useful increment.
 
 ## Phased execution decision
 
