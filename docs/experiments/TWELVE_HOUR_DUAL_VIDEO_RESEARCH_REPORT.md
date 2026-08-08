@@ -47,7 +47,9 @@ first pure-noise video update: it beat feature-off on 64/64 train clips there,
 but lost slightly on 64/64 clips at the final low-noise update. Consequently
 the frozen all-step coverage gate failed at 50% versus the required 60%.
 All-step privileged distillation is stopped; an early-update-only residual
-teacher is a new post-hoc hypothesis that requires a disjoint train-only gate.
+teacher was a post-hoc hypothesis and therefore faced a disjoint train-only
+replication. That NFE-2 gate passed on 64/64 fresh clips, authorizing only a
+feature-free student screen—not a quality claim.
 A current literature audit also shows that nominal robot rendering is now an
 important baseline rather than a standalone novelty claim; the publishable
 increment would need generated uncertainty/contact residuals, privileged-to-
@@ -66,7 +68,7 @@ causal transfer, or a demonstrated low-call closed-loop advantage.
 | predicted command-tracking correction | no | strict train512/val64 predictability gate passed; renderer attribution is next, no video claim yet |
 | analytic planned-action robot-only flow | no | strongest next generator-conditioning baseline; not yet evaluated in Wan |
 | physics-anchored stochastic residual flow | no | prospective genuine dual-diffusion extension |
-| privileged teacher to on-policy video-only student | no | NFE-4 all-step gate stopped at 50% favorable units; high-noise update was 64/64 positive and motivates only a fresh early-step gate |
+| privileged teacher to feature-free video student | no | NFE-4 all-step gate stopped at 50%; disjoint NFE-2 high-noise replication passed 64/64 and authorizes a PFD-VIDEO student screen only |
 | V-JEPA 2-AC future-feature predictor | no | released action-conditioned dynamics prior is distinct from the tested encoder/generator; action-attribution screen not yet run |
 | consistency/self-forcing distillation | no auxiliary required | primary speed route after a stronger teacher exists |
 | latent-only policy adapter | no decoded RGB for policy | measured systems fallback near 8.49 rollouts/s p95 |
@@ -128,7 +130,7 @@ long-horizon, protected-test, or closed-loop task claims.
 | confidence gate over midpoint scratchpad | no valid inference confidence was preserved; a forbidden perfect temporal oracle gained only +0.0447% | always-off is the only honest no-regret policy for this auxiliary |
 | nominal D405/YAM geometry | correct-pose Chamfer 8.444 px versus 13.025 px at +4 clip steps; shifted-minus-aligned +4.581 px [3.320, 5.865] | narrow train-only feasibility pass; 3/3 clips positive and render p95 2.769 ms, but no masks, calibrated distortion, flow, or video-generation endpoint |
 | nominal-to-realized tracking residual | aligned standardized MSE 0.3719 versus 0.9316 history, 1.3499 shuffled, 1.1812 raw-command/zero residual, and 14.245 hold-current; gains +60.08%/+72.45%/+68.52%/+97.39% with positive paired intervals | strongest compact inference-causal signal; predicts robot command-tracking error, not object/contact motion, and advances only to corrected-render alignment |
-| privileged on-policy teacher eligibility | aggregate aligned velocity MSE improved 18.00% versus off and 9.68% versus shuffled, but only 64/128 units improved; at video sigma 1 the gain was 90.44% on 64/64 clips, while at sigma 0.0244 it was -1.92% on 0/64 | frozen `STOP`: no student was trained; evidence supports a sample-specific high-noise teacher, not a safe all-step teacher or deployable quality gain |
+| privileged teacher eligibility | NFE-4 aggregate improved 18.00% versus off, but only 64/128 units improved because sigma 1 was +90.44% on 64/64 and sigma 0.0244 was -1.92% on 0/64; a disjoint NFE-2 sigma-1 replication improved 89.95% versus off and 80.02% versus shuffled on 64/64 | all-step `STOP` remains; high-noise teacher is reproducible and eligible for a feature-free residual-student screen, but no student/video gain exists yet |
 
 ## Why image Latent Forcing and these video attempts diverged
 
@@ -379,16 +381,34 @@ aligned V-JEPA improved velocity MSE 90.444% and beat off on 64/64 clips; at the
 last update (`sigma_video=0.024414`) it regressed 1.917% and beat off on 0/64.
 The downstream oracle rollout therefore inherits a large early correction, but
 it remains target-leaking. No student was trained. A schedule-masked,
-early-update-only residual teacher is now a post-hoc follow-up and must pass on
-a disjoint train calibration subset before optimization. Exact evidence is in
+early-update-only residual teacher was selected post hoc and therefore was
+required to pass on a disjoint train calibration subset before optimization.
+Exact NFE-4 evidence is in
 `PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`.
+
+That follow-up has now passed without opening validation. On train indices
+64--127, disjoint by episode from the first 64 clips, the sole NFE-2 video
+update was exactly at `sigma_video=1`. Aligned clean V-JEPA reduced velocity MSE
+from 1.72645 to 0.17352: +89.949% `[89.418,90.463]`, with 64/64 favorable
+units. It also beat episode-shuffled clean V-JEPA by 80.020%
+`[78.233,81.685]`. The target-leaking full rollout improved latent/decoded/
+temporal error 90.03%/79.16%/63.52% over off; those remain oracle ceilings.
+
+This pass has an important attribution consequence. At `sigma_video=1`, no
+video update has yet occurred, so a student-visited state and the ordinary
+pure-noise forward state coincide. The NFE-2 result does not establish an
+on-policy advantage. It authorizes a simple `PFD-VIDEO` teacher-minus-student
+residual baseline, aligned and shuffled variants, and a capacity-matched base.
+Only a feature-free student's held-out improvement can establish deployable
+transfer. The teacher/student velocity distance is still large (mean 1.23269),
+so reachability is unresolved.
 
 A second inference-causal semantic route remains untested and should not be
 conflated with the failed encoder-feature branch. The official V-JEPA 2 release
 includes [**V-JEPA 2-AC**](https://arxiv.org/abs/2506.09985), which predicts
 future embeddings from an observed video embedding and robot actions after
-DROID post-training. That predictor can
-run before RGB and imports learned dynamics; it does not encode an unknown
+DROID post-training. That predictor can run before RGB and imports learned
+dynamics; it does not encode an unknown
 future. It should first face an aligned/zero/shuffled/time-shifted action screen
 on disjoint train data. Only a sample-specific predictive gain authorizes a
 matched `OFF/AC-PRED/AC-SHUFFLED/ORACLE` Wan experiment, with predictor latency
@@ -407,10 +427,10 @@ nontrivial remapping risk for ABC's three views and morphologies.
    arms at NFE 1/2/4; do not use the failed learned dense proxy as the condition.
 4. If analytic causal flow has an attributed quality gain, port full per-block joint
    RGB/flow attention and test the physics-anchored residual state.
-5. Keep all-step privileged distillation stopped. Preregister an early-update-
-   only teacher gate on a disjoint train subset; proceed only if it preserves
-   the aligned-over-off and aligned-over-shuffled effect without using
-   validation, then compare against the mandatory `PFD-VIDEO` baseline.
+5. Keep all-step privileged distillation stopped. The disjoint high-noise gate
+   passed; implement the next controlled feature-free screen with `BASE`,
+   `PFD-VIDEO`, aligned/shuffled residual teachers, and equal capacity/calls.
+   Do not claim an on-policy advantage at the initial pure-noise state.
 6. In parallel, screen V-JEPA 2-AC predicted future tokens for action
    specificity before another semantic Wan integration.
 7. Distill only the strongest causal teacher to two/four calls; report complete

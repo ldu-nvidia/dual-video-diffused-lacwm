@@ -663,8 +663,22 @@ velocity MSE improved 18.004% over off and 9.681% over shuffled, but only
 entire positive coverage occurred at the first pure-noise video update
 (64/64 clips, +90.444%); the final low-noise update regressed 1.917% on 64/64.
 Thus no student was trained. A schedule-masked early-update residual teacher is
-a post-hoc hypothesis requiring a disjoint train-only gate, not a positive
-deployable result. See `PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`.
+a post-hoc hypothesis and therefore required a disjoint train-only gate, not a
+reinterpretation of the all-step result. That replication now passed: at the
+single NFE-2 `sigma_video=1` update on train indices 64--127, aligned V-JEPA
+improved velocity MSE 89.949% `[89.418,90.463]` over off and 80.020%
+`[78.233,81.685]` over shuffled, with 64/64 favorable units. No validation or
+student training was used.
+
+The pass authorizes only a feature-free residual-student screen. Because this
+state is initial pure video noise, it is simultaneously student-visited and an
+ordinary forward-noised state; no on-policy advantage is identifiable here.
+`PFD-VIDEO` is therefore the primary baseline, not merely a control. Compare a
+capacity-matched `BASE`, aligned and shuffled PFD residual adapters, and only
+then a gated variant. The oracle rollout gains are not deployable, and mean
+teacher/student velocity distance 1.23269 leaves reachability open. Exact
+records are in `PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md` and the disjoint
+NFE-2 result document.
 
 ## Direction 11c: action-conditioned JEPA predictor, not a future encoder
 
@@ -726,10 +740,10 @@ training-only two-token motion-loss route, not dense causal motion scaffolds.
 2. Replay planned actions through the robot-only controller, construct analytic
    flow, and run flow-off/aligned/time-shifted/shuffled/oracle conditioning at
    equal Wan calls while reporting end-to-end scaffold cost and RGB quality.
-3. Keep unrestricted all-step privileged distillation stopped. On a disjoint
-   train-only subset, preregister and test a high-noise-update-only teacher; if
-   it passes, compare it with off-policy, shuffled, base, and the mandatory
-   `PFD-VIDEO` residual-adapter baseline.
+3. Keep unrestricted all-step privileged distillation stopped. The disjoint
+   high-noise teacher gate passed; compare a feature-free `PFD-VIDEO` residual
+   student with shuffled-teacher and capacity-matched base arms before adding
+   reachability/on-policy machinery.
 4. In parallel, screen the released V-JEPA 2-AC predictor as an inference-
    causal, action-attributed feature prior before attempting another encoder-
    feature generator; reject it before Wan if aligned actions do not beat
