@@ -30,7 +30,10 @@ fi
 
 # The overlay is first so importing a Wan submodule does not execute VideoX-Fun's
 # eager initializers for unrelated image, audio, and sequence-parallel models.
-export PYTHONPATH="${_lacwm_repo}/tools/env/videox_shim:${VIDEOX_HOME}:${_lacwm_repo}/projects/latent_action_models:${_lacwm_repo}${PYTHONPATH:+:${PYTHONPATH}}"
+# Do not inherit an ambient PYTHONPATH: an otherwise valid package inventory can
+# still be shadowed by arbitrary modules from an exported login-shell path.
+export PYTHONPATH="${_lacwm_repo}/tools/env/videox_shim:${VIDEOX_HOME}:${_lacwm_repo}/projects/latent_action_models:${_lacwm_repo}"
+export PYTHONNOUSERSITE=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"

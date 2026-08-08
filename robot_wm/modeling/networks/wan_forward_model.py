@@ -144,6 +144,9 @@ class WanForwardModel(nn.Module):
         self.intra_forward_stop_gradient = bool(
             intra_forward_config.get("stop_gradient", True)
         )
+        self.intra_forward_history_bins = int(
+            intra_forward_config.get("history_bins", 0)
+        )
         self.profile_intra_forward_latency = False
         if self.dual_diffusion_enabled:
             if self.transformer.control_adapter is not None:
@@ -190,6 +193,11 @@ class WanForwardModel(nn.Module):
                 if not self.intra_forward_stop_gradient:
                     raise ValueError(
                         "the frozen intra-forward screen requires stop_gradient=true"
+                    )
+                if self.intra_forward_history_bins != 2:
+                    raise ValueError(
+                        "the frozen intra-forward screen requires exactly two "
+                        "history-aligned auxiliary bins"
                     )
                 # The intervention is installed as a scoped block hook.  Wan's
                 # non-reentrant checkpoint wrapper would execute block 14 again
@@ -311,9 +319,11 @@ class WanForwardModel(nn.Module):
                 "aligned",
                 "off",
                 "shuffled",
+                "future_shuffled",
             }:
                 raise ValueError(
-                    "intra_forward_condition_source must be aligned, off, or shuffled"
+                    "intra_forward_condition_source must be aligned, off, shuffled, "
+                    "or future_shuffled"
                 )
             # The frozen screen forbids input-level state/clock conditioning.
             # The generated clean estimate first enters after block 14.
@@ -388,6 +398,17 @@ class WanForwardModel(nn.Module):
             source = intra_forward_condition_source
             if source == "shuffled":
                 injected_clean = roll_across_global_batch(generated_clean)
+            elif source == "future_shuffled":
+                history_bins = int(self.intra_forward_history_bins)
+                if not 0 < history_bins < generated_clean.shape[2]:
+                    raise RuntimeError(
+                        "future-only midpoint shuffle requires a nonempty history "
+                        "and future auxiliary partition"
+                    )
+                injected_clean = generated_clean.clone()
+                injected_clean[:, :, history_bins:] = roll_across_global_batch(
+                    generated_clean[:, :, history_bins:]
+                )
             else:
                 injected_clean = generated_clean
             if getattr(self, "intra_forward_stop_gradient", True):

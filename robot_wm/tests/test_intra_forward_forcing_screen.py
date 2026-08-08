@@ -16,7 +16,15 @@ def _registration(study_root: Path) -> dict:
     return screen.identity_payload(
         {
             "schema": screen.SCHEMA,
+            "study_id": study_root.name,
             "study_root": str(study_root),
+            "source": {"commit": "1" * 40},
+            "runtime": {
+                "python": {"path": "/usr/bin/python3"},
+                "wan_dir": "/tmp/wan",
+                "videox_home": "/tmp/videox",
+            },
+            "warm_start": {"sha256": "2" * 64},
             "protected_test": {"allowed": False},
             "architecture": {
                 "wan_block_count": 30,
@@ -25,12 +33,15 @@ def _registration(study_root: Path) -> dict:
                 "additional_wan_calls": 0,
                 "generated_clean_formula": "q0_hat=q_sigma-sigma*v_hat",
                 "generated_clean_stop_gradient": True,
+                "history_preserved_future_shuffle": True,
+                "auxiliary_history_bins": 2,
                 "input_level_auxiliary_state_residual": "exact_zero",
                 "input_level_auxiliary_clock_residual": "exact_zero",
                 "gradient_checkpointing": False,
             },
             "training": {
                 "validation_iterator": dict(screen.TRAIN_VALIDATION_CONTRACT),
+                "update_zero_memory_smoke_required": True,
                 "arms": [asdict(arm) for arm in screen.ARMS],
             },
             "evaluation": {
@@ -43,6 +54,15 @@ def _registration(study_root: Path) -> dict:
                 "teacher_calls": 0,
                 "clean_future_feature_available_to_deployable_sampler": False,
                 "oracle_sources": [],
+                "timing": {
+                    "cuda_synchronize_before_and_after": True,
+                    "records_end_to_end_and_peak_memory": True,
+                    "records_midpoint_head_elapsed": True,
+                    "artifact_audit_batch_size": 2,
+                    "endpoint_timing_batch_size": 1,
+                    "generations_per_two_clip_cell": 3,
+                    "latency_claim_scope": "descriptive_equal_nfe_only",
+                },
             },
             "wandb": {
                 "entity": "zijiandu",
@@ -51,6 +71,55 @@ def _registration(study_root: Path) -> dict:
             },
         }
     )
+
+
+def _write_memory_smoke(study_root: Path, registration: dict) -> dict:
+    runtime = study_root / "memory_smoke_runtime.json"
+    runtime.write_text("{}\n", encoding="utf-8")
+    ranks = [
+        {
+            "rank": rank,
+            "local_rank": rank,
+            "peak_allocated_bytes": 100,
+            "peak_reserved_bytes": 120,
+            "total_memory_bytes": 1000,
+            "finite_loss": True,
+            "finite_gradients": True,
+        }
+        for rank in range(screen.WORLD_SIZE)
+    ]
+    receipt = screen.identity_payload(
+        {
+            "schema": screen.MEMORY_SMOKE_SCHEMA,
+            "status": "pass",
+            "registration_identity_sha256": registration["identity_sha256"],
+            "source_commit": registration["source"]["commit"],
+            "selector": screen.ARMS[1].selector,
+            "world_size": screen.WORLD_SIZE,
+            "synthetic_batch_shapes": {
+                "rgb": [1, 13, 3, 180, 960],
+                "actions": [1, 13, 5, 157],
+                "mask": [1, 13],
+                "morphology_index": [1],
+                "clip_index": [1],
+            },
+            "gradient_checkpointing": False,
+            "forward_completed": True,
+            "backward_completed": True,
+            "optimizer_step_executed": False,
+            "completed_optimizer_updates": 0,
+            "optimizer_state_entries": 0,
+            "runtime_receipt_sha256": screen.sha256_file(runtime),
+            "ranks": ranks,
+            "maximum_peak_allocated_bytes": 100,
+            "minimum_headroom_bytes": 900,
+            "scientific_metrics_emitted": False,
+        }
+    )
+    (study_root / "memory_smoke.json").write_text(
+        json.dumps(receipt), encoding="utf-8"
+    )
+    return receipt
 
 
 def test_frozen_arms_differ_only_by_midpoint_injection_and_have_no_oracle():
@@ -73,7 +142,11 @@ def test_frozen_arms_differ_only_by_midpoint_injection_and_have_no_oracle():
     on_common = {key: value for key, value in asdict(on).items() if key not in ignored}
     assert off_common == on_common
     assert screen.NFE_GRID == [1, 2, 4]
-    assert screen.SOURCES == ["autonomous", "off", "autonomous_shuffled"]
+    assert screen.SOURCES == [
+        "autonomous",
+        "off",
+        "autonomous_future_shuffled",
+    ]
     assert screen.SOURCES == screen.DEPLOYABLE_SOURCES
     assert not any("oracle" in source for source in screen.SOURCES)
 
@@ -94,6 +167,124 @@ def test_self_signed_registration_cannot_enable_oracle(tmp_path):
         screen.load_registration(path, verify_files=False)
 
 
+def test_memory_smoke_requires_backward_without_optimizer_update(tmp_path):
+    registration = _registration(tmp_path)
+    receipt = _write_memory_smoke(tmp_path, registration)
+    assert screen.validate_memory_smoke(registration)["status"] == "pass"
+
+    receipt.pop("identity_sha256")
+    receipt["optimizer_step_executed"] = True
+    (tmp_path / "memory_smoke.json").write_text(
+        json.dumps(screen.identity_payload(receipt)), encoding="utf-8"
+    )
+    with pytest.raises(screen.ContractError, match="memory smoke contract"):
+        screen.validate_memory_smoke(registration)
+
+
+def test_training_content_binds_full_config_and_rejects_tamper(
+    tmp_path, monkeypatch
+):
+    registration = _registration(tmp_path)
+    registration_path = tmp_path / "protocol_registration.json"
+    registration_path.write_text(json.dumps(registration), encoding="utf-8")
+    _write_memory_smoke(tmp_path, registration)
+    arm = screen.ARMS[0]
+    run_dir = tmp_path / "runs" / arm.slug
+    (run_dir / ".hydra").mkdir(parents=True)
+    manifest = screen.identity_payload(
+        {
+            "schema": screen.ARM_SCHEMA,
+            "registration_identity_sha256": registration["identity_sha256"],
+            "array_task_id": 0,
+            "arm": asdict(arm),
+        }
+    )
+    (run_dir / "arm_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    initialization = screen.identity_payload(
+        {
+            "schema": screen.INITIALIZATION_MATCH_SCHEMA,
+            "registration_identity_sha256": registration["identity_sha256"],
+            "arm": arm.code,
+            "arm_identity_sha256": manifest["identity_sha256"],
+            "exact_match": True,
+        }
+    )
+    (run_dir / "initialization_match.json").write_text(
+        json.dumps(initialization), encoding="utf-8"
+    )
+    snapshot = run_dir / "snapshot.pt"
+    snapshot.write_bytes(b"checkpoint-bytes")
+    (run_dir / ".hydra/config.yaml").write_text("seed: 1234\n", encoding="utf-8")
+    resolved_config = {
+        "seed": screen.SEED,
+        "name": f"{registration['study_id']}-{arm.code}",
+        "trainer": {"config": {"max_iter": screen.TRAIN_UPDATES}},
+        "model": {
+            "dual_diffusion": {
+                "condition_mode": arm.condition_mode,
+                "condition_on_tf": arm.condition_on_state,
+                "intra_forward_forcing": {
+                    "history_bins": screen.AUXILIARY_HISTORY_BINS
+                },
+            }
+        },
+        "wandb": {
+            "entity": screen.WANDB_ENTITY,
+            "project": screen.WANDB_PROJECT,
+            "group": None,
+            "id": manifest["identity_sha256"],
+        },
+    }
+    resolved_path = run_dir / "resolved_config.json"
+    resolved_path.write_text(json.dumps(resolved_config), encoding="utf-8")
+    runtime_path = run_dir / "runtime.json"
+    runtime_path.write_text("{}\n", encoding="utf-8")
+    completion = {
+        "schema_version": 1,
+        "status": "completed",
+        "completed_updates": screen.TRAIN_UPDATES,
+        "max_iter": screen.TRAIN_UPDATES,
+        "run_identity_sha256": manifest["identity_sha256"],
+        "snapshot": str(snapshot.resolve()),
+        "wandb_run_id": manifest["identity_sha256"],
+        "wandb_training_status": "completed",
+        "source_commit": registration["source"]["commit"],
+        "registration_identity_sha256": registration["identity_sha256"],
+        "warm_start_sha256": registration["warm_start"]["sha256"],
+        "runtime_receipt_sha256": screen.sha256_file(runtime_path),
+        "resolved_config_sha256": screen.sha256_file(resolved_path),
+    }
+    (run_dir / "training_complete.json").write_text(
+        json.dumps(completion), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        screen,
+        "validate_runtime_receipt",
+        lambda path, _registration, label: {
+            "path": str(path),
+            "sha256": screen.sha256_file(path),
+        },
+    )
+    args = type(
+        "Args",
+        (),
+        {
+            "registration": registration_path,
+            "array_task_id": 0,
+            "run_dir": run_dir,
+        },
+    )()
+    assert screen.command_bind_training_output(args) == 0
+    content = screen.validate_training_content(registration, arm, run_dir)
+    assert content["resolved_config"]["sha256"] == screen.sha256_file(resolved_path)
+
+    resolved_path.write_text(json.dumps({**resolved_config, "seed": 999}), encoding="utf-8")
+    with pytest.raises(screen.ContractError, match="resolved_config changed"):
+        screen.validate_training_content(registration, arm, run_dir)
+
+
 def test_resolved_configs_bind_midpoint_seam_and_exact_val64():
     common = OmegaConf.load(screen.COMMON_CONFIG)
     model = OmegaConf.load(screen.MODEL_CONFIG)
@@ -102,6 +293,7 @@ def test_resolved_configs_bind_midpoint_seam_and_exact_val64():
         "enabled": True,
         "block_index": 14,
         "stop_gradient": True,
+        "history_bins": 2,
     }
     assert list(model.dual_diffusion.evaluation_nfe_steps) == screen.NFE_GRID
     assert list(model.dual_diffusion.evaluation_condition_sources) == screen.SOURCES
@@ -205,6 +397,11 @@ def _write_evaluation_grid(
     output.mkdir(parents=True)
     rows_path = output / "rows.jsonl"
     rows = []
+    snapshot_sha256 = ("a" if arm.code == "MID-OFF" else "b") * 64
+    config_sha256 = ("e" if arm.code == "MID-OFF" else "f") * 64
+    content_identity = ("7" if arm.code == "MID-OFF" else "8") * 64
+    runtime_sha256 = "9" * 64
+    hydra_config_sha256 = "0" * 64
     for source in screen.SOURCES:
         for nfe in screen.NFE_GRID:
             for clip in range(screen.EXPECTED_VALIDATION_CLIPS):
@@ -238,14 +435,16 @@ def _write_evaluation_grid(
                     "timed_midpoint_head_calls": nfe,
                     "timed_midpoint_block_calls": nfe,
                     "extra_wan_calls": 0,
-                    "evaluation_generations_per_cell": 2,
-                    "total_evaluation_wan_calls": 2 * nfe,
+                    "evaluation_generations_per_cell": 3,
+                    "audit_batch_size": 2,
+                    "timed_batch_size": 1,
+                    "total_evaluation_wan_calls": 3 * nfe,
                     "wan_block_count": 30,
                     "midpoint_block_index": 14,
                     "midpoint_condition_source": {
                         "autonomous": "aligned",
                         "off": "off",
-                        "autonomous_shuffled": "shuffled",
+                        "autonomous_future_shuffled": "future_shuffled",
                     }[source],
                     "generated_clean_stop_gradient": True,
                     "sampler_transform_calls": 0,
@@ -271,7 +470,12 @@ def _write_evaluation_grid(
                         else f"{clip + 8000 + 100 * screen.SOURCES.index(source):064x}"
                     ),
                     "raw_target_sha256": f"{clip + 6000:064x}",
-                    "snapshot_sha256": ("a" if arm.code == "MID-OFF" else "b") * 64,
+                    "snapshot_sha256": snapshot_sha256,
+                    "hydra_config_sha256": hydra_config_sha256,
+                    "resolved_config_sha256": config_sha256,
+                    "training_content_identity_sha256": content_identity,
+                    "training_runtime_sha256": runtime_sha256,
+                    "evaluation_runtime_sha256": runtime_sha256,
                     "initialization_match_identity_sha256": match_identity,
                     "history_encode_latency_ms": 1.0,
                     "wan_latency_ms": float(nfe * 10),
@@ -301,7 +505,12 @@ def _write_evaluation_grid(
             "sources": screen.SOURCES,
             "world_size": screen.WORLD_SIZE,
             "rows_sha256": screen.sha256_file(rows_path),
-            "snapshot_sha256": ("a" if arm.code == "MID-OFF" else "b") * 64,
+            "snapshot_sha256": snapshot_sha256,
+            "hydra_config_sha256": hydra_config_sha256,
+            "resolved_config_sha256": config_sha256,
+            "training_content_identity_sha256": content_identity,
+            "training_runtime_sha256": runtime_sha256,
+            "evaluation_runtime_sha256": runtime_sha256,
             "initialization_match_identity_sha256": match_identity,
             "protected_test_accessed": False,
         }
@@ -311,7 +520,7 @@ def _write_evaluation_grid(
 
 
 def test_analyzer_requires_all_three_nfe1_references_and_passes_clean_grid(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     registration = _registration(tmp_path)
     registration_path = tmp_path / "registration.json"
@@ -338,6 +547,7 @@ def test_analyzer_requires_all_three_nfe1_references_and_passes_clean_grid(
         json.dumps(anchor), encoding="utf-8"
     )
     paths = []
+    content_by_arm = {}
     for arm in screen.ARMS:
         run_dir = tmp_path / "runs" / arm.slug
         run_dir.mkdir(parents=True)
@@ -357,6 +567,17 @@ def test_analyzer_requires_all_three_nfe1_references_and_passes_clean_grid(
         (run_dir / "initialization_match.json").write_text(
             json.dumps(match), encoding="utf-8"
         )
+        content_by_arm[arm.code] = {
+            "identity_sha256": ("7" if arm.code == "MID-OFF" else "8") * 64,
+            "snapshot": {
+                "sha256": ("a" if arm.code == "MID-OFF" else "b") * 64
+            },
+            "hydra_config": {"sha256": "0" * 64},
+            "resolved_config": {
+                "sha256": ("e" if arm.code == "MID-OFF" else "f") * 64
+            },
+            "training_runtime": {"sha256": "9" * 64},
+        }
         paths.append(
             _write_evaluation_grid(
                 tmp_path,
@@ -366,6 +587,13 @@ def test_analyzer_requires_all_three_nfe1_references_and_passes_clean_grid(
                 match["identity_sha256"],
             )
         )
+    monkeypatch.setattr(
+        screen,
+        "validate_training_content",
+        lambda _registration, arm, _run_dir, verify_files=True: content_by_arm[
+            arm.code
+        ],
+    )
     output = tmp_path / "analysis.json"
     args = type(
         "Args",
@@ -381,19 +609,23 @@ def test_analyzer_requires_all_three_nfe1_references_and_passes_clean_grid(
     analysis = json.loads(output.read_text(encoding="utf-8"))
     assert analysis["decision"]["passes"] is True
     assert len(analysis["decision"]["comparisons"]) == 3
-    assert analysis["conclusion"] == "pass_one_call_intra_forward_forcing_screen"
+    assert analysis["conclusion"] == "pass_one_call_future_scratchpad_forcing_screen"
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        screen.TRAIN_SBATCH,
-        screen.EVALUATE_SBATCH,
-    ],
-)
-def test_launchers_are_two_arm_fail_closed_and_never_reference_test(path):
-    source = path.read_text(encoding="utf-8")
-    assert "--array=0-1" in source
-    assert "gradient_checkpointing=false" in source or path == screen.EVALUATE_SBATCH
-    assert "TEST_" not in source
-    assert "/mnt/data2/" not in source
+def test_launchers_use_explicit_dependencies_and_never_reference_test():
+    training = screen.TRAIN_SBATCH.read_text(encoding="utf-8")
+    evaluation = screen.EVALUATE_SBATCH.read_text(encoding="utf-8")
+    submit = screen.SUBMIT_SCRIPT.read_text(encoding="utf-8")
+    memory = screen.MEMORY_SMOKE_SBATCH.read_text(encoding="utf-8")
+    assert "#SBATCH --array=" not in training
+    assert "gradient_checkpointing=false" in training
+    assert '"+wandb.id=$ARM_ID"' in training
+    assert "LACWM_REQUIRE_PROVENANCE=1" in training
+    assert "bind-training-output" in training
+    assert "--array=0 --dependency=\"afterok:$memory_job\"" in submit
+    assert "--array=1 --dependency=\"afterok:$off_job\"" in submit
+    assert "--array=0-1%2 --dependency=\"afterok:$on_job\"" in submit
+    assert "verify_b200_runtime.py" in evaluation
+    assert "smoke_intra_forward_memory.py" in memory
+    for source in (training, evaluation, submit, memory):
+        assert "TEST_" not in source

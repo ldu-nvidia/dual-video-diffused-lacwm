@@ -10,9 +10,9 @@
 #SBATCH --account=coreai_chef_posttrain
 #SBATCH --qos=short
 #SBATCH --exclude=pool0-0081,pool0-0089
-# MID-OFF establishes the immutable update-zero byte anchor; MID-ON verifies it
-# before training.  Sequential array execution makes that ordering fail closed.
-#SBATCH --array=0-1%1
+# Submit this entrypoint only through submit_intra_forward_forcing_screen.sh.
+# That wrapper creates separate task-0/task-1 jobs with an afterok dependency;
+# Slurm array throttling does not guarantee task-index execution order.
 #SBATCH --output=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train/artifacts/dual_video_diffusion/intra_forward_forcing/_slurm_logs/train-%A_%a.out
 #SBATCH --error=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train/artifacts/dual_video_diffusion/intra_forward_forcing/_slurm_logs/train-%A_%a.err
 #SBATCH --open-mode=append
@@ -68,6 +68,8 @@ IFS='|' read -r \
 
 "$PYTHON_BIN" "$BOOTSTRAP_HELPER" verify \
   --registration "$MID_SCREEN_REGISTRATION" >/dev/null
+"$PYTHON_BIN" "$BOOTSTRAP_HELPER" verify-memory-smoke \
+  --registration "$MID_SCREEN_REGISTRATION" >/dev/null
 
 IFS='|' read -r \
   ARM_CODE ARM_SLUG CONFIG_SELECTOR CONDITION_MODE CONDITION_ON_STATE \
@@ -77,7 +79,7 @@ IFS='|' read -r \
     "$PYTHON_BIN" "$BOOTSTRAP_HELPER" arm \
       --array-task-id "$SLURM_ARRAY_TASK_ID" --format pipe
   )
-RUN_ID="$(basename "$STUDY_ROOT")-${ARM_CODE}"
+RUN_NAME="$(basename "$STUDY_ROOT")-${ARM_CODE}"
 RUN_DIR="$STUDY_ROOT/runs/$ARM_SLUG"
 "$PYTHON_BIN" "$BOOTSTRAP_HELPER" bind-arm \
   --registration "$MID_SCREEN_REGISTRATION" \
@@ -102,6 +104,9 @@ WARMSTART_PREFLIGHT="$BOOTSTRAP_REPO/tools/validate_intra_forward_warmstart.py"
 # come from the immutable cluster registration, never its workstation defaults.
 export WAN_DIR="$WAN_DIR_VALUE"
 export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
+export LACWM_PYTHON="$PYTHON_BIN"
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
 source "$ACTIVATE"
 
 export MID_WARM_START="$WARMSTART"
@@ -113,6 +118,12 @@ export MID_RUN_ROOT="$STUDY_ROOT/runs"
 export MID_CLIP_MANIFEST="$TRAIN_MANIFEST"
 export MID_CACHE_METADATA="$TRAIN_METADATA"
 export LACWM_RUN_IDENTITY_SHA256="$ARM_ID"
+export LACWM_SOURCE_COMMIT="$EXPECTED_COMMIT"
+export LACWM_REGISTRATION_IDENTITY_SHA256="$REGISTRATION_ID"
+export LACWM_WARM_START_SHA256="$($PYTHON_BIN -c 'import json,sys; print(json.load(open(sys.argv[1]))["warm_start"]["sha256"])' "$MID_SCREEN_REGISTRATION")"
+export LACWM_STRICT_MODEL_ONLY_LOAD=1
+export LACWM_REQUIRE_PROVENANCE=1
+export LACWM_RESOLVED_CONFIG_PATH="$RUN_DIR/resolved_config.json"
 export LACWM_NNODES=1
 export LACWM_WORLD_SIZE=8
 export LACWM_GPUS_PER_NODE=8
@@ -139,6 +150,7 @@ export TMPDIR="$IPC_TMPDIR"
 "$PYTHON_BIN" "$VERIFY_RUNTIME" \
   --expected-gpus 8 --require-b200 --wan-dir "$WAN_DIR_VALUE" \
   > "$RUN_DIR/runtime.json"
+export LACWM_RUNTIME_RECEIPT_SHA256="$($PYTHON_BIN -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$RUN_DIR/runtime.json")"
 
 "$PYTHON_BIN" "$WARMSTART_PREFLIGHT" \
   --registration "$MID_SCREEN_REGISTRATION" \
@@ -158,7 +170,7 @@ cd "$PROJECT_ROOT"
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone --nproc_per_node=8 train.py \
   "+experiments_0908=$CONFIG_SELECTOR" \
-  "name=$RUN_ID" \
+  "name=$RUN_NAME" \
   "seed=1234" \
   "trainer.config.load_path=$WARMSTART" \
   "trainer.config.max_iter=200" \
@@ -181,9 +193,15 @@ cd "$PROJECT_ROOT"
   "wandb.mode=online" \
   "wandb.entity=zijiandu" \
   "wandb.project=dual-video-diffusion-private" \
-  "+wandb.id=$RUN_ID" \
-  "+wandb.group=null" \
+  "+wandb.id=$ARM_ID" \
+  "wandb.group=null" \
   "+wandb.resume=never"
 
 [[ -f "$RUN_DIR/snapshot.pt" && -f "$RUN_DIR/training_complete.json" ]] || \
   die "training returned without its final snapshot/receipt"
+"$PYTHON_BIN" "$BOOTSTRAP_HELPER" bind-training-output \
+  --registration "$MID_SCREEN_REGISTRATION" \
+  --array-task-id "$SLURM_ARRAY_TASK_ID" \
+  --run-dir "$RUN_DIR" >/dev/null
+[[ -f "$RUN_DIR/training_content.json" ]] || \
+  die "training output was not content-bound"

@@ -45,6 +45,7 @@ EVALUATION_CONDITION_SOURCES = (
     "oracle_matched",
     "oracle_shuffled",
     "autonomous_shuffled",
+    "autonomous_future_shuffled",
 )
 EVALUATION_CONDITION_SOURCE_CODES = {
     source: index
@@ -191,7 +192,13 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         if bool(
             getattr(self.forward_model, "intra_forward_forcing_enabled", False)
         ) and any(
-            source not in {"autonomous", "off", "autonomous_shuffled"}
+            source
+            not in {
+                "autonomous",
+                "off",
+                "autonomous_shuffled",
+                "autonomous_future_shuffled",
+            }
             for source in self.evaluation_condition_sources
         ):
             raise ValueError(
@@ -913,7 +920,8 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         if (
             self.tf_schedule_mode == "tf_first_cascaded"
             and step_index < tf_only_steps
-            and condition_source in {"off", "autonomous_shuffled"}
+            and condition_source
+            in {"off", "autonomous_shuffled", "autonomous_future_shuffled"}
         ):
             return "autonomous"
         return condition_source
@@ -924,6 +932,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
         mapping = {
             "autonomous": "aligned",
             "autonomous_shuffled": "shuffled",
+            "autonomous_future_shuffled": "future_shuffled",
             "off": "off",
         }
         try:
@@ -1213,6 +1222,7 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                 "autonomous",
                 "off",
                 "autonomous_shuffled",
+                "autonomous_future_shuffled",
             }
             if nondeployable_sources:
                 raise ValueError(
@@ -1573,13 +1583,13 @@ class DualExplicitActionDiTModel(ExplicitActionDiTModel):
                     if effective_condition_source in {
                         "autonomous",
                         "autonomous_shuffled",
+                        "autonomous_future_shuffled",
                     }:
-                        # ``autonomous_shuffled`` is an evaluation-only,
-                        # same-checkpoint intervention.  It never reads
-                        # ``tf_clean``: at every call it keeps this sample's
-                        # corruption noise and observed history, while rolling
-                        # only the generated, noise-subtracted future residual
-                        # across the effective global batch.
+                        # The autonomous shuffle sources are evaluation-only,
+                        # same-checkpoint interventions and never read
+                        # ``tf_clean``. For intra-forward forcing, the midpoint
+                        # hook owns the exact full-state versus future-only
+                        # shuffle boundary.
                         #
                         # Keep the historical ``autonomous`` path byte-for-byte
                         # equivalent when the new source is not requested.

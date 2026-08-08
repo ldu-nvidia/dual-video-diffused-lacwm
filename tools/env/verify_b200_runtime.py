@@ -180,6 +180,18 @@ def main() -> int:
         raise RuntimeError(
             f"expected Python 3.10.20, got {sys.version.split()[0]}"
         )
+    expected_python = os.environ.get("LACWM_PYTHON")
+    if (
+        not expected_python
+        or Path(expected_python).resolve(strict=True)
+        != Path(sys.executable).resolve(strict=True)
+    ):
+        raise RuntimeError(
+            "LACWM_PYTHON does not resolve to the running interpreter: "
+            f"configured={expected_python!r}, running={sys.executable!r}"
+        )
+    if os.environ.get("PYTHONNOUSERSITE") != "1":
+        raise RuntimeError("PYTHONNOUSERSITE must be exactly 1")
 
     import accelerate
     import decord
@@ -241,8 +253,47 @@ def main() -> int:
     if videox_status:
         raise RuntimeError(f"pinned VideoX-Fun checkout is dirty: {videox_status}")
 
+    expected_pythonpath = [
+        REPO_ROOT / "tools/env/videox_shim",
+        videox_home,
+        REPO_ROOT / "projects/latent_action_models",
+        REPO_ROOT,
+    ]
+    observed_pythonpath = [
+        Path(value).resolve(strict=True)
+        for value in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if value
+    ]
+    if observed_pythonpath != [path.resolve(strict=True) for path in expected_pythonpath]:
+        raise RuntimeError(
+            "PYTHONPATH is not the exact source-bound runtime prefix: "
+            f"observed={observed_pythonpath}, expected={expected_pythonpath}"
+        )
+
     from videox_fun.models.wan_transformer3d import WanTransformer3DModel
     from videox_fun.models.wan_vae import AutoencoderKLWan
+    import lam
+    import robot_wm
+
+    source_paths = {
+        "robot_wm": str(Path(robot_wm.__file__).resolve(strict=True)),
+        "lam": str(Path(lam.__file__).resolve(strict=True)),
+        "wan_transformer": str(
+            Path(inspect.getfile(WanTransformer3DModel)).resolve(strict=True)
+        ),
+        "wan_vae": str(Path(inspect.getfile(AutoencoderKLWan)).resolve(strict=True)),
+    }
+    expected_source_roots = {
+        "robot_wm": REPO_ROOT,
+        "lam": REPO_ROOT / "projects/latent_action_models",
+        "wan_transformer": videox_home,
+        "wan_vae": videox_home,
+    }
+    for name, value in source_paths.items():
+        path = Path(value)
+        root = expected_source_roots[name].resolve(strict=True)
+        if path != root and root not in path.parents:
+            raise RuntimeError(f"{name} imported outside its bound source root: {path}")
 
     load_sig = inspect.signature(WanTransformer3DModel.from_pretrained)
     required_load = {
@@ -395,6 +446,8 @@ def main() -> int:
                 "packages": versions,
                 "distributions": distribution_versions,
                 "environment": environment_status,
+                "python_no_user_site": True,
+                "source_paths": source_paths,
                 "videox_commit": actual_commit,
                 "videox_status": "clean",
                 "wan_loader": str(load_sig),

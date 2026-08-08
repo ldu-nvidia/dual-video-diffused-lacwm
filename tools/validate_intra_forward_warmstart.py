@@ -191,6 +191,7 @@ def run(args: argparse.Namespace) -> int:
             "enabled": True,
             "block_index": contract.MIDPOINT_BLOCK_INDEX,
             "stop_gradient": True,
+            "history_bins": contract.AUXILIARY_HISTORY_BINS,
         }
         or bool(config.model.forward_model.gradient_checkpointing)
     ):
@@ -253,6 +254,8 @@ def run(args: argparse.Namespace) -> int:
         or model.forward_model.intra_forward_block_index
         != contract.MIDPOINT_BLOCK_INDEX
         or model.forward_model.intra_forward_stop_gradient is not True
+        or model.forward_model.intra_forward_history_bins
+        != contract.AUXILIARY_HISTORY_BINS
     ):
         raise PreflightError("instantiated intra-forward seam changed")
     current = model.state_dict()

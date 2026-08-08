@@ -132,6 +132,8 @@ def _validate_completion_receipt(
     *,
     snapshot_path: Path,
     arm_identity_sha256: str,
+    registration: Mapping[str, Any],
+    training_content: Mapping[str, Any],
 ) -> None:
     """Require the trainer's final, identity-bound completion receipt.
 
@@ -146,6 +148,13 @@ def _validate_completion_receipt(
         "max_iter": contract.TRAIN_UPDATES,
         "run_identity_sha256": arm_identity_sha256,
         "snapshot": str(snapshot_path),
+        "wandb_run_id": arm_identity_sha256,
+        "wandb_training_status": "completed",
+        "source_commit": registration["source"]["commit"],
+        "registration_identity_sha256": registration["identity_sha256"],
+        "warm_start_sha256": registration["warm_start"]["sha256"],
+        "runtime_receipt_sha256": training_content["training_runtime"]["sha256"],
+        "resolved_config_sha256": training_content["resolved_config"]["sha256"],
     }
     mismatches = {
         key: {"observed": receipt.get(key), "expected": value}
@@ -198,6 +207,7 @@ def _validate_config(config: Any, arm: contract.Arm) -> None:
             "enabled": True,
             "block_index": contract.MIDPOINT_BLOCK_INDEX,
             "stop_gradient": True,
+            "history_bins": contract.AUXILIARY_HISTORY_BINS,
         }
         or bool(model["forward_model"].get("gradient_checkpointing", True))
         or int(config.trainer.config.max_iter) != contract.TRAIN_UPDATES
@@ -267,6 +277,37 @@ def _load_arm_inputs(args: argparse.Namespace, rank: int) -> dict[str, Any]:
     expected_run = Path(registration["study_root"]) / "runs" / arm.slug
     if args.run_dir != expected_run:
         raise EvaluationError(f"run directory must be {expected_run}")
+    try:
+        training_content = contract.validate_training_content(
+            registration,
+            arm,
+            args.run_dir,
+            verify_files=(rank == 0),
+        )
+    except contract.ContractError as exc:
+        raise EvaluationError(str(exc)) from exc
+    evaluation_runtime_value = os.environ.get("MID_EVAL_RUNTIME_RECEIPT")
+    expected_evaluation_runtime = args.run_dir / "evaluation_runtime.json"
+    if (
+        not evaluation_runtime_value
+        or Path(evaluation_runtime_value) != expected_evaluation_runtime
+    ):
+        raise EvaluationError(
+            "MID_EVAL_RUNTIME_RECEIPT must identify the canonical arm runtime receipt"
+        )
+    try:
+        evaluation_runtime = contract.validate_runtime_receipt(
+            expected_evaluation_runtime,
+            registration,
+            label="evaluation runtime",
+        )
+    except contract.ContractError as exc:
+        raise EvaluationError(str(exc)) from exc
+    if (
+        evaluation_runtime["sha256"]
+        != training_content["training_runtime"]["sha256"]
+    ):
+        raise EvaluationError("training and evaluation B200 runtime receipts differ")
     arm_manifest_path = _canonical_file(
         args.run_dir / "arm_manifest.json", "arm manifest"
     )
@@ -294,6 +335,8 @@ def _load_arm_inputs(args: argparse.Namespace, rank: int) -> dict[str, Any]:
         completion,
         snapshot_path=snapshot_path,
         arm_identity_sha256=arm_manifest["identity_sha256"],
+        registration=registration,
+        training_content=training_content,
     )
     initialization_match_path = _canonical_file(
         args.run_dir / "initialization_match.json", "initialization match"
@@ -318,7 +361,11 @@ def _load_arm_inputs(args: argparse.Namespace, rank: int) -> dict[str, Any]:
         "snapshot": snapshot_path,
         "completion": completion,
         "initialization_match": initialization_match,
-        "snapshot_sha256": (contract.sha256_file(snapshot_path) if rank == 0 else None),
+        "training_content": training_content,
+        "evaluation_runtime": evaluation_runtime,
+        "snapshot_sha256": training_content["snapshot"]["sha256"],
+        "hydra_config_sha256": training_content["hydra_config"]["sha256"],
+        "resolved_config_sha256": training_content["resolved_config"]["sha256"],
     }
 
 
@@ -354,6 +401,8 @@ def _load_model_dataset(inputs: Mapping[str, Any], device: Any):
         or model.forward_model.intra_forward_block_index
         != contract.MIDPOINT_BLOCK_INDEX
         or model.forward_model.intra_forward_stop_gradient is not True
+        or model.forward_model.intra_forward_history_bins
+        != contract.AUXILIARY_HISTORY_BINS
         or len(model.forward_model.transformer.blocks) != contract.WAN_BLOCK_COUNT
         or bool(model.forward_model.transformer.gradient_checkpointing)
     ):
@@ -504,7 +553,9 @@ def _sample_cell(
     if source not in contract.DEPLOYABLE_SOURCES:
         raise EvaluationError("intra-forward evaluation forbids oracle sources")
 
-    def invoke(*, collect_artifacts: bool, profile: bool):
+    def invoke(
+        input_batch: Mapping[str, Any], *, collect_artifacts: bool, profile: bool
+    ):
         counts = {"wan": 0, "head": 0, "block": 0, "transform": 0}
 
         def increment(name):
@@ -531,11 +582,11 @@ def _sample_cell(
                 device_type="cuda", dtype=torch.bfloat16, enabled=True
             ):
                 predicted = model.sample_future_deployable(
-                    batch["rgb"][:, : model.num_history_frames],
-                    batch["actions"],
-                    batch.get("morphology_index"),
+                    input_batch["rgb"][:, : model.num_history_frames],
+                    input_batch["actions"],
+                    input_batch.get("morphology_index"),
                     collect_artifacts=collect_artifacts,
-                    sample_ids=batch["clip_index"],
+                    sample_ids=input_batch["clip_index"],
                 )
         finally:
             model.profile_sampling_stages = False
@@ -544,44 +595,71 @@ def _sample_cell(
                 handle.remove()
         return predicted, counts
 
-    _audit_prediction, audit_counts = invoke(collect_artifacts=True, profile=False)
+    _audit_prediction, audit_counts = invoke(
+        batch, collect_artifacts=True, profile=False
+    )
     artifacts = model.pop_visualization_artifacts()
     if not isinstance(artifacts, Mapping):
         raise EvaluationError("sampler did not expose audit artifacts")
     if audit_counts["transform"] != 0:
         raise EvaluationError("sampler invoked the clean frequency transform")
     del _audit_prediction
-    torch.cuda.synchronize(batch["rgb"].device)
-    torch.cuda.reset_peak_memory_stats(batch["rgb"].device)
-    timed_started_ns = time.perf_counter_ns()
-    timed_prediction, timed_counts = invoke(collect_artifacts=False, profile=True)
-    torch.cuda.synchronize(batch["rgb"].device)
-    timed_end_to_end_latency_ms = (
-        time.perf_counter_ns() - timed_started_ns
-    ) / 1_000_000.0
-    peak_memory = int(torch.cuda.max_memory_allocated(batch["rgb"].device))
-    profile = getattr(model, "_last_sampling_profile", None)
-    if not isinstance(profile, Mapping):
-        raise EvaluationError("timed sampler did not expose its stage profile")
-    if profile.get("condition_source") != source or profile.get("nfe") != nfe:
-        raise EvaluationError("timed sampler profile is labelled for another cell")
-    timed_uint8 = (
-        ((timed_prediction.float().clamp(-1.0, 1.0) + 1.0) * 127.5)
-        .round()
-        .to(torch.uint8)
-        .cpu()
-    )
     infix = _source_infix(source)
-    if _hash_tensor(timed_uint8) != _hash_tensor(
-        artifacts[f"decoded_future{infix}_nfe_{nfe}"]
-    ):
-        raise EvaluationError("timed and audited deployable outputs differ")
+    audited_decoded = artifacts[f"decoded_future{infix}_nfe_{nfe}"]
+    batch_size = int(batch["rgb"].shape[0])
+    if batch_size != contract.TRAIN_VALIDATION_BATCH_SIZE_PER_RANK:
+        raise EvaluationError("artifact audit requires the registered batch size two")
+    timed = []
+    for offset in range(batch_size):
+        single = {
+            key: (
+                value[offset : offset + 1]
+                if isinstance(value, torch.Tensor)
+                and value.ndim > 0
+                and int(value.shape[0]) == batch_size
+                else value
+            )
+            for key, value in batch.items()
+        }
+        torch.cuda.synchronize(batch["rgb"].device)
+        torch.cuda.reset_peak_memory_stats(batch["rgb"].device)
+        timed_started_ns = time.perf_counter_ns()
+        timed_prediction, timed_counts = invoke(
+            single, collect_artifacts=False, profile=True
+        )
+        torch.cuda.synchronize(batch["rgb"].device)
+        timed_end_to_end_latency_ms = (
+            time.perf_counter_ns() - timed_started_ns
+        ) / 1_000_000.0
+        peak_memory = int(torch.cuda.max_memory_allocated(batch["rgb"].device))
+        profile = getattr(model, "_last_sampling_profile", None)
+        if not isinstance(profile, Mapping):
+            raise EvaluationError("timed sampler did not expose its stage profile")
+        if profile.get("condition_source") != source or profile.get("nfe") != nfe:
+            raise EvaluationError("timed sampler profile is labelled for another cell")
+        timed_uint8 = (
+            ((timed_prediction.float().clamp(-1.0, 1.0) + 1.0) * 127.5)
+            .round()
+            .to(torch.uint8)
+            .cpu()
+        )
+        if _hash_tensor(timed_uint8) != _hash_tensor(
+            audited_decoded[offset : offset + 1]
+        ):
+            raise EvaluationError("timed and audited deployable outputs differ")
+        timed.append(
+            {
+                "counts": timed_counts,
+                "profile": dict(profile),
+                "timed_end_to_end_latency_ms": timed_end_to_end_latency_ms,
+                "peak_memory_allocated_bytes": peak_memory,
+                "batch_size": 1,
+            }
+        )
     audit = {
         "audit_counts": audit_counts,
-        "timed_counts": timed_counts,
-        "profile": dict(profile),
-        "timed_end_to_end_latency_ms": timed_end_to_end_latency_ms,
-        "peak_memory_allocated_bytes": peak_memory,
+        "audit_batch_size": batch_size,
+        "timed": timed,
     }
     return artifacts, audit
 
@@ -609,20 +687,29 @@ def _rows_for_cell(
         artifacts[f"midpoint_head_call_count{infix}_nfe_{nfe}"].reshape(-1)[0]
     )
     audit_counts = audit["audit_counts"]
-    timed_counts = audit["timed_counts"]
-    profile = audit["profile"]
+    timed_audits = audit["timed"]
     if (
         recorded_calls != nfe
         or recorded_midpoint_calls != nfe
         or any(audit_counts[name] != nfe for name in ("wan", "head", "block"))
-        or any(timed_counts[name] != nfe for name in ("wan", "head", "block"))
         or audit_counts["transform"] != 0
-        or timed_counts["transform"] != 0
+        or int(audit.get("audit_batch_size", -1)) != 2
+        or len(timed_audits) != 2
+        or any(
+            timed_audit.get("batch_size") != 1
+            or any(
+                timed_audit["counts"][name] != nfe
+                for name in ("wan", "head", "block")
+            )
+            or timed_audit["counts"]["transform"] != 0
+            for timed_audit in timed_audits
+        )
     ):
         raise EvaluationError(
             f"call topology differs for {source}/NFE{nfe}: "
             f"artifact={recorded_calls}/{recorded_midpoint_calls}, "
-            f"audit={audit_counts}, timed={timed_counts}"
+            f"audit={audit_counts}, "
+            f"timed={[item.get('counts') for item in timed_audits]}"
         )
     if int(artifacts["online_teacher_call_count"].reshape(-1)[0]) != 0:
         raise EvaluationError("sampler reported a teacher call")
@@ -682,6 +769,9 @@ def _rows_for_cell(
     decoded_hashes = _hash_tensor(decoded)
     rows = []
     for offset, clip_index in enumerate(clip_indexes):
+        timed_audit = timed_audits[offset]
+        timed_counts = timed_audit["counts"]
+        profile = timed_audit["profile"]
         values = {
             "schema": contract.RESULT_SCHEMA,
             "registration_identity_sha256": inputs["registration"]["identity_sha256"],
@@ -708,14 +798,19 @@ def _rows_for_cell(
             "timed_midpoint_head_calls": timed_counts["head"],
             "timed_midpoint_block_calls": timed_counts["block"],
             "extra_wan_calls": 0,
-            "evaluation_generations_per_cell": 2,
-            "total_evaluation_wan_calls": (audit_counts["wan"] + timed_counts["wan"]),
+            "evaluation_generations_per_cell": 3,
+            "audit_batch_size": 2,
+            "timed_batch_size": 1,
+            "total_evaluation_wan_calls": (
+                audit_counts["wan"]
+                + sum(item["counts"]["wan"] for item in timed_audits)
+            ),
             "wan_block_count": contract.WAN_BLOCK_COUNT,
             "midpoint_block_index": contract.MIDPOINT_BLOCK_INDEX,
             "midpoint_condition_source": {
                 "autonomous": "aligned",
                 "off": "off",
-                "autonomous_shuffled": "shuffled",
+                "autonomous_future_shuffled": "future_shuffled",
             }[source],
             "generated_clean_stop_gradient": True,
             "sampler_transform_calls": audit_counts["transform"],
@@ -730,6 +825,15 @@ def _rows_for_cell(
             "decoded_final_sha256": decoded_hashes[offset],
             "raw_target_sha256": decoded_metrics["target_hash"][offset],
             "snapshot_sha256": inputs["snapshot_sha256"],
+            "hydra_config_sha256": inputs["hydra_config_sha256"],
+            "resolved_config_sha256": inputs["resolved_config_sha256"],
+            "training_content_identity_sha256": inputs["training_content"][
+                "identity_sha256"
+            ],
+            "training_runtime_sha256": inputs["training_content"][
+                "training_runtime"
+            ]["sha256"],
+            "evaluation_runtime_sha256": inputs["evaluation_runtime"]["sha256"],
             "initialization_match_identity_sha256": inputs["initialization_match"][
                 "identity_sha256"
             ],
@@ -739,11 +843,15 @@ def _rows_for_cell(
                 profile["midpoint_overhead_latency_ms"]
             ),
             "decode_latency_ms": float(profile["decode_latency_ms"]),
-            "end_to_end_latency_ms": float(audit["timed_end_to_end_latency_ms"]),
+            "end_to_end_latency_ms": float(
+                timed_audit["timed_end_to_end_latency_ms"]
+            ),
             "profiled_internal_end_to_end_latency_ms": float(
                 profile["end_to_end_latency_ms"]
             ),
-            "peak_memory_allocated_bytes": int(audit["peak_memory_allocated_bytes"]),
+            "peak_memory_allocated_bytes": int(
+                timed_audit["peak_memory_allocated_bytes"]
+            ),
             "effective_state_gate": float(
                 artifacts["effective_state_gate"].reshape(-1)[0]
             ),
@@ -928,6 +1036,17 @@ def evaluate(args: argparse.Namespace) -> int:
                     "world_size": world,
                     "rows_sha256": contract.sha256_file(merged_path),
                     "snapshot_sha256": inputs["snapshot_sha256"],
+                    "hydra_config_sha256": inputs["hydra_config_sha256"],
+                    "resolved_config_sha256": inputs["resolved_config_sha256"],
+                    "training_content_identity_sha256": inputs[
+                        "training_content"
+                    ]["identity_sha256"],
+                    "training_runtime_sha256": inputs["training_content"][
+                        "training_runtime"
+                    ]["sha256"],
+                    "evaluation_runtime_sha256": inputs["evaluation_runtime"][
+                        "sha256"
+                    ],
                     "initialization_match_identity_sha256": inputs[
                         "initialization_match"
                     ]["identity_sha256"],

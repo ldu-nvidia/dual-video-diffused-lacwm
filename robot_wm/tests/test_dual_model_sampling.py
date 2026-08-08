@@ -220,6 +220,7 @@ def test_intra_forward_source_mapping_is_deployable_and_fail_closed(monkeypatch)
     assert mapping("autonomous") == "aligned"
     assert mapping("off") == "off"
     assert mapping("autonomous_shuffled") == "shuffled"
+    assert mapping("autonomous_future_shuffled") == "future_shuffled"
     with pytest.raises(RuntimeError, match="forbids oracle"):
         mapping("oracle_matched")
 

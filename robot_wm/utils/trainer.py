@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import wandb
 from einops import rearrange
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import save_file as save_safetensors
 from torch.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -682,6 +682,41 @@ class Trainer:
     def _write_completion_marker(self):
         if not self.is_main_process:
             return
+        require_provenance = os.environ.get("LACWM_REQUIRE_PROVENANCE") == "1"
+        config_path_value = os.environ.get("LACWM_RESOLVED_CONFIG_PATH")
+        resolved_config_sha256 = None
+        if config_path_value:
+            config_path = Path(config_path_value).resolve(strict=True)
+            resolved_config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        provenance = {
+            "source_commit": os.environ.get("LACWM_SOURCE_COMMIT"),
+            "registration_identity_sha256": os.environ.get(
+                "LACWM_REGISTRATION_IDENTITY_SHA256"
+            ),
+            "warm_start_sha256": os.environ.get("LACWM_WARM_START_SHA256"),
+            "runtime_receipt_sha256": os.environ.get(
+                "LACWM_RUNTIME_RECEIPT_SHA256"
+            ),
+            "resolved_config_sha256": resolved_config_sha256,
+        }
+        if require_provenance:
+            invalid = {
+                key: value
+                for key, value in provenance.items()
+                if not isinstance(value, str)
+                or len(value) != (40 if key == "source_commit" else 64)
+                or any(character not in "0123456789abcdef" for character in value)
+            }
+            if invalid:
+                raise RuntimeError(f"required completion provenance is invalid: {invalid}")
+            if self.wandb_run_id != self.run_identity_sha256:
+                raise RuntimeError(
+                    "required W&B run ID differs from the guarded run identity"
+                )
+        if getattr(self, "use_wandb", False):
+            wandb.summary["training_status"] = "completed"
+            for key, value in provenance.items():
+                wandb.summary[key] = value
         self._atomic_write_json(
             self.completion_path,
             {
@@ -691,6 +726,9 @@ class Trainer:
                 "max_iter": int(self.max_iter),
                 "run_identity_sha256": self.run_identity_sha256,
                 "snapshot": str(self.save_path.resolve(strict=False)),
+                "wandb_run_id": getattr(self, "wandb_run_id", None),
+                "wandb_training_status": "completed",
+                **provenance,
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -802,6 +840,19 @@ class Trainer:
         missing, unexpected = self.model.module.load_state_dict(
             state_dict, strict=False
         )
+
+        if os.environ.get("LACWM_STRICT_MODEL_ONLY_LOAD") == "1":
+            expected_missing = sorted(
+                key
+                for key in self.model.module.state_dict()
+                if any(key.startswith(prefix) for prefix in exclude_keys)
+            )
+            if sorted(missing) != expected_missing or unexpected:
+                raise RuntimeError(
+                    "strict model-only warm start differs: "
+                    f"missing={sorted(missing)}, expected={expected_missing}, "
+                    f"unexpected={sorted(unexpected)}"
+                )
 
         logger.info(f"Loaded model state from {load_path}")
         if missing:
@@ -1834,6 +1885,19 @@ class Trainer:
         if not self.use_wandb:
             return
 
+        config_path_value = os.environ.get("LACWM_RESOLVED_CONFIG_PATH")
+        if config_path_value:
+            config_path = Path(config_path_value)
+            if config_path.exists():
+                raise RuntimeError(
+                    "guarded resolved-config receipt already exists: "
+                    f"{config_path}"
+                )
+            self._atomic_write_json(
+                config_path,
+                OmegaConf.to_container(cfg, resolve=True),
+            )
+
         init_wandb_from_config(cfg, run_id=self.wandb_run_id)
         self.wandb_run_id = wandb.run.id
 
@@ -1854,6 +1918,49 @@ class Trainer:
         wandb.summary["run_identity_sha256"] = getattr(
             self, "run_identity_sha256", None
         )
+        provenance = {
+            "source_commit": os.environ.get("LACWM_SOURCE_COMMIT"),
+            "registration_identity_sha256": os.environ.get(
+                "LACWM_REGISTRATION_IDENTITY_SHA256"
+            ),
+            "warm_start_sha256": os.environ.get("LACWM_WARM_START_SHA256"),
+            "runtime_receipt_sha256": os.environ.get(
+                "LACWM_RUNTIME_RECEIPT_SHA256"
+            ),
+        }
+        config_path_value = os.environ.get("LACWM_RESOLVED_CONFIG_PATH")
+        if config_path_value:
+            config_path = Path(config_path_value).resolve(strict=True)
+            provenance["resolved_config_sha256"] = hashlib.sha256(
+                config_path.read_bytes()
+            ).hexdigest()
+        for key, value in provenance.items():
+            wandb.summary[key] = value
+        wandb.summary["training_status"] = "running"
+        if os.environ.get("LACWM_REQUIRE_PROVENANCE") == "1":
+            if self.wandb_run_id != self.run_identity_sha256:
+                raise RuntimeError(
+                    "required W&B run ID differs from the guarded run identity"
+                )
+            required = {
+                "source_commit": 40,
+                "registration_identity_sha256": 64,
+                "warm_start_sha256": 64,
+                "runtime_receipt_sha256": 64,
+                "resolved_config_sha256": 64,
+            }
+            invalid = {
+                key: provenance.get(key)
+                for key, length in required.items()
+                if not isinstance(provenance.get(key), str)
+                or len(provenance[key]) != length
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in provenance[key]
+                )
+            }
+            if invalid:
+                raise RuntimeError(f"required W&B provenance is invalid: {invalid}")
         if getattr(self, "transition_parent", None) is not None:
             wandb.summary["transition_parent"] = self.transition_parent
 

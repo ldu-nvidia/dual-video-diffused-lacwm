@@ -64,14 +64,20 @@ IFS='|' read -r \
 RUN_DIR="$STUDY_ROOT/runs/$ARM_SLUG"
 OUTPUT_DIR="$STUDY_ROOT/evaluation/$ARM_SLUG"
 [[ -f "$RUN_DIR/snapshot.pt" && -f "$RUN_DIR/training_complete.json" \
-   && -f "$RUN_DIR/initialization_match.json" ]] || \
+   && -f "$RUN_DIR/initialization_match.json" \
+   && -f "$RUN_DIR/training_content.json" ]] || \
   die "arm training is incomplete"
 [[ ! -e "$OUTPUT_DIR" ]] || die "fresh evaluation output already exists"
+[[ ! -e "$RUN_DIR/evaluation_runtime.json" ]] || \
+  die "fresh evaluation runtime receipt already exists"
 
 # The activation guard validates these paths while it is sourced.  They must
 # come from the immutable cluster registration, never its workstation defaults.
 export WAN_DIR="$WAN_DIR_VALUE"
 export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
+export LACWM_PYTHON="$PYTHON_BIN"
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
 source "$REPO_ROOT/tools/env/activate_b200.sh"
 
 export MID_TRAIN_CLIP_MANIFEST="$TRAIN_MANIFEST"
@@ -82,6 +88,13 @@ export MID_CLIP_MANIFEST="$VAL_MANIFEST"
 export MID_CACHE_METADATA="$VAL_METADATA"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export MID_EVAL_RUNTIME_RECEIPT="$RUN_DIR/evaluation_runtime.json"
+
+"$PYTHON_BIN" "$HELPER" verify \
+  --registration "$MID_SCREEN_REGISTRATION" >/dev/null
+"$PYTHON_BIN" "$REPO_ROOT/tools/env/verify_b200_runtime.py" \
+  --expected-gpus 8 --require-b200 --wan-dir "$WAN_DIR_VALUE" \
+  > "$MID_EVAL_RUNTIME_RECEIPT"
 
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone --nproc_per_node=8 "$EVALUATOR" \

@@ -223,6 +223,7 @@ def _make_dual_model(
     model.intra_forward_forcing_enabled = intra_forward_forcing
     model.intra_forward_block_index = 14
     model.intra_forward_stop_gradient = True
+    model.intra_forward_history_bins = 2
     model.transformer = (
         _FakeMidpointTransformer()
         if intra_forward_forcing
@@ -375,9 +376,51 @@ def test_intra_forward_off_and_shuffle_are_same_checkpoint_interventions():
     assert not model.transformer.blocks[14]._forward_hooks
 
 
+def test_intra_forward_future_shuffle_preserves_history_bins(monkeypatch):
+    torch.manual_seed(404)
+    model = _make_dual_model(
+        intra_forward_forcing=True,
+        condition_on_tf=True,
+        condition_on_tf_clock=False,
+        state_gate_init=0.25,
+    )
+    projected_inputs = []
+    original_project = model.tf_token_adapter.project_tokens
+
+    def record_project(value):
+        projected_inputs.append(value.detach().clone())
+        return original_project(value)
+
+    def donor_future(value):
+        return value + 100.0
+
+    model.tf_token_adapter.project_tokens = record_project
+    monkeypatch.setattr(WAN_FORWARD, "roll_across_global_batch", donor_future)
+    noisy_tf = torch.randn(2, 4, 4, 4, 4)
+    model(
+        torch.randn(2, 16, 4, 4, 4),
+        torch.tensor([100.0, 200.0]),
+        torch.randn(2, 4, 3),
+        torch.randn(2, 16, 4, 4, 4),
+        [torch.zeros(1, 4), torch.zeros(1, 4)],
+        noisy_tf=noisy_tf,
+        tf_sigma=torch.tensor([0.3, 0.6]),
+        intra_forward_condition_source="future_shuffled",
+    )
+
+    generated_clean = projected_inputs[0]
+    injected_clean = projected_inputs[-1]
+    torch.testing.assert_close(
+        injected_clean[:, :, :2], generated_clean[:, :, :2]
+    )
+    torch.testing.assert_close(
+        injected_clean[:, :, 2:], generated_clean[:, :, 2:] + 100.0
+    )
+
+
 def test_intra_forward_forcing_rejects_unregistered_source():
     model = _make_dual_model(intra_forward_forcing=True)
-    with pytest.raises(ValueError, match="aligned, off, or shuffled"):
+    with pytest.raises(ValueError, match="future_shuffled"):
         model(
             torch.randn(2, 16, 2, 4, 4),
             torch.tensor([100.0, 200.0]),

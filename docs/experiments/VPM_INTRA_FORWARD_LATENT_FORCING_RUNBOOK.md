@@ -30,38 +30,45 @@ COMMIT="$(git -C "$REPO" rev-parse HEAD)"
 Registration rejects dirty source, overlapping train/validation episodes,
 noncanonical inputs, any test split, and any pre-existing study root.
 
-## 2. Train byte-matched arms
+## 2. Submit the memory canary, byte-matched arms, and evaluation
 
-Create the static Slurm log parent before submission, then submit the two-arm
-array. Its `%1` throttle is intentional: `MID-OFF` creates the update-zero byte
-anchor and `MID-ON` must match it before its optimizer can run.
+Use the guarded wrapper. It submits four stages with explicit dependencies:
 
-```bash
-mkdir -p /lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train/artifacts/dual_video_diffusion/intra_forward_forcing/_slurm_logs
-TRAIN_JOB="$(sbatch --parsable \
-  --export=ALL,MID_SCREEN_REGISTRATION="$STUDY/protocol_registration.json",MID_SCREEN_REPO_ROOT="$REPO",MID_SCREEN_PYTHON="$PYTHON_BIN" \
-  "$REPO/tools/slurm/intra_forward_forcing_screen.sbatch")"
+```text
+8xB200 update-zero forward/backward memory canary
+  -> MID-OFF task 0 (creates the initialization anchor)
+  -> MID-ON task 1 (must match the anchor)
+  -> parallel validation-only evaluation tasks 0 and 1
 ```
 
-Do not manually resume either arm. A failed array task leaves its root as
-evidence and requires a freshly registered study.
-
-## 3. Evaluate deployable cells
-
-After both training tasks succeed, evaluate validation-only NFE 1/2/4 cells.
-Each cell makes one artifact-audit generation and one synchronized timing
-generation; each generation independently proves exactly NFE Wan, midpoint
-head, and block-14 calls.
+The two training arms are separate Slurm jobs. Do not replace this dependency
+chain with a throttled array: a `%1` throttle does not guarantee that task 0
+runs before task 1.
 
 ```bash
-EVAL_JOB="$(sbatch --parsable --dependency="afterok:$TRAIN_JOB" \
-  --export=ALL,MID_SCREEN_REGISTRATION="$STUDY/protocol_registration.json",MID_SCREEN_REPO_ROOT="$REPO",MID_SCREEN_PYTHON="$PYTHON_BIN" \
-  "$REPO/tools/slurm/intra_forward_forcing_evaluate.sbatch")"
+export MID_SCREEN_REGISTRATION="$STUDY/protocol_registration.json"
+export MID_SCREEN_REPO_ROOT="$REPO"
+export MID_SCREEN_PYTHON="$PYTHON_BIN"
+"$REPO/tools/slurm/submit_intra_forward_forcing_screen.sh"
 ```
+
+The wrapper prints all four job IDs. The memory canary performs the exact
+production-shape BF16 forward and backward on each GPU but never executes an
+optimizer update or reports a scientific metric. Do not manually resume any
+stage. A failed stage leaves its root as evidence and requires a freshly
+registered study.
+
+## 3. Inspect deployable evaluation artifacts
+
+The dependency-created evaluation jobs cover validation-only NFE 1/2/4 cells.
+For each two-clip cell they make one batch-2 artifact audit and two batch-1
+synchronized endpoint timings. Every rollout independently proves exactly NFE
+Wan, midpoint-head, and block-14 calls, and each timed output must match its
+artifact-audit sample byte-for-byte. Latency is descriptive at equal NFE only.
 
 The only sources are aligned generated midpoint state, exact off, and global
-sample-shuffled generated midpoint state. No clean future auxiliary enters any
-sampler call.
+future-bin-shuffled generated midpoint state with bins 0--1 preserved. No
+clean future auxiliary enters any sampler call.
 
 ## 4. Run the frozen analyzer
 

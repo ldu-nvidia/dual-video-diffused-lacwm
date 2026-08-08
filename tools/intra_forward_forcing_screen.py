@@ -43,6 +43,11 @@ DATASET_CONFIG = (
 )
 TRAIN_SBATCH = REPO_ROOT / "tools/slurm/intra_forward_forcing_screen.sbatch"
 EVALUATE_SBATCH = REPO_ROOT / "tools/slurm/intra_forward_forcing_evaluate.sbatch"
+MEMORY_SMOKE = REPO_ROOT / "tools/smoke_intra_forward_memory.py"
+MEMORY_SMOKE_SBATCH = (
+    REPO_ROOT / "tools/slurm/intra_forward_forcing_memory_smoke.sbatch"
+)
+SUBMIT_SCRIPT = REPO_ROOT / "tools/slurm/submit_intra_forward_forcing_screen.sh"
 
 SCHEMA = "video-intra-forward-forcing-screen-v1"
 ARM_SCHEMA = "video-intra-forward-forcing-arm-v1"
@@ -52,6 +57,8 @@ ANALYSIS_SCHEMA = "video-intra-forward-forcing-analysis-v1"
 PREFLIGHT_SCHEMA = "video-intra-forward-forcing-warmstart-preflight-v1"
 INITIALIZATION_ANCHOR_SCHEMA = "video-intra-forward-initialization-anchor-v1"
 INITIALIZATION_MATCH_SCHEMA = "video-intra-forward-initialization-match-v1"
+TRAINING_CONTENT_SCHEMA = "video-intra-forward-training-content-v1"
+MEMORY_SMOKE_SCHEMA = "video-intra-forward-memory-smoke-v1"
 SEED = 1234
 EVALUATION_SEED = 20_260_808
 BOOTSTRAP_SEED = 20_260_808
@@ -90,10 +97,11 @@ TRAIN_VALIDATION_CONTRACT = {
 }
 TARGET_SHAPE = [6, 4, 24, 120]
 NFE_GRID = [1, 2, 4]
-SOURCES = ["autonomous", "off", "autonomous_shuffled"]
-DEPLOYABLE_SOURCES = ["autonomous", "off", "autonomous_shuffled"]
+SOURCES = ["autonomous", "off", "autonomous_future_shuffled"]
+DEPLOYABLE_SOURCES = ["autonomous", "off", "autonomous_future_shuffled"]
 MIDPOINT_BLOCK_INDEX = 14
 WAN_BLOCK_COUNT = 30
+AUXILIARY_HISTORY_BINS = 2
 WANDB_ENTITY = "zijiandu"
 WANDB_PROJECT = "dual-video-diffusion-private"
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -168,6 +176,42 @@ ARMS = (
     ),
 )
 ARM_BY_CODE = {arm.code: arm for arm in ARMS}
+
+
+def implementation_paths() -> list[Path]:
+    return [
+        Path(__file__).resolve(),
+        PROTOCOL,
+        RUNBOOK,
+        EVALUATOR,
+        WARMSTART_PREFLIGHT,
+        TRANSFORM,
+        DATASET,
+        MODEL_CONFIG,
+        COMMON_CONFIG,
+        DATASET_CONFIG,
+        TRAIN_SBATCH,
+        EVALUATE_SBATCH,
+        MEMORY_SMOKE,
+        MEMORY_SMOKE_SBATCH,
+        SUBMIT_SCRIPT,
+        REPO_ROOT / "tools/env/activate_b200.sh",
+        REPO_ROOT / "tools/env/verify_b200_runtime.py",
+        REPO_ROOT / "projects/latent_action_models/train.py",
+        REPO_ROOT
+        / "projects/latent_action_models/lam/dual_explicit_action_dit_model.py",
+        REPO_ROOT / "robot_wm/modeling/networks/wan_forward_model.py",
+        REPO_ROOT / "robot_wm/modeling/dual_diffusion/adapters.py",
+        REPO_ROOT / "robot_wm/modeling/dual_diffusion/conditioning.py",
+        REPO_ROOT / "robot_wm/modeling/dual_diffusion/flow.py",
+        REPO_ROOT / "robot_wm/utils/trainer.py",
+        REPO_ROOT / "robot_wm/utils/wandb.py",
+    ] + [
+        REPO_ROOT
+        / "projects/latent_action_models/configs/experiments_0908"
+        / arm.selector
+        for arm in ARMS
+    ]
 
 
 def validate_arm_table() -> None:
@@ -294,6 +338,16 @@ def read_json(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ContractError(f"{label} must contain one JSON object")
     return value
+
+
+def contains_omegaconf_interpolation(value: Any) -> bool:
+    if isinstance(value, str):
+        return "${" in value
+    if isinstance(value, Mapping):
+        return any(contains_omegaconf_interpolation(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(contains_omegaconf_interpolation(item) for item in value)
+    return False
 
 
 def exclusive_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -572,36 +626,9 @@ def command_register(args: argparse.Namespace) -> int:
     if set(arm.code for arm in ARMS) != set(ARM_BY_CODE):
         raise ContractError("arm codes are not unique")
 
-    implementation_paths = [
-        Path(__file__).resolve(),
-        PROTOCOL,
-        RUNBOOK,
-        EVALUATOR,
-        WARMSTART_PREFLIGHT,
-        TRANSFORM,
-        DATASET,
-        MODEL_CONFIG,
-        COMMON_CONFIG,
-        DATASET_CONFIG,
-        TRAIN_SBATCH,
-        EVALUATE_SBATCH,
-        REPO_ROOT / "projects/latent_action_models/train.py",
-        REPO_ROOT
-        / "projects/latent_action_models/lam/dual_explicit_action_dit_model.py",
-        REPO_ROOT / "robot_wm/modeling/networks/wan_forward_model.py",
-        REPO_ROOT / "robot_wm/modeling/dual_diffusion/adapters.py",
-        REPO_ROOT / "robot_wm/modeling/dual_diffusion/conditioning.py",
-        REPO_ROOT / "robot_wm/modeling/dual_diffusion/flow.py",
-        REPO_ROOT / "robot_wm/utils/trainer.py",
-    ] + [
-        REPO_ROOT
-        / "projects/latent_action_models/configs/experiments_0908"
-        / arm.selector
-        for arm in ARMS
-    ]
     implementation = {
         str(path.relative_to(REPO_ROOT)): source_file_record(path)
-        for path in implementation_paths
+        for path in implementation_paths()
     }
     payload = identity_payload(
         {
@@ -654,6 +681,8 @@ def command_register(args: argparse.Namespace) -> int:
                 "additional_wan_calls": 0,
                 "generated_clean_formula": "q0_hat=q_sigma-sigma*v_hat",
                 "generated_clean_stop_gradient": True,
+                "history_preserved_future_shuffle": True,
+                "auxiliary_history_bins": AUXILIARY_HISTORY_BINS,
                 "input_level_auxiliary_state_residual": "exact_zero",
                 "input_level_auxiliary_clock_residual": "exact_zero",
                 "gradient_checkpointing": False,
@@ -669,6 +698,7 @@ def command_register(args: argparse.Namespace) -> int:
                 "same_non_auxiliary_warm_start": True,
                 "identical_initialized_model_bytes_required": True,
                 "paired_clip_order_noise_and_timesteps": True,
+                "update_zero_memory_smoke_required": True,
                 "arms": [asdict(arm) for arm in ARMS],
             },
             "evaluation": {
@@ -687,6 +717,10 @@ def command_register(args: argparse.Namespace) -> int:
                     "cuda_synchronize_before_and_after": True,
                     "records_end_to_end_and_peak_memory": True,
                     "records_midpoint_head_elapsed": True,
+                    "artifact_audit_batch_size": 2,
+                    "endpoint_timing_batch_size": 1,
+                    "generations_per_two_clip_cell": 3,
+                    "latency_claim_scope": "descriptive_equal_nfe_only",
                 },
                 "bootstrap_replicates": 10_000,
                 "bootstrap_seed": BOOTSTRAP_SEED,
@@ -701,7 +735,7 @@ def command_register(args: argparse.Namespace) -> int:
                 "references": [
                     "MID-OFF/aligned",
                     "MID-ON/off",
-                    "MID-ON/global-shuffled",
+                    "MID-ON/history-preserved-future-shuffled",
                 ],
                 "mechanism_requires_aligned_better_than_all_references": True,
                 "no_protected_test": True,
@@ -738,6 +772,8 @@ def load_registration(path: Path, *, verify_files: bool = True) -> dict[str, Any
     validate_training_validation_contract(training.get("validation_iterator"))
     if training.get("arms") != [asdict(arm) for arm in ARMS]:
         raise ContractError("registration arm table differs from frozen treatment")
+    if training.get("update_zero_memory_smoke_required") is not True:
+        raise ContractError("registration does not require the memory canary")
     expected_architecture = {
         "wan_block_count": WAN_BLOCK_COUNT,
         "midpoint_block_index": MIDPOINT_BLOCK_INDEX,
@@ -745,6 +781,8 @@ def load_registration(path: Path, *, verify_files: bool = True) -> dict[str, Any
         "additional_wan_calls": 0,
         "generated_clean_formula": "q0_hat=q_sigma-sigma*v_hat",
         "generated_clean_stop_gradient": True,
+        "history_preserved_future_shuffle": True,
+        "auxiliary_history_bins": AUXILIARY_HISTORY_BINS,
         "input_level_auxiliary_state_residual": "exact_zero",
         "input_level_auxiliary_clock_residual": "exact_zero",
         "gradient_checkpointing": False,
@@ -764,6 +802,16 @@ def load_registration(path: Path, *, verify_files: bool = True) -> dict[str, Any
         or evaluation.get("clean_future_feature_available_to_deployable_sampler")
         is not False
         or evaluation.get("oracle_sources") != []
+        or evaluation.get("timing")
+        != {
+            "cuda_synchronize_before_and_after": True,
+            "records_end_to_end_and_peak_memory": True,
+            "records_midpoint_head_elapsed": True,
+            "artifact_audit_batch_size": 2,
+            "endpoint_timing_batch_size": 1,
+            "generations_per_two_clip_cell": 3,
+            "latency_claim_scope": "descriptive_equal_nfe_only",
+        }
     ):
         raise ContractError("registration deployable evaluation contract differs")
     if registration.get("wandb") != {
@@ -774,6 +822,12 @@ def load_registration(path: Path, *, verify_files: bool = True) -> dict[str, Any
         raise ContractError("registration private W&B destination differs")
     if verify_files:
         validate_source(str(registration["source"]["commit"]))
+        expected_implementation = {
+            str(path.resolve(strict=True).relative_to(REPO_ROOT))
+            for path in implementation_paths()
+        }
+        if set(registration.get("implementation", {})) != expected_implementation:
+            raise ContractError("registered implementation set changed")
         for record in registration["implementation"].values():
             path = REPO_ROOT / record["path"]
             if (
@@ -971,6 +1025,359 @@ def command_bind_initialization(args: argparse.Namespace) -> int:
     return 0
 
 
+def validate_memory_smoke(
+    registration: Mapping[str, Any], *, verify_files: bool = True
+) -> dict[str, Any]:
+    """Require the exact eight-rank update-zero forward/backward canary."""
+    study_root = Path(str(registration["study_root"]))
+    receipt_path = study_root / "memory_smoke.json"
+    if receipt_path.is_symlink():
+        raise ContractError("memory smoke receipt must not be a symlink")
+    receipt = read_json(receipt_path.resolve(strict=True), "memory smoke receipt")
+    runtime_path = study_root / "memory_smoke_runtime.json"
+    expected_batch = {
+        "rgb": [1, 13, 3, 180, 960],
+        "actions": [1, 13, 5, 157],
+        "mask": [1, 13],
+        "morphology_index": [1],
+        "clip_index": [1],
+    }
+    if (
+        receipt.get("schema") != MEMORY_SMOKE_SCHEMA
+        or not validate_identity(receipt)
+        or receipt.get("status") != "pass"
+        or receipt.get("registration_identity_sha256")
+        != registration.get("identity_sha256")
+        or receipt.get("source_commit")
+        != registration.get("source", {}).get("commit")
+        or receipt.get("world_size") != WORLD_SIZE
+        or receipt.get("selector") != ARMS[1].selector
+        or receipt.get("synthetic_batch_shapes") != expected_batch
+        or receipt.get("gradient_checkpointing") is not False
+        or receipt.get("forward_completed") is not True
+        or receipt.get("backward_completed") is not True
+        or receipt.get("optimizer_step_executed") is not False
+        or receipt.get("completed_optimizer_updates") != 0
+        or receipt.get("optimizer_state_entries") != 0
+        or not isinstance(receipt.get("maximum_peak_allocated_bytes"), int)
+        or receipt.get("maximum_peak_allocated_bytes", 0) <= 0
+        or not isinstance(receipt.get("minimum_headroom_bytes"), int)
+        or receipt.get("minimum_headroom_bytes", 0) <= 0
+        or receipt.get("scientific_metrics_emitted") is not False
+        or not isinstance(receipt.get("runtime_receipt_sha256"), str)
+        or SHA_RE.fullmatch(str(receipt.get("runtime_receipt_sha256"))) is None
+        or not isinstance(receipt.get("ranks"), list)
+        or len(receipt["ranks"]) != WORLD_SIZE
+    ):
+        raise ContractError("update-zero memory smoke contract differs")
+    ranks = receipt["ranks"]
+    if sorted(item.get("rank") for item in ranks if isinstance(item, Mapping)) != list(
+        range(WORLD_SIZE)
+    ) or any(
+        not isinstance(item, Mapping)
+        or not isinstance(item.get("peak_allocated_bytes"), int)
+        or item["peak_allocated_bytes"] <= 0
+        or not isinstance(item.get("total_memory_bytes"), int)
+        or item["total_memory_bytes"] <= item["peak_allocated_bytes"]
+        or item.get("finite_loss") is not True
+        or item.get("finite_gradients") is not True
+        for item in ranks
+    ):
+        raise ContractError("memory smoke rank telemetry differs")
+    if verify_files:
+        if runtime_path.is_symlink() or not runtime_path.is_file():
+            raise ContractError("memory smoke runtime receipt is missing")
+        if sha256_file(runtime_path.resolve(strict=True)) != receipt[
+            "runtime_receipt_sha256"
+        ]:
+            raise ContractError("memory smoke runtime receipt digest differs")
+    return receipt
+
+
+def command_verify_memory_smoke(args: argparse.Namespace) -> int:
+    registration = load_registration(args.registration, verify_files=False)
+    receipt = validate_memory_smoke(registration, verify_files=True)
+    print(json.dumps(receipt, sort_keys=True))
+    return 0
+
+
+def command_bind_training_output(args: argparse.Namespace) -> int:
+    """Content-bind a completed arm before any evaluator may load it."""
+    registration = load_registration(args.registration, verify_files=False)
+    memory_smoke = validate_memory_smoke(registration, verify_files=True)
+    arm = _arm(args.array_task_id)
+    expected_run = Path(registration["study_root"]) / "runs" / arm.slug
+    if args.run_dir != expected_run or not expected_run.is_dir():
+        raise ContractError(f"run directory must be {expected_run}")
+
+    def run_file(name: str, label: str) -> tuple[Path, dict[str, Any]]:
+        path = expected_run / name
+        if path.is_symlink():
+            raise ContractError(f"{label} must not be a symlink")
+        canonical = path.resolve(strict=True)
+        if canonical.parent != (expected_run / Path(name).parent).resolve(strict=True):
+            raise ContractError(f"{label} escaped the arm run directory")
+        return canonical, file_record(canonical, label)
+
+    manifest_path, manifest_record = run_file("arm_manifest.json", "arm manifest")
+    manifest = read_json(manifest_path, "arm manifest")
+    if (
+        manifest.get("schema") != ARM_SCHEMA
+        or not validate_identity(manifest)
+        or manifest.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or manifest.get("array_task_id") != args.array_task_id
+        or manifest.get("arm") != asdict(arm)
+    ):
+        raise ContractError("arm manifest identity differs")
+    arm_identity = manifest["identity_sha256"]
+
+    snapshot_path, snapshot_record = run_file("snapshot.pt", "final snapshot")
+    hydra_config_path, hydra_config_record = run_file(
+        ".hydra/config.yaml", "Hydra execution config"
+    )
+    resolved_config_path, resolved_config_record = run_file(
+        "resolved_config.json", "fully resolved config"
+    )
+    runtime_path, runtime_record = run_file("runtime.json", "training runtime")
+    completion_path, completion_record = run_file(
+        "training_complete.json", "training completion receipt"
+    )
+    match_path, match_record = run_file(
+        "initialization_match.json", "initialization match"
+    )
+    completion = read_json(completion_path, "training completion receipt")
+    initialization_match = read_json(match_path, "initialization match")
+    resolved_config = read_json(resolved_config_path, "fully resolved config")
+    if contains_omegaconf_interpolation(resolved_config):
+        raise ContractError("fully resolved config contains an interpolation")
+    resolved_dual = resolved_config.get("model", {}).get("dual_diffusion", {})
+    resolved_wandb = resolved_config.get("wandb", {})
+    if (
+        resolved_config.get("seed") != SEED
+        or resolved_config.get("name") != f"{registration['study_id']}-{arm.code}"
+        or resolved_config.get("trainer", {}).get("config", {}).get("max_iter")
+        != TRAIN_UPDATES
+        or resolved_dual.get("condition_mode") != arm.condition_mode
+        or resolved_dual.get("condition_on_tf") is not arm.condition_on_state
+        or resolved_dual.get("intra_forward_forcing", {}).get("history_bins")
+        != AUXILIARY_HISTORY_BINS
+        or resolved_wandb.get("entity") != WANDB_ENTITY
+        or resolved_wandb.get("project") != WANDB_PROJECT
+        or resolved_wandb.get("group") is not None
+        or resolved_wandb.get("id") != arm_identity
+    ):
+        raise ContractError("fully resolved arm configuration differs")
+    validate_runtime_receipt(runtime_path, registration, label="training runtime")
+    if runtime_record["sha256"] != memory_smoke["runtime_receipt_sha256"]:
+        raise ContractError("memory-smoke and training B200 runtimes differ")
+    expected_completion = {
+        "schema_version": 1,
+        "status": "completed",
+        "completed_updates": TRAIN_UPDATES,
+        "max_iter": TRAIN_UPDATES,
+        "run_identity_sha256": arm_identity,
+        "snapshot": str(snapshot_path),
+        "wandb_run_id": arm_identity,
+        "wandb_training_status": "completed",
+        "source_commit": registration["source"]["commit"],
+        "registration_identity_sha256": registration["identity_sha256"],
+        "warm_start_sha256": registration["warm_start"]["sha256"],
+        "runtime_receipt_sha256": runtime_record["sha256"],
+        "resolved_config_sha256": resolved_config_record["sha256"],
+    }
+    mismatches = {
+        key: {"observed": completion.get(key), "expected": value}
+        for key, value in expected_completion.items()
+        if completion.get(key) != value
+    }
+    if mismatches:
+        raise ContractError(f"training completion provenance differs: {mismatches}")
+    if (
+        initialization_match.get("schema") != INITIALIZATION_MATCH_SCHEMA
+        or not validate_identity(initialization_match)
+        or initialization_match.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or initialization_match.get("arm") != arm.code
+        or initialization_match.get("arm_identity_sha256") != arm_identity
+        or initialization_match.get("exact_match") is not True
+    ):
+        raise ContractError("initialization match identity differs")
+
+    payload = identity_payload(
+        {
+            "schema": TRAINING_CONTENT_SCHEMA,
+            "status": "completed",
+            "registration_identity_sha256": registration["identity_sha256"],
+            "source_commit": registration["source"]["commit"],
+            "arm": arm.code,
+            "arm_identity_sha256": arm_identity,
+            "wandb": {
+                "entity": WANDB_ENTITY,
+                "project": WANDB_PROJECT,
+                "group": None,
+                "run_id": arm_identity,
+                "status": "finished_by_successful_training_process",
+            },
+            "snapshot": snapshot_record,
+            "hydra_config": hydra_config_record,
+            "resolved_config": resolved_config_record,
+            "training_runtime": runtime_record,
+            "completion": completion_record,
+            "arm_manifest": manifest_record,
+            "initialization_match": match_record,
+            "memory_smoke_identity_sha256": memory_smoke["identity_sha256"],
+        }
+    )
+    exclusive_json(expected_run / "training_content.json", payload)
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def validate_runtime_receipt(
+    path: Path, registration: Mapping[str, Any], *, label: str
+) -> dict[str, Any]:
+    """Validate that the runtime verifier observed the registered source stack."""
+    if path.is_symlink():
+        raise ContractError(f"{label} must not be a symlink")
+    canonical = path.resolve(strict=True)
+    receipt = read_json(canonical, label)
+    source_paths = receipt.get("source_paths")
+    gpu = receipt.get("gpus")
+    environment = receipt.get("environment")
+    weights = receipt.get("weights")
+    registered_python = Path(
+        str(registration["runtime"]["python"]["path"])
+    ).resolve(strict=True)
+    observed_python = Path(
+        str(environment.get("sys_executable", ""))
+        if isinstance(environment, Mapping)
+        else ""
+    )
+    try:
+        observed_python = observed_python.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ContractError(f"{label} has an invalid interpreter path") from exc
+    expected_roots = {
+        "robot_wm": REPO_ROOT,
+        "lam": REPO_ROOT / "projects/latent_action_models",
+        "wan_transformer": Path(str(registration["runtime"]["videox_home"])),
+        "wan_vae": Path(str(registration["runtime"]["videox_home"])),
+    }
+    source_valid = isinstance(source_paths, Mapping)
+    if source_valid:
+        for name, root in expected_roots.items():
+            try:
+                observed = Path(str(source_paths.get(name, ""))).resolve(strict=True)
+                expected_root = root.resolve(strict=True)
+            except (OSError, RuntimeError):
+                source_valid = False
+                break
+            if observed != expected_root and expected_root not in observed.parents:
+                source_valid = False
+                break
+    devices = gpu.get("devices") if isinstance(gpu, Mapping) else None
+    if (
+        receipt.get("python") != "3.10.20"
+        or receipt.get("python_no_user_site") is not True
+        or observed_python != registered_python
+        or receipt.get("videox_commit")
+        != "1d6d9c3e1540968466937129fef4b288041e06de"
+        or not source_valid
+        or not isinstance(gpu, Mapping)
+        or gpu.get("count") != WORLD_SIZE
+        or gpu.get("nccl_available") is not True
+        or gpu.get("inaccessible_peer_pairs") != []
+        or not isinstance(devices, list)
+        or len(devices) != WORLD_SIZE
+        or any(
+            not isinstance(device, Mapping)
+            or device.get("capability") != [10, 0]
+            for device in devices
+        )
+        or not isinstance(weights, Mapping)
+        or weights.get("root") != registration["runtime"]["wan_dir"]
+    ):
+        raise ContractError(f"{label} differs from the registered B200 runtime")
+    return {"path": str(canonical), "sha256": sha256_file(canonical)}
+
+
+def validate_training_content(
+    registration: Mapping[str, Any],
+    arm: Arm,
+    run_dir: Path,
+    *,
+    verify_files: bool = True,
+) -> dict[str, Any]:
+    """Validate the post-training content receipt and every bound file."""
+    expected_run = Path(str(registration["study_root"])) / "runs" / arm.slug
+    if run_dir != expected_run:
+        raise ContractError(f"run directory must be {expected_run}")
+    path = run_dir / "training_content.json"
+    if path.is_symlink():
+        raise ContractError("training content receipt must not be a symlink")
+    receipt = read_json(path.resolve(strict=True), "training content receipt")
+    wandb_record = receipt.get("wandb")
+    if (
+        receipt.get("schema") != TRAINING_CONTENT_SCHEMA
+        or not validate_identity(receipt)
+        or receipt.get("status") != "completed"
+        or receipt.get("registration_identity_sha256")
+        != registration.get("identity_sha256")
+        or receipt.get("source_commit")
+        != registration.get("source", {}).get("commit")
+        or receipt.get("arm") != arm.code
+        or not isinstance(receipt.get("arm_identity_sha256"), str)
+        or SHA_RE.fullmatch(str(receipt.get("arm_identity_sha256"))) is None
+        or wandb_record
+        != {
+            "entity": WANDB_ENTITY,
+            "project": WANDB_PROJECT,
+            "group": None,
+            "run_id": receipt.get("arm_identity_sha256"),
+            "status": "finished_by_successful_training_process",
+        }
+        or not isinstance(receipt.get("memory_smoke_identity_sha256"), str)
+        or SHA_RE.fullmatch(str(receipt.get("memory_smoke_identity_sha256"))) is None
+    ):
+        raise ContractError("training content identity differs")
+    smoke = validate_memory_smoke(registration, verify_files=verify_files)
+    training_runtime_record = receipt.get("training_runtime")
+    if (
+        receipt["memory_smoke_identity_sha256"] != smoke["identity_sha256"]
+        or not isinstance(training_runtime_record, Mapping)
+        or training_runtime_record.get("sha256")
+        != smoke["runtime_receipt_sha256"]
+    ):
+        raise ContractError("training content references another memory smoke")
+    records = {
+        "snapshot": "snapshot.pt",
+        "hydra_config": ".hydra/config.yaml",
+        "resolved_config": "resolved_config.json",
+        "training_runtime": "runtime.json",
+        "completion": "training_complete.json",
+        "arm_manifest": "arm_manifest.json",
+        "initialization_match": "initialization_match.json",
+    }
+    if verify_files:
+        for field, relative in records.items():
+            record = receipt.get(field)
+            expected = run_dir / relative
+            if not isinstance(record, Mapping) or expected.is_symlink():
+                raise ContractError(f"training content lacks {field}")
+            canonical = expected.resolve(strict=True)
+            if (
+                record.get("path") != str(canonical)
+                or record.get("bytes") != canonical.stat().st_size
+                or record.get("sha256") != sha256_file(canonical)
+            ):
+                raise ContractError(f"training content-bound {field} changed")
+        validate_runtime_receipt(
+            run_dir / "runtime.json", registration, label="training runtime"
+        )
+    return receipt
+
+
 def _percent_improvement(candidate: float, reference: float) -> float:
     if not math.isfinite(candidate) or not math.isfinite(reference) or reference <= 0:
         raise ContractError("metric means must be finite and reference positive")
@@ -1023,7 +1430,7 @@ def _validate_mid_off_noop(
     for nfe in NFE_GRID:
         for clip in range(EXPECTED_VALIDATION_CLIPS):
             aligned = keyed[("MID-OFF", "autonomous", nfe, clip)]
-            for source in ("off", "autonomous_shuffled"):
+            for source in ("off", "autonomous_future_shuffled"):
                 reference = keyed[("MID-OFF", source, nfe, clip)]
                 changed = [
                     field
@@ -1073,6 +1480,16 @@ def _validate_evaluation_receipt(
         or receipt.get("rows_sha256") != sha256_file(resolved_rows)
         or not isinstance(receipt.get("snapshot_sha256"), str)
         or SHA_RE.fullmatch(receipt["snapshot_sha256"]) is None
+        or not isinstance(receipt.get("resolved_config_sha256"), str)
+        or SHA_RE.fullmatch(receipt["resolved_config_sha256"]) is None
+        or not isinstance(receipt.get("hydra_config_sha256"), str)
+        or SHA_RE.fullmatch(receipt["hydra_config_sha256"]) is None
+        or not isinstance(receipt.get("training_content_identity_sha256"), str)
+        or SHA_RE.fullmatch(receipt["training_content_identity_sha256"]) is None
+        or not isinstance(receipt.get("training_runtime_sha256"), str)
+        or SHA_RE.fullmatch(receipt["training_runtime_sha256"]) is None
+        or receipt.get("evaluation_runtime_sha256")
+        != receipt.get("training_runtime_sha256")
         or not isinstance(receipt.get("initialization_match_identity_sha256"), str)
         or SHA_RE.fullmatch(receipt["initialization_match_identity_sha256"]) is None
         or receipt.get("protected_test_accessed") is not False
@@ -1117,6 +1534,16 @@ def command_analyze(args: argparse.Namespace) -> int:
                         or row.get("arm") != receipt_arm
                         or row.get("arm_identity_sha256")
                         != receipt["arm_identity_sha256"]
+                        or row.get("training_content_identity_sha256")
+                        != receipt["training_content_identity_sha256"]
+                        or row.get("resolved_config_sha256")
+                        != receipt["resolved_config_sha256"]
+                        or row.get("hydra_config_sha256")
+                        != receipt["hydra_config_sha256"]
+                        or row.get("training_runtime_sha256")
+                        != receipt["training_runtime_sha256"]
+                        or row.get("evaluation_runtime_sha256")
+                        != receipt["evaluation_runtime_sha256"]
                     ):
                         raise ContractError(f"invalid result row in {path}")
                     rows.append(row)
@@ -1135,7 +1562,14 @@ def command_analyze(args: argparse.Namespace) -> int:
     ):
         raise ContractError("initialization anchor is invalid")
     initialization_matches = {}
+    training_contents = {}
     for arm in ARMS:
+        training_content = validate_training_content(
+            registration,
+            arm,
+            Path(registration["study_root"]) / "runs" / arm.slug,
+            verify_files=True,
+        )
         match = read_json(
             (
                 Path(registration["study_root"])
@@ -1156,9 +1590,20 @@ def command_analyze(args: argparse.Namespace) -> int:
             or match.get("exact_match") is not True
             or receipts[arm.code].get("initialization_match_identity_sha256")
             != match["identity_sha256"]
+            or receipts[arm.code].get("training_content_identity_sha256")
+            != training_content["identity_sha256"]
+            or receipts[arm.code].get("snapshot_sha256")
+            != training_content["snapshot"]["sha256"]
+            or receipts[arm.code].get("resolved_config_sha256")
+            != training_content["resolved_config"]["sha256"]
+            or receipts[arm.code].get("hydra_config_sha256")
+            != training_content["hydra_config"]["sha256"]
+            or receipts[arm.code].get("training_runtime_sha256")
+            != training_content["training_runtime"]["sha256"]
         ):
             raise ContractError(f"{arm.code} initialization match is invalid")
         initialization_matches[arm.code] = match
+        training_contents[arm.code] = training_content
     expected = len(ARMS) * len(SOURCES) * len(NFE_GRID) * EXPECTED_VALIDATION_CLIPS
     if len(rows) != expected:
         raise ContractError(f"result grid has {len(rows)} rows, expected {expected}")
@@ -1166,7 +1611,7 @@ def command_analyze(args: argparse.Namespace) -> int:
     expected_source_map = {
         "autonomous": "aligned",
         "off": "off",
-        "autonomous_shuffled": "shuffled",
+        "autonomous_future_shuffled": "future_shuffled",
     }
     latency_fields = (
         "history_encode_latency_ms",
@@ -1192,6 +1637,11 @@ def command_analyze(args: argparse.Namespace) -> int:
         "decoded_final_sha256",
         "raw_target_sha256",
         "snapshot_sha256",
+        "hydra_config_sha256",
+        "resolved_config_sha256",
+        "training_content_identity_sha256",
+        "training_runtime_sha256",
+        "evaluation_runtime_sha256",
         "initialization_match_identity_sha256",
     )
     for row in rows:
@@ -1220,8 +1670,10 @@ def command_analyze(args: argparse.Namespace) -> int:
             or row.get("timed_midpoint_head_calls") != row.get("nfe")
             or row.get("timed_midpoint_block_calls") != row.get("nfe")
             or row.get("extra_wan_calls") != 0
-            or row.get("evaluation_generations_per_cell") != 2
-            or row.get("total_evaluation_wan_calls") != 2 * row.get("nfe")
+            or row.get("evaluation_generations_per_cell") != 3
+            or row.get("audit_batch_size") != 2
+            or row.get("timed_batch_size") != 1
+            or row.get("total_evaluation_wan_calls") != 3 * row.get("nfe")
             or row.get("wan_block_count") != WAN_BLOCK_COUNT
             or row.get("midpoint_block_index") != MIDPOINT_BLOCK_INDEX
             or row.get("midpoint_condition_source")
@@ -1364,7 +1816,11 @@ def command_analyze(args: argparse.Namespace) -> int:
     reference_specs = (
         ("MID-OFF", "autonomous", "trained_mid_off"),
         ("MID-ON", "off", "same_checkpoint_off"),
-        ("MID-ON", "autonomous_shuffled", "same_checkpoint_global_shuffled"),
+        (
+            "MID-ON",
+            "autonomous_future_shuffled",
+            "same_checkpoint_future_shuffled_history_preserved",
+        ),
     )
     for nfe in NFE_GRID:
         for reference_arm, reference_source, label in reference_specs:
@@ -1397,6 +1853,8 @@ def command_analyze(args: argparse.Namespace) -> int:
         "temporal_gate_all_references": temporal,
         "video_and_decoded_guardrails_all_references": quality_guardrails,
         "exact_call_and_provenance_gate": True,
+        "latency_gate": False,
+        "latency_claim_scope": "descriptive_equal_nfe_only",
         "passes": temporal and quality_guardrails,
     }
 
@@ -1410,6 +1868,21 @@ def command_analyze(args: argparse.Namespace) -> int:
                     "arm_identity_sha256": receipts[arm_code]["arm_identity_sha256"],
                     "rows_sha256": receipts[arm_code]["rows_sha256"],
                     "snapshot_sha256": receipts[arm_code]["snapshot_sha256"],
+                    "hydra_config_sha256": receipts[arm_code][
+                        "hydra_config_sha256"
+                    ],
+                    "resolved_config_sha256": receipts[arm_code][
+                        "resolved_config_sha256"
+                    ],
+                    "training_content_identity_sha256": receipts[arm_code][
+                        "training_content_identity_sha256"
+                    ],
+                    "training_runtime_sha256": receipts[arm_code][
+                        "training_runtime_sha256"
+                    ],
+                    "evaluation_runtime_sha256": receipts[arm_code][
+                        "evaluation_runtime_sha256"
+                    ],
                     "initialization_match_identity_sha256": receipts[arm_code][
                         "initialization_match_identity_sha256"
                     ],
@@ -1427,7 +1900,7 @@ def command_analyze(args: argparse.Namespace) -> int:
             },
             "decision": decision,
             "conclusion": (
-                "pass_one_call_intra_forward_forcing_screen"
+                "pass_one_call_future_scratchpad_forcing_screen"
                 if decision["passes"]
                 else "no_controlled_one_call_intra_forward_advantage_in_quick_screen"
             ),
@@ -1483,6 +1956,16 @@ def build_parser() -> argparse.ArgumentParser:
     bind_initialization.add_argument("--run-dir", type=Path, required=True)
     bind_initialization.add_argument("--preflight", type=Path, required=True)
     bind_initialization.set_defaults(func=command_bind_initialization)
+
+    verify_memory = sub.add_parser("verify-memory-smoke")
+    verify_memory.add_argument("--registration", type=Path, required=True)
+    verify_memory.set_defaults(func=command_verify_memory_smoke)
+
+    bind_training = sub.add_parser("bind-training-output")
+    bind_training.add_argument("--registration", type=Path, required=True)
+    bind_training.add_argument("--array-task-id", type=int, required=True)
+    bind_training.add_argument("--run-dir", type=Path, required=True)
+    bind_training.set_defaults(func=command_bind_training_output)
 
     analyze = sub.add_parser("analyze")
     analyze.add_argument("--registration", type=Path, required=True)

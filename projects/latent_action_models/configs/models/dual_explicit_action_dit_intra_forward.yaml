@@ -41,13 +41,16 @@ dual_diffusion:
   artifact_batch_limit: 1
   evaluation_nfe_steps: [1, 2, 4]
   evaluation_noise_seed: 20260808
-  evaluation_condition_sources: [autonomous, "off", autonomous_shuffled]
+  evaluation_condition_sources: [autonomous, "off", autonomous_future_shuffled]
   validation_video_sigmas: [0.90, 0.75, 0.50, 0.25]
   clock_embedding_dim: 128
   intra_forward_forcing:
     enabled: true
     block_index: 14
     stop_gradient: true
+    # Haar bins 0--1 encode frame 0 and frames 1--4; bins 2--3 encode only
+    # future frames. Attribution controls keep these two observed bins local.
+    history_bins: 2
 
 forward_model:
   latent_action_dim: ${..latent_action_dim}

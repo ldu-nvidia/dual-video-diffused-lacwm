@@ -8,9 +8,9 @@ and registration described below are complete.
 
 ## Question and claim boundary
 
-Can an auxiliary low-frequency/motion state predicted halfway through one Wan
-backbone evaluation improve the final video prediction later in that **same**
-evaluation?
+Can the **future bins** of an auxiliary low-frequency/motion scratchpad,
+predicted halfway through one Wan backbone evaluation, improve the final video
+prediction later in that **same** evaluation?
 
 The screen addresses a causal defect in ordinary synchronous dual diffusion.
 At one sampling step, the video and auxiliary states enter the model as pure
@@ -38,10 +38,10 @@ auxiliary state      [B, 6,4, 24,120]
 Each camera view is spatially box-low-passed independently. Every four-frame
 window retains its temporal Haar DC and coarsest signed motion coordinate.
 The clean target is computed only for the supervised training loss and
-post-generation validation scoring. No oracle sampling cell is registered. At deployable inference every
-auxiliary bin starts from sample-keyed Gaussian noise; the sampler accepts only
-the five observed frames, requested actions, morphology, and explicit video
-and auxiliary noise.
+post-generation validation scoring. No oracle sampling cell is registered. At
+deployable inference every auxiliary bin starts from sample-keyed Gaussian
+noise; the sampler accepts only the five observed frames, requested actions,
+morphology, and explicit video and auxiliary noise.
 
 ## One-call architecture
 
@@ -71,7 +71,7 @@ installed and removed inside one forward call. Registration and tests bind:
 - `q_0_hat` is stopped before video injection;
 - no clean target, future RGB, teacher feature, or oracle tensor reaches the
   midpoint hook or deployable sampler;
-- the generated estimate, midpoint residual, and final output are finite.
+- the generated estimate, midpoint residual, and final output are finite;
 - Wan activation checkpointing is disabled. A checkpoint recomputation after
   the scoped hook has been removed would differentiate a different function
   from the function used to compute the loss, so runtime drift fails closed.
@@ -94,11 +94,16 @@ identical midpoint head, adapter, gate, optimizer schema, LoRA, action encoder,
 parameter count, auxiliary target/loss, clocks, data order, noise, timesteps,
 and Wan-call topology.
 
-Before either optimizer runs, deterministic model-only loading hashes every
-initialized state tensor byte plus the parameter, trainable-parameter, and
-optimizer schemas. `MID-OFF` creates an immutable anchor and `MID-ON` must
-match it exactly. The Slurm array is deliberately sequential so the treatment
-cannot train before this byte-level check succeeds.
+Before either optimizer runs, an eight-B200 update-zero canary must instantiate
+the exact MID-ON model/optimizer and complete one production-shape BF16 forward
+and backward pass without activation checkpointing or an optimizer step. It
+records per-rank peak allocation and headroom, but no scientific metric.
+
+Deterministic model-only loading hashes every initialized state tensor byte
+plus the parameter, trainable-parameter, and optimizer schemas. `MID-OFF`
+creates an immutable anchor and `MID-ON` must match it exactly. Separate Slurm
+jobs enforce `memory smoke -> MID-OFF -> MID-ON` with `afterok` dependencies.
+Array throttling is not treated as an ordering guarantee.
 
 | Arm | midpoint auxiliary loss | generated midpoint injection |
 |---|---:|---:|
@@ -119,31 +124,35 @@ learning rate `1e-4`, 20-step warmup, cosine decay, validation after updates
 ## Deployable intervention controls
 
 Evaluate all 64 registered validation clips at NFE `{1,2,4}` with sample-keyed
-identical video and auxiliary noise. Every cell executes two deterministic
-generations: one artifact-audit generation and one synchronized latency
-generation. Each generation independently hooks the Wan forward, block 14,
-and the midpoint head and records exactly `NFE` calls; the receipt therefore
-also records exactly `2*NFE` total evaluation calls per cell. This duplication
+identical video and auxiliary noise. For each two-clip loader cell, execute one
+batch-2 artifact audit and two synchronized batch-1 endpoint timings, one per
+clip. Each generation independently hooks the Wan forward, block 14, and the
+midpoint head and records exactly `NFE` calls; the receipt therefore records
+exactly `3*NFE` total evaluation calls for the two-clip cell. This duplication
 is evaluation instrumentation, not an extra call in one generated rollout.
 
 For the `MID-ON` checkpoint run:
 
 - `aligned`: inject this sample's midpoint `q0_hat`;
 - `off`: compute the same estimate but multiply its residual by exact zero;
-- `shuffled`: cyclically roll only `q0_hat` across the global batch while
-  retaining local history, actions, video/auxiliary noise, clocks, and video
-  state.
+- `future-shuffled`: retain bins 0--1 (frame 0 and frames 1--4, the complete
+  observed history) and cyclically roll only bins 2--3 of `q0_hat` across
+  ranks, while retaining local actions, video/auxiliary noise, clocks, and
+  video state.
 
 Also evaluate `MID-OFF/aligned`; it must be bit-identical to its own `off` and
-`shuffled` labels at every NFE. No clean-auxiliary oracle is included in this
-screen.
+`future-shuffled` labels at every NFE. No clean-auxiliary oracle is included in
+this screen.
 
 Rows record latent NMSE, decoded RGB MSE, decoded temporal-difference MSE
 including the history/future boundary, auxiliary NMSE/DC/motion NMSE, peak
 memory, independent midpoint-head/block/Wan hook counts, VAE history encode,
 Wan, midpoint overhead, decode, and externally measured end-to-end wall time
-with CUDA synchronization. The synchronized timed generation collects no
-artifacts, and its decoded bytes must match the audit generation exactly.
+with CUDA synchronization. Each synchronized batch-1 timed generation
+collects no artifacts, and its decoded bytes must match the corresponding
+sample from the batch-2 audit. Latency is descriptive at equal NFE only; it is
+excluded from the frozen gate and cannot establish acceleration, throughput,
+FPS, or real-time DAgger.
 
 ## Frozen gate
 
@@ -153,7 +162,7 @@ lower bounds at confidence `1-.05/9` for three references by three claim
 metrics.
 
 `MID-ON/aligned` must beat each of `MID-OFF/aligned`, same-checkpoint `off`, and
-same-checkpoint `shuffled` as follows:
+same-checkpoint history-preserved `future-shuffled` as follows:
 
 - temporal-MSE improvement at least 3% by point estimate and 1% by
   simultaneous lower bound;
@@ -168,9 +177,9 @@ local batches per event: 4 batches x 2 clips x 8 ranks = 64 clips, at updates
 0, 50, 100, 150, and 199.
 
 Aligned beating the independently trained arm but not same-checkpoint off and
-shuffled is capacity or regularization, not evidence that the generated
-midpoint state guides video. A negative result retires this midpoint/target/
-budget combination, not every intra-forward hierarchy.
+history-preserved future-shuffled is capacity or regularization, not evidence
+that the generated midpoint state guides video. A negative result retires this
+midpoint/target/budget combination, not every intra-forward hierarchy.
 
 ## Immutable execution policy
 
@@ -180,3 +189,11 @@ Wan and VideoX assets, Python executable, 512-train and 64-validation manifests
 and cache metadata, W&B destination, midpoint index, block count, arm table,
 call grid, and protected-test prohibition. Output roots are create-once;
 failed attempts are retained and never resumed or overwritten.
+
+Each training arm uses its content-derived arm identity as the W&B run ID. The
+successful-process receipt binds that ID/status, the full resolved Hydra
+configuration, final checkpoint, runtime-verifier output, warm-start digest,
+source commit, and initialization match. Evaluation reruns the B200 verifier,
+requires memory-canary, training, and evaluation runtime receipts to match
+byte-for-byte, and propagates all of those digests into every result row and
+completion receipt.
