@@ -27,6 +27,15 @@ percent. The recurring failure is therefore not merely a bad Fourier basis.
 The learned future variable is weakly action-sensitive and its autonomous
 sample identity is not causally used by video.
 
+A direct replay of the VPM action path localizes part of this failure. Raw
+future actions remain sample-specific (cyclic-shuffle cosine 0.728), but the
+trained Wan control has cosine 0.99885 after shuffling, only 17.0% sample
+standard deviation relative to its RMS, and centered effective rank 1.16 over
+32 values. Thus the conditioning path largely collapses diverse requested
+actions into one common direction before video generation. A better auxiliary
+motion state cannot become action-specific if its causal action input has
+already lost most of that information.
+
 There is also a one-call ordering problem in the existing synchronous joint
 sampler. At NFE 1, both video and auxiliary enter the sole Wan evaluation at
 their noise endpoint. The video velocity can see the auxiliary's input noise,
