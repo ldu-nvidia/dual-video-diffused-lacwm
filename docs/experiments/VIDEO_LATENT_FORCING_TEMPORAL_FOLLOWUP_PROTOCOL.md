@@ -25,8 +25,8 @@ This follow-up separates three possible causes:
 
 No clean future RGB, semantic target, optical flow, or V-JEPA teacher output is
 available to a deployable sampler. A clean target may only construct an
-explicitly labelled on-manifold diagnostic input or a supervised training
-loss.
+explicitly labelled training-distribution diagnostic input or a supervised
+training loss.
 
 ## Existing evidence and fixed inputs
 
@@ -171,14 +171,19 @@ prediction, detach it, and apply
 
 \[
 z_R(t_1)=z(t_0)+(t_1-t_0)
-          \frac{\hat{x}(z(t_0),t_0)-z(t_0)}{1-t_0}.
+          \frac{\hat{x}(z(t_0),t_0)-z(t_0)}
+               {\max(1-t_0,0.05)}.
 \]
 
 Replace the true `z(t_1)` by `z_R(t_1)` only for selected samples. Unselected
-samples retain the exact true `z(t_1)`. One gradient-bearing forward/loss on
-this mixed batch at `t_1` is supervised against the same clean packed target.
-Thus half the examples add one stopped call; report both gradient-bearing and
-total transformer calls, wall time, and GPU-hours.
+samples retain the exact true `z(t_1)`. One no-gradient batched call operates
+only on the selected subset when that subset is nonempty; the expected selected
+fraction is one half, not one call per selected example. One gradient-bearing
+forward/loss on the full mixed batch at `t_1` is supervised against the same
+clean packed target. The global sample ID is
+`(update-1)*global_batch_size + rank*local_optimizer_batch_size +
+microstep*microbatch_size + row_within_microbatch`. Report selected counts,
+gradient-bearing and total batched transformer calls, wall time, and GPU-hours.
 
 Action shuffling is evaluated with the three frozen episode-disjoint manifest
 permutations above and labelled only **factual action attribution**. It is not
@@ -189,27 +194,44 @@ sensitivity.
 
 ## Stage D3: generated-only gate
 
-Evaluate every primary arm on all 890 development/validation clips using NFE
+Evaluate the final update-5,000 EMA weights of every primary arm on all 890
+development/validation clips using NFE
 `{1,2,4,8,12,20,25}` and the previous controls: autonomous, donor-target,
 context-shuffled, history-shuffled, actions-shuffled, zero, and oracle-clean.
 Delta predictions are decoded to absolute semantic space before applying the
 existing semantic gate; packed-space errors are additional diagnostics.
-Only NFE `{1,2,4}` is eligible for selection; larger budgets are descriptive.
+The frozen deployable sampler is uniform-clean-time Euler with float32 state
+updates and the same bfloat16 model autocast as the incumbent. D0 solver results
+cannot change it. Only NFE `{1,2,4}` is eligible for selection; larger budgets
+are descriptive.
 
 An arm is eligible only at NFE at most 4 and must satisfy all prior requirements:
 
 - autonomous NMSE at most `0.50`, cosine at least `0.70`, and temporal NMSE at
   most `0.50`;
+- at least 5% paired improvement in ordinary and temporal NMSE over the `ABS`
+  incumbent at the same NFE, with the simultaneous confidence lower bound also
+  at least 5%;
 - at least 5% paired improvement in ordinary and temporal NMSE over both
   donor-target and context-shuffled, with the simultaneous confidence lower
   bound also at least 5%; and
 - positive paired cosine advantages over both controls.
 
-The five arms and three selectable NFEs create 15 candidate cells. Development
-gates use 10,000 paired clip-level bootstrap resamples, seed 20260807, and
-Bonferroni simultaneous confidence `1-.05/15 = .996666...`. If multiple cells
-pass, select deterministically by: smallest NFE, lowest temporal NMSE, lowest
-ordinary NMSE, then arm order `ABS`, `ABS-T`, `DELTA`, `DELTA-T`, `DELTA-R`.
+`ABS` is a non-promotable reference, leaving four candidate arms and three
+selectable NFEs, or 12 candidate cells. Development gates use 10,000 paired
+clip-level bootstrap resamples and seed 20260807. The same vector of 890 clip
+indices is resampled jointly across every metric, cell, and control. For a
+lower-is-better metric, relative improvement is the ratio of sample means
+`(mean(control)-mean(candidate))/mean(control)`; rollout degradation in D0 is
+`(mean(autonomous)-mean(training_distribution)) /
+mean(training_distribution)`. Cosine advantage is the difference of sample
+means. Tests use a one-sided percentile lower bound. To account for selecting
+among 12 cells, each candidate cell uses confidence `1-.05/12 = .995833...`.
+This is a 12-cell Bonferroni screen of composite intersection-union gates; it is
+not described as simultaneous coverage of every component interval. If
+multiple cells pass, select deterministically by: smallest NFE, lowest temporal
+NMSE, lowest ordinary NMSE, then arm order `ABS-T`, `DELTA`, `DELTA-T`,
+`DELTA-R`.
 No alternative tie-break or additional arm may be introduced after metrics are
 visible.
 
@@ -218,9 +240,15 @@ cache with the already frozen PCA/teacher pipeline. Evaluate the incumbent and
 the selected pair exactly once on the protected clips with the same
 clip-addressed noise and nominal 95% paired bootstrap interval. Do not tune,
 rerun with another seed, or inspect other candidate arms on this lockbox. A
-claim and D4 require the selected pair to retain positive ordinary and temporal
-NMSE improvements over the incumbent on this one-shot test. If no development
-cell passes, do not open the lockbox.
+claim and D4 require the selected pair, at its selected NFE, to retain NMSE at
+most `.50`, cosine at least `.70`, temporal NMSE at most `.50`, point
+improvements of at least 5% in ordinary and temporal NMSE over the incumbent,
+and nominal paired 95% lower bounds above zero for both improvements. Before
+any metric is published or read, an operationally failed attempt may be retried
+only with byte-identical source/config/data/checkpoint/noise identities; the
+failed output remains recorded, and this is not a new scientific look. After
+any lockbox metric is visible, no retry is eligible for inference. If no
+development cell passes, do not open the lockbox.
 
 ## Stage D4: video experiment, conditional on D3
 
@@ -233,6 +261,11 @@ clean features. A positive video result requires better generated-only
 temporal quality at equal total NFE, no regression in spatial/perceptual
 quality, and a lower-NFE equivalent-quality point with end-to-end auxiliary
 generation included in latency.
+
+Semantic NMSE is an unvalidated proxy for downstream video utility. If every
+semantic arm fails, a separately preregistered, cheap, generated-only video
+probe may test whether that proxy rejected a useful conditioner. Such a probe
+cannot support a video-quality claim or replace the controlled D4 comparison.
 
 ## If all semantic arms fail
 
