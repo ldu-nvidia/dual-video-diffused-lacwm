@@ -12,8 +12,10 @@ import os
 import shlex
 import sys
 import time
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -59,6 +61,7 @@ def arm_values(registration: dict[str, Any], arm: screen.Arm) -> dict[str, str]:
         "run_dir": str(root / "training" / arm.run_name),
         "evaluation_dir": str(root / "evaluation" / arm.code.lower()),
         "plan": str(root / "arm_plans" / f"{arm.code.lower()}.json"),
+        "runtime_receipt": str(screen.runtime_receipt_path(registration, arm)),
         "parent_snapshot": registration["controlled_study"]["parent_snapshot"]["path"],
         "train_manifest": registration["training"]["manifest"]["path"],
         "train_metadata": registration["training"]["cache_metadata"]["path"],
@@ -236,6 +239,7 @@ def command_arm_values(args: argparse.Namespace) -> int:
             "run_dir",
             "evaluation_dir",
             "plan",
+            "runtime_receipt",
             "parent_snapshot",
             "train_manifest",
             "train_metadata",
@@ -262,6 +266,9 @@ def command_write_arm_plan(args: argparse.Namespace) -> int:
         path = Path(values[key])
         if path.exists() or path.is_symlink():
             raise ActionVariationWorkflowError(f"fresh output exists: {path}")
+    runtime_verification = screen.validate_runtime_receipt(
+        registration, arm, require_current_slurm=True
+    )
     revalidated = screen.revalidate_registered_inputs(registration)
     plan = screen.identity_payload(
         {
@@ -279,6 +286,7 @@ def command_write_arm_plan(args: argparse.Namespace) -> int:
             "resolved_config_contract": config_contract,
             "paths": values,
             "input_revalidation": revalidated,
+            "runtime_verification": runtime_verification,
             "training": {
                 "updates": 200,
                 "seed": 1234,
@@ -291,15 +299,7 @@ def command_write_arm_plan(args: argparse.Namespace) -> int:
             "evaluation": {
                 "validation_clips": 64,
                 "batch_size_per_rank": 1,
-                "endpoints": [
-                    {
-                        "code": endpoint.code,
-                        "nfe": endpoint.nfe,
-                        "action_source": endpoint.action_source,
-                        "primary_gate": endpoint.primary_gate,
-                    }
-                    for endpoint in screen.ENDPOINTS
-                ],
+                "endpoints": screen.endpoint_records(),
                 "protected_test_accessed": False,
                 "future_or_clean_feature_used_at_sampling": False,
             },
@@ -317,6 +317,88 @@ def command_write_arm_plan(args: argparse.Namespace) -> int:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     base._exclusive_json(path, plan)
     print(json.dumps(plan, sort_keys=True))
+    return 0
+
+
+def _read_runtime_verifier(path: Path) -> dict[str, Any]:
+    if not path.is_absolute() or not path.is_file() or path.is_symlink():
+        raise ActionVariationWorkflowError(
+            "runtime verifier JSON must be an absolute regular file"
+        )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ActionVariationWorkflowError("runtime verifier JSON is invalid") from exc
+    if not isinstance(value, Mapping):
+        raise ActionVariationWorkflowError("runtime verifier JSON is not a mapping")
+    return dict(value)
+
+
+def command_write_runtime_receipt(args: argparse.Namespace) -> int:
+    """Seal the successful single-process B200 verifier before any torchrun."""
+
+    registration = _registration(args.registration)
+    arm = _arm(args.arm)
+    values = arm_values(registration, arm)
+    for key in ("run_dir", "evaluation_dir", "plan", "runtime_receipt"):
+        path = Path(values[key])
+        if path.exists() or path.is_symlink():
+            raise ActionVariationWorkflowError(f"fresh output exists: {path}")
+    verifier = _read_runtime_verifier(args.verifier_json)
+    screen.validate_runtime_verifier_output(verifier, registration)
+    expected_task = list(screen.ARM_BY_CODE).index(arm.code)
+    try:
+        array_task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", str(expected_task)))
+        restart_count = int(os.environ.get("SLURM_RESTART_COUNT", "0"))
+    except ValueError as exc:
+        raise ActionVariationWorkflowError(
+            "runtime receipt requires a valid Slurm environment"
+        ) from exc
+    job_id = os.environ.get("SLURM_JOB_ID", "")
+    slurm = {
+        "job_id": job_id,
+        "array_job_id": os.environ.get("SLURM_ARRAY_JOB_ID", job_id),
+        "array_task_id": array_task_id,
+        "restart_count": restart_count,
+        "node_list": os.environ.get(
+            "SLURM_JOB_NODELIST", os.environ.get("SLURM_NODELIST", "")
+        ),
+    }
+    if (
+        not str(slurm["job_id"]).isdigit()
+        or not str(slurm["array_job_id"]).isdigit()
+        or array_task_id != expected_task
+        or restart_count != 0
+        or not slurm["node_list"]
+    ):
+        raise ActionVariationWorkflowError("runtime receipt Slurm identity differs")
+    payload = screen.identity_payload(
+        {
+            "schema_version": 1,
+            "kind": screen.KIND_RUNTIME_RECEIPT,
+            "status": screen.RUNTIME_RECEIPT_STATUS,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "registration_identity_sha256": registration["identity_sha256"],
+            "tool_git_commit": registration["tool_repository"]["git_commit"],
+            "arm": asdict(arm),
+            "run_identity_sha256": values["run_identity"],
+            "verifier_implementation": base._file_record(
+                Path(registration["tool_repository"]["path"])
+                / "tools"
+                / "env"
+                / "verify_b200_runtime.py"
+            ),
+            "verifier_output": verifier,
+            "verifier_identity_sha256": screen.runtime_verifier_identity(verifier),
+            "slurm": slurm,
+            "protected_test_accessed": False,
+        }
+    )
+    output = Path(values["runtime_receipt"])
+    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    base._exclusive_json(output, payload)
+    screen.validate_runtime_receipt(registration, arm, require_current_slurm=True)
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 
@@ -339,10 +421,14 @@ def command_seal_wandb(args: argparse.Namespace) -> int:
     run_dir = Path(values["run_dir"])
     if not (run_dir / "training_complete.json").is_file():
         raise ActionVariationWorkflowError("training is incomplete before W&B sealing")
-    training_completion = base._file_record(run_dir / "training_complete.json")
     output = run_dir / "wandb_run_complete.json"
     if output.exists() or output.is_symlink():
         raise ActionVariationWorkflowError("fresh W&B completion receipt exists")
+    training_completion = base._file_record(run_dir / "training_complete.json")
+    # Hash the multi-GB trained snapshot in this single-process pre-evaluation
+    # boundary. Distributed evaluators consume the sealed record and never make
+    # rank zero hash it immediately before an object collective.
+    trained_snapshot = base._file_record(run_dir / "snapshot.pt")
     try:
         import wandb
     except ImportError as exc:  # pragma: no cover - registered runtime dependency
@@ -398,6 +484,7 @@ def command_seal_wandb(args: argparse.Namespace) -> int:
             },
             "run_identity_sha256": values["run_identity"],
             "training_completion": training_completion,
+            "trained_snapshot": trained_snapshot,
             "wandb": observed,
         }
     )
@@ -445,6 +532,11 @@ def _parser() -> argparse.ArgumentParser:
     write.add_argument("--registration", type=Path, required=True)
     write.add_argument("--arm", choices=tuple(screen.ARM_BY_CODE), required=True)
     write.set_defaults(func=command_write_arm_plan)
+    runtime = sub.add_parser("write-runtime-receipt")
+    runtime.add_argument("--registration", type=Path, required=True)
+    runtime.add_argument("--arm", choices=tuple(screen.ARM_BY_CODE), required=True)
+    runtime.add_argument("--verifier-json", type=Path, required=True)
+    runtime.set_defaults(func=command_write_runtime_receipt)
     return parser
 
 

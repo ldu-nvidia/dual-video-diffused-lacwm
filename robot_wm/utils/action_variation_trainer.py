@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -84,18 +85,48 @@ class ActionVariationTrainer(Trainer):
                 "action-variation continuation requires a regular parent snapshot"
             )
         expected_sha = os.environ.get("ACTION_VARIATION_VPM_SNAPSHOT_SHA256")
-        observed_sha = (
-            _sha256(load_path)
-            if not torch.distributed.is_initialized()
-            or torch.distributed.get_rank() == 0
+        preflight_sha = os.environ.get("ACTION_VARIATION_PARENT_PREFLIGHT_SHA256")
+        if expected_sha != PARENT_SNAPSHOT_SHA256 or preflight_sha != expected_sha:
+            raise RuntimeError("historical VPM snapshot digest differs")
+        try:
+            runtime_binding = json.loads(
+                os.environ["ACTION_VARIATION_RUNTIME_RECEIPT_BINDING_JSON"]
+            )
+        except (KeyError, json.JSONDecodeError) as exc:
+            raise RuntimeError("sealed runtime receipt binding is absent") from exc
+        runtime_record = (
+            runtime_binding.get("record")
+            if isinstance(runtime_binding, Mapping)
             else None
         )
-        if torch.distributed.is_initialized():
-            values = [observed_sha]
-            torch.distributed.broadcast_object_list(values, src=0)
-            observed_sha = values[0]
-        if expected_sha != PARENT_SNAPSHOT_SHA256 or observed_sha != expected_sha:
-            raise RuntimeError("historical VPM snapshot digest differs")
+        runtime_path = (
+            Path(str(runtime_record.get("path", "")))
+            if isinstance(runtime_record, Mapping)
+            else Path("")
+        )
+        if (
+            not isinstance(runtime_binding, Mapping)
+            or set(runtime_binding)
+            != {"record", "identity_sha256", "verifier_identity_sha256"}
+            or not isinstance(runtime_record, Mapping)
+            or set(runtime_record) != {"path", "bytes", "sha256"}
+            or not runtime_path.is_absolute()
+            or not runtime_path.is_file()
+            or runtime_path.is_symlink()
+            or runtime_path.resolve(strict=True) != runtime_path
+            or runtime_path.stat().st_size != runtime_record.get("bytes")
+            or _sha256(runtime_path) != runtime_record.get("sha256")
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(runtime_binding.get("identity_sha256", ""))
+            )
+            is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(runtime_binding.get("verifier_identity_sha256", "")),
+            )
+            is None
+        ):
+            raise RuntimeError("sealed runtime receipt binding differs")
         snapshot = torch.load(
             load_path, map_location="cpu", weights_only=True, mmap=True
         )
@@ -172,6 +203,7 @@ class ActionVariationTrainer(Trainer):
         module = self.model.module
         if bool(module.action_variation_enabled) != enabled:
             raise RuntimeError("action-variation arm flag changed during construction")
+        self._runtime_verification_receipt = dict(runtime_binding)
         self._action_variation_arm = "AV-DELTA" if enabled else "AV-CONT"
         self._trace_path = (
             self.save_path.parent / "action_variation_training_trace.jsonl"
@@ -199,7 +231,9 @@ class ActionVariationTrainer(Trainer):
                     module.action_delta_residual.effective_gate().detach().cpu()
                 ),
                 "same_schema_modules_and_forward_calls": True,
-                "parent_function_preserved_at_initialization": True,
+                "current_code_parent_path_no_op_at_initialization": True,
+                "historical_forward_bit_identity_claimed": False,
+                "runtime_verification_receipt": self._runtime_verification_receipt,
                 "model_calls_per_update": 1,
                 "optimizer_state_policy": "fresh_identical_adamw",
                 "ema_policy": "none",
@@ -216,6 +250,23 @@ class ActionVariationTrainer(Trainer):
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
+
+    def _write_completion_marker(self) -> None:
+        if not self.is_main_process:
+            return
+        self._atomic_write_json(
+            self.completion_path,
+            {
+                "schema_version": 1,
+                "status": "completed",
+                "completed_updates": int(self.max_iter),
+                "max_iter": int(self.max_iter),
+                "run_identity_sha256": self.run_identity_sha256,
+                "snapshot": str(self.save_path.resolve(strict=False)),
+                "runtime_verification_receipt": self._runtime_verification_receipt,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
     def _step(self) -> dict[str, Any]:
         losses = super()._step()

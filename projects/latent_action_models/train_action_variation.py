@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
 import sys
 import traceback
+from dataclasses import asdict
 from pathlib import Path
 
 import hydra
@@ -49,21 +51,39 @@ def _validate_launch_contract(cfg: DictConfig) -> str:
         raise RuntimeError("action-variation arm plan is not a regular file")
     plan = evidence._read_json(plan_path, "action-variation arm plan")
     observed_contract = screen.canonical_config_contract(cfg)
+    runtime_verification = screen.validate_runtime_receipt(
+        registration, arm, require_current_slurm=True
+    )
+    registered_inputs = screen.validate_registered_input_revalidation(
+        plan.get("input_revalidation"), registration
+    )
     if (
         not screen.identity_valid(plan)
         or plan.get("kind") != "action_variation_arm_execution_plan"
         or plan.get("status") != "planned_before_arm_training_or_metrics"
-        or plan.get("arm", {}).get("code") != arm.code
-        or plan.get("arm", {}).get("residual_enabled") is not arm.residual_enabled
+        or plan.get("arm") != asdict(arm)
         or plan.get("registration_identity_sha256") != registration["identity_sha256"]
         or plan.get("run_identity_sha256") != expected_identity
         or plan.get("resolved_config_contract") != observed_contract
+        or plan.get("input_revalidation") != registered_inputs
+        or plan.get("runtime_verification") != runtime_verification
+        or plan.get("evaluation", {}).get("endpoints")
+        != screen.endpoint_records()
         or os.environ.get("LACWM_RUN_IDENTITY_SHA256") != expected_identity
         or not bool(cfg.wandb.enabled)
         or str(cfg.wandb.id) != expected_identity
         or str(cfg.wandb.resume) != "never"
     ):
         raise RuntimeError("resolved launch config/identity differs from arm plan")
+    # These values are derived only after every rank has validated the immutable
+    # pre-torchrun plan. The trainer can therefore avoid rank-zero hashing of the
+    # multi-GB parent after NCCL has been initialized.
+    os.environ["ACTION_VARIATION_PARENT_PREFLIGHT_SHA256"] = (
+        screen.PARENT_SNAPSHOT_SHA256
+    )
+    os.environ["ACTION_VARIATION_RUNTIME_RECEIPT_BINDING_JSON"] = json.dumps(
+        runtime_verification, sort_keys=True, separators=(",", ":")
+    )
     return expected_identity
 
 
@@ -89,8 +109,8 @@ def _teardown(trainer: ActionVariationTrainer) -> None:
 
 
 def _setup(cfg: DictConfig) -> ActionVariationTrainer:
-    dist.init_process_group()
     expected_identity = _validate_launch_contract(cfg)
+    dist.init_process_group()
     _seed_all(int(cfg.seed))
     trainer = None
     try:

@@ -6,6 +6,7 @@
 #SBATCH --mem=1000G
 #SBATCH --time=04:00:00
 #SBATCH --partition=batch
+#SBATCH --exclude=pool0-0081,pool0-0089,pool0-0200,pool0-0343
 #SBATCH --open-mode=append
 #SBATCH --no-requeue
 
@@ -83,6 +84,7 @@ fi
 
 IFS=$'\t' read -r \
   ARM_CODE CONFIG_NAME RUN_NAME RUN_IDENTITY TRAINING_ROOT RUN_DIR EVAL_DIR PLAN \
+  RUNTIME_RECEIPT \
   PARENT_SNAPSHOT TRAIN_MANIFEST TRAIN_METADATA VAL_MANIFEST VAL_METADATA \
   STATS STATS_SHA PYTHON_REGISTERED WAN_DIR_VALUE VIDEOX_HOME_VALUE \
   < <(
@@ -125,8 +127,17 @@ TMPDIR_VALUE="/tmp/lacwm-action-variation-${UID}-${SLURM_JOB_ID}-${ARM_CODE}"
 mkdir "$TMPDIR_VALUE"
 export TMPDIR="$TMPDIR_VALUE"
 
-"$PYTHON_BIN" "$VERIFY_RUNTIME" --expected-gpus 8 --require-b200 --wan-dir "$WAN_DIR"
+RUNTIME_VERIFIER_JSON="$TMPDIR/runtime_verifier_output.json"
+[[ ! -e "$RUNTIME_VERIFIER_JSON" && ! -L "$RUNTIME_VERIFIER_JSON" ]] || \
+  die "fresh runtime verifier output exists"
+"$PYTHON_BIN" "$VERIFY_RUNTIME" --expected-gpus 8 --require-b200 \
+  --wan-dir "$WAN_DIR" > "$RUNTIME_VERIFIER_JSON"
 "$PYTHON_BIN" "$WORKFLOW" wandb-check >/dev/null
+"$PYTHON_BIN" "$WORKFLOW" write-runtime-receipt \
+  --registration "$REGISTRATION" --arm "$ARM_CODE" \
+  --verifier-json "$RUNTIME_VERIFIER_JSON" >/dev/null
+[[ -s "$RUNTIME_RECEIPT" && ! -L "$RUNTIME_RECEIPT" ]] || \
+  die "sealed runtime verification receipt is absent"
 "$PYTHON_BIN" "$WORKFLOW" write-arm-plan \
   --registration "$REGISTRATION" --arm "$ARM_CODE" >/dev/null
 

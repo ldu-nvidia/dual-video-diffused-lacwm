@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -128,17 +129,211 @@ def test_guarded_launcher_sets_registered_pythonpath_and_batch_one():
     root = Path(__file__).resolve().parents[2]
     sbatch = (root / "tools/slurm/action_variation.sbatch").read_text()
     submit = (root / "tools/slurm/submit_action_variation.sh").read_text()
+    workflow = (root / "tools/slurm/action_variation_workflow.py").read_text()
+    entrypoint = (
+        root / "projects/latent_action_models/train_action_variation.py"
+    ).read_text()
+    trainer = (root / "robot_wm/utils/action_variation_trainer.py").read_text()
+    evaluator = (root / "tools/action_variation_evaluate.py").read_text()
+    analyzer = (root / "tools/analyze_action_variation.py").read_text()
     assert "--expected-gpus 8 --require-b200" in sbatch
     assert 'export PYTHONPATH="$REPO_ROOT:$PROJECT_ROOT:' in sbatch
     assert "--batch-size-per-rank 1" in sbatch
     assert "wandb.group=null" in sbatch
     assert '"$WORKFLOW" seal-wandb' in sbatch
+    assert '"$WORKFLOW" write-runtime-receipt' in sbatch
     assert "wandb_run_complete.json" in sbatch
     assert "rm -rf" not in sbatch
     assert "Dry-run is the default" in submit
     assert "--gpus-per-node 8" in submit
     assert "--gpus-per-node 0" not in submit
     assert '--dependency "afterok:$ARM_JOB_ID"' in submit
+    excluded = "pool0-0081,pool0-0089,pool0-0200,pool0-0343"
+    assert f"#SBATCH --exclude={excluded}" in sbatch
+    assert f'EXCLUDE_NODES="{excluded}"' in submit
+    assert "--exclude)" in submit
+    assert sbatch.index('"$VERIFY_RUNTIME"') < sbatch.index(
+        '"$WORKFLOW" write-runtime-receipt'
+    ) < sbatch.index('"$WORKFLOW" write-arm-plan') < sbatch.index(
+        '"$PYTHON_BIN" -m torch.distributed.run'
+    )
+    assert entrypoint.index("_validate_launch_contract(cfg)") < entrypoint.index(
+        "dist.init_process_group()"
+    )
+    assert "_sha256(load_path)" not in trainer
+    assert "broadcast_object_list" not in trainer
+    assert "_distributed_file_record(snapshot_path)" not in evaluator
+    assert 'trained_snapshot = base._file_record(run_dir / "snapshot.pt")' in workflow
+    assert '"runtime_verification": runtime_verification' in workflow
+    assert (
+        '"runtime_verification_receipt": self._runtime_verification_receipt'
+        in trainer
+    )
+    assert '"runtime_verification_receipt": runtime_verification' in evaluator
+    assert '"runtime_verification_receipts": {' in analyzer
+
+
+def _runtime_registration(tmp_path: Path) -> dict:
+    root = Path(__file__).resolve().parents[2]
+    record = {"path": "/registered", "bytes": 1, "sha256": "d" * 64}
+    return {
+        "identity_sha256": "a" * 64,
+        "output_root": str(tmp_path),
+        "tool_repository": {"path": str(root), "git_commit": "b" * 40},
+        "controlled_study": {"parent_snapshot": dict(record)},
+        "training": {
+            key: dict(record)
+            for key in ("manifest", "cache_metadata", "rgb", "actions")
+        },
+        "validation": {
+            key: dict(record)
+            for key in ("manifest", "cache_metadata", "rgb", "actions")
+        },
+        "action_delta_stats": {"file": {**record, "sha256": "c" * 64}},
+        "runtime": {
+            "python": "/registered/python",
+            "videox_commit": "e" * 40,
+            "wan_dir": "/registered/wan",
+        },
+    }
+
+
+def _write_runtime_receipt(registration: dict, arm: screen.Arm):
+    root = Path(__file__).resolve().parents[2]
+    verifier = {
+        "python": "3.10.20",
+        "environment": {"sys_executable": registration["runtime"]["python"]},
+        "videox_commit": registration["runtime"]["videox_commit"],
+        "videox_status": "clean",
+        "weights": {"root": registration["runtime"]["wan_dir"]},
+        "gpus": {
+            "count": 8,
+            "devices": [
+                {"index": index, "name": "NVIDIA B200", "capability": [10, 0]}
+                for index in range(8)
+            ],
+            "nccl_available": True,
+            "inaccessible_peer_pairs": [],
+        },
+    }
+    core = {
+        "schema_version": 1,
+        "kind": screen.KIND_RUNTIME_RECEIPT,
+        "status": screen.RUNTIME_RECEIPT_STATUS,
+        "created_at_utc": "2026-08-08T00:00:00+00:00",
+        "registration_identity_sha256": registration["identity_sha256"],
+        "tool_git_commit": registration["tool_repository"]["git_commit"],
+        "arm": asdict(arm),
+        "run_identity_sha256": screen.arm_run_identity(registration, arm),
+        "verifier_implementation": evaluation.base._file_record(
+            root / "tools/env/verify_b200_runtime.py"
+        ),
+        "verifier_output": verifier,
+        "verifier_identity_sha256": screen.runtime_verifier_identity(verifier),
+        "slurm": {
+            "job_id": "1001",
+            "array_job_id": "1000",
+            "array_task_id": list(screen.ARM_BY_CODE).index(arm.code),
+            "restart_count": 0,
+            "node_list": "pool0-0001",
+        },
+        "protected_test_accessed": False,
+    }
+    path = screen.runtime_receipt_path(registration, arm)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(screen.identity_payload(core)))
+    return path
+
+
+def test_registered_input_and_runtime_receipts_are_exact(tmp_path, monkeypatch):
+    registration = _runtime_registration(tmp_path)
+    expected = screen.registered_input_records(registration)
+    assert (
+        screen.validate_registered_input_revalidation(expected, registration)
+        == expected
+    )
+    forged = dict(expected)
+    forged["parent_snapshot"] = {**expected["parent_snapshot"], "sha256": "0" * 64}
+    with pytest.raises(screen.ActionVariationScreenError, match="revalidation differs"):
+        screen.validate_registered_input_revalidation(forged, registration)
+
+    arm = screen.ARMS[0]
+    receipt_path = _write_runtime_receipt(registration, arm)
+    binding = screen.validate_runtime_receipt(registration, arm)
+    assert binding["record"]["path"] == str(receipt_path)
+    assert binding["verifier_identity_sha256"]
+    for key, value in {
+        "SLURM_JOB_ID": "1001",
+        "SLURM_ARRAY_JOB_ID": "1000",
+        "SLURM_ARRAY_TASK_ID": "0",
+        "SLURM_RESTART_COUNT": "0",
+        "SLURM_JOB_NODELIST": "pool0-0001",
+    }.items():
+        monkeypatch.setenv(key, value)
+    assert screen.validate_runtime_receipt(
+        registration, arm, require_current_slurm=True
+    ) == binding
+    monkeypatch.setenv("SLURM_JOB_ID", "9999")
+    with pytest.raises(screen.ActionVariationScreenError, match="different Slurm"):
+        screen.validate_runtime_receipt(
+            registration, arm, require_current_slurm=True
+        )
+
+
+def test_arm_plan_uses_the_complete_canonical_endpoint_schema(tmp_path):
+    registration = _runtime_registration(tmp_path)
+    arm = screen.ARMS[0]
+    _write_runtime_receipt(registration, arm)
+    runtime_binding = screen.validate_runtime_receipt(registration, arm)
+    run_dir = tmp_path / "training" / arm.run_name
+    resolved = screen.identity_payload({"kind": "test_config"})
+    plan_core = {
+        "schema_version": 1,
+        "kind": "action_variation_arm_execution_plan",
+        "status": "planned_before_arm_training_or_metrics",
+        "registration_identity_sha256": registration["identity_sha256"],
+        "arm": asdict(arm),
+        "run_identity_sha256": screen.arm_run_identity(registration, arm),
+        "resolved_config_contract": resolved,
+        "paths": {"run_dir": str(run_dir)},
+        "input_revalidation": screen.registered_input_records(registration),
+        "runtime_verification": runtime_binding,
+        "training": {
+            "updates": 200,
+            "wan_calls_per_update": 1,
+            "same_schema_and_forward_compute": True,
+        },
+        "evaluation": {
+            "batch_size_per_rank": 1,
+            "endpoints": screen.endpoint_records(),
+            "protected_test_accessed": False,
+            "future_or_clean_feature_used_at_sampling": False,
+        },
+        "wandb": {
+            "entity": "zijiandu",
+            "project": "dual-video-diffusion-private",
+            "group": None,
+            "mode": "online",
+            "id": screen.arm_run_identity(registration, arm),
+            "resume": "never",
+        },
+    }
+    plan_path = tmp_path / "arm_plans" / f"{arm.code.lower()}.json"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(json.dumps(screen.identity_payload(plan_core)))
+    observed = evaluation._validate_arm_plan(registration, arm, run_dir)
+    assert observed["runtime_verification"] == runtime_binding
+    assert all("residual_mode" in endpoint for endpoint in screen.endpoint_records())
+
+    forged = dict(plan_core)
+    forged["evaluation"] = dict(plan_core["evaluation"])
+    forged["evaluation"]["endpoints"] = [
+        {key: value for key, value in endpoint.items() if key != "residual_mode"}
+        for endpoint in screen.endpoint_records()
+    ]
+    plan_path.write_text(json.dumps(screen.identity_payload(forged)))
+    with pytest.raises(evaluation.ActionVariationEvaluationError, match="plan differs"):
+        evaluation._validate_arm_plan(registration, arm, run_dir)
 
 
 def test_shuffled_donor_action_loader_never_reads_rgb():
@@ -166,6 +361,8 @@ def test_wandb_completion_receipt_is_semantically_bound(tmp_path):
     run_identity = screen.arm_run_identity(registration, arm)
     completion_path = tmp_path / "training_complete.json"
     completion_path.write_text('{"status":"completed"}\n')
+    snapshot_path = tmp_path / "snapshot.pt"
+    snapshot_path.write_bytes(b"trained snapshot")
     core = {
         "schema_version": 1,
         "kind": "action_variation_wandb_run_complete",
@@ -177,6 +374,7 @@ def test_wandb_completion_receipt_is_semantically_bound(tmp_path):
         },
         "run_identity_sha256": run_identity,
         "training_completion": evaluation.base._file_record(completion_path),
+        "trained_snapshot": evaluation.base._file_record(snapshot_path),
         "wandb": {
             "id": run_identity,
             "entity": "zijiandu",
@@ -196,6 +394,18 @@ def test_wandb_completion_receipt_is_semantically_bound(tmp_path):
         registration, arm, tmp_path
     )
     assert observed["wandb"]["id"] == run_identity
+    assert evaluation._validate_wandb_completion_receipt(
+        registration, arm, tmp_path, rehash_snapshot=True
+    )["trained_snapshot"] == core["trained_snapshot"]
+    snapshot_path.write_bytes(b"altered!snapshot")
+    with pytest.raises(
+        evaluation.ActionVariationEvaluationError,
+        match="W&B completion receipt differs",
+    ):
+        evaluation._validate_wandb_completion_receipt(
+            registration, arm, tmp_path, rehash_snapshot=True
+        )
+    snapshot_path.write_bytes(b"trained snapshot")
 
     forged = dict(core)
     forged["wandb"] = {**core["wandb"], "group": "hidden-group"}

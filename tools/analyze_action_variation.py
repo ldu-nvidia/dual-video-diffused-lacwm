@@ -262,21 +262,28 @@ def _validate_arm_artifacts(
             raise ActionVariationAnalysisError("saved arm config differs from its plan")
     completion_path = run_dir / "training_complete.json"
     completion = base._read_json(completion_path, "training completion")
+    runtime_verification = plan["runtime_verification"]
     if (
         completion.get("status") != "completed"
         or completion.get("completed_updates") != 200
+        or completion.get("max_iter") != 200
         or completion.get("run_identity_sha256") != expected_identity
+        or completion.get("snapshot")
+        != str((run_dir / "snapshot.pt").resolve(strict=True))
+        or completion.get("runtime_verification_receipt") != runtime_verification
     ):
         raise ActionVariationAnalysisError("training completion differs")
+    wandb_completion = evaluation._validate_wandb_completion_receipt(
+        registration, arm, run_dir, rehash_snapshot=True
+    )
     expected = {
-        "snapshot": base._file_record(run_dir / "snapshot.pt"),
+        "snapshot": wandb_completion["trained_snapshot"],
         "config": base._file_record(config_path),
         "training_trace": evaluation._validate_trace(run_dir, arm, registration),
         "training_completion": base._file_record(completion_path),
-        "wandb_completion_receipt": evaluation._validate_wandb_completion_receipt(
-            registration, arm, run_dir
-        ),
+        "wandb_completion_receipt": wandb_completion,
         "arm_execution_plan": plan,
+        "runtime_verification_receipt": runtime_verification,
         "run_identity_sha256": expected_identity,
         "wandb_run_id": expected_identity,
     }
@@ -364,6 +371,7 @@ def _load_inventory(
             "nfe": 1,
             "excluded_from_endpoint_call_accounting": True,
         }
+        or inventory.get("latency_semantics") != evaluation.LATENCY_SEMANTICS
         or inventory.get("paired_inputs_and_noise_within_arm") is not True
         or inventory.get("protected_test_accessed") is not False
         or inventory.get("target_cache_array_opened") is not False
@@ -756,8 +764,17 @@ def analyze(
                 "candidate": candidate_record["inventory"][
                     "latency_ms_batch_one_by_endpoint"
                 ],
+                "semantics": evaluation.LATENCY_SEMANTICS,
                 "same_transformer_calls": True,
                 "nfe_one_is_one_wan_call": True,
+            },
+            "runtime_verification_receipts": {
+                "control": control_record["inventory"]["arm_artifacts"][
+                    "runtime_verification_receipt"
+                ],
+                "candidate": candidate_record["inventory"]["arm_artifacts"][
+                    "runtime_verification_receipt"
+                ],
             },
             "learned_action_residual_gate": {
                 "control": control_record["inventory"]["arm_artifacts"][
