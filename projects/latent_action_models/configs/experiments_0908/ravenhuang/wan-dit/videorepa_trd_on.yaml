@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /experiments_0908/videorepa_trd_common
+  - _self_
+
+name: videorepa-trd-on-seed1234-u000200
+model:
+  token_relation_distillation:
+    mode: "on"
+    loss_weight: 0.5
+wandb:
+  tags: [abc, videorepa, TRD-ON, relational-supervision, seed-1234]

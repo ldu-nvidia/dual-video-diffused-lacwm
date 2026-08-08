@@ -1,0 +1,19 @@
+defaults:
+  - dual_explicit_action_dit_vjepa
+  - _self_
+
+_target_: lam.videorepa_trd_model.VideoRepaTRDModel
+
+# No module is constructed for TRD.  These values define a training-only loss
+# over a scoped block-14 activation and the cached clean V-JEPA target.
+token_relation_distillation:
+  mode: "off"
+  loss_weight: 0.0
+  margin: 0.05
+  block_index: 14
+  num_views: 3
+  pool_height: 2
+  pool_width_per_view: 4
+  # Follow VideoREPA Appendix C: the first 3D-VAE temporal bin is primarily a
+  # semantic anchor, so relational supervision focuses on the remaining bins.
+  exclude_first_temporal_bin: true

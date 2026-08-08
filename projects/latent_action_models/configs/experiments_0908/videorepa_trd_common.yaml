@@ -1,0 +1,143 @@
+# @package _global_
+defaults:
+  - override /datasets@dataset: transformed_fixed_abc_vjepa
+  - override /datasets@val_dataset: transformed_fixed_abc_vjepa
+  - override /datasets@viz_dataset: transformed_fixed_abc_vjepa
+  - override /models@model: dual_explicit_action_dit_videorepa_trd
+  - override /tokenizers/rgb@model.rgb_tokenizer: wan_vae
+  - override /optimizers@optimizer_factory: adamw
+  - override /lr_schedulers@lr_scheduler_factory: linear_warmup_cosine_decay
+
+name: videorepa-trd-common
+seed: 1234
+
+# Training, trainer-validation, and trainer-visualization deliberately resolve
+# only the immutable TRAIN cache.  The sealed val64 paths are accepted solely
+# by the post-training evaluator after both arm checkpoints are complete.
+dataset: &training_dataset
+  padding_dim: 157
+  seed: ${seed}
+  infinite: true
+  img_augment: false
+  emit_crop_rgb: false
+  future_validity: {enabled: false, max_retries: 0}
+  transform: {sample_size: 13, chunk_size: 5}
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:TRD_TRAIN_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:TRD_TRAIN_CACHE_METADATA}
+val_dataset:
+  <<: *training_dataset
+  seed: 2468
+viz_dataset:
+  <<: *training_dataset
+  seed: 3579
+
+data_loader:
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+val_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${val_dataset}
+    batch_size: 2
+    drop_last: false
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: false
+viz_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${viz_dataset}
+    batch_size: 1
+    num_workers: 1
+    pin_memory: true
+    prefetch_factor: 1
+    persistent_workers: false
+
+model:
+  rgb_tokenizer:
+    output_dim: 16
+    input_mean: [0.5, 0.5, 0.5]
+    input_std: [0.5, 0.5, 0.5]
+  forward_model:
+    lora_rank: 64
+    lora_alpha: 128
+    lora_dropout: 0.05
+    # A scoped block activation participates in the loss.  Disabling activation
+    # checkpointing guarantees backward differentiates that exact forward and
+    # is identical in the two arms.
+    gradient_checkpointing: false
+  num_history_frames: 5
+  num_future_frames: 8
+  viz_num_steps: 1
+  action_encoder:
+    action_dim: ${dataset.padding_dim}
+    chunk_size: ${dataset.transform.chunk_size}
+  morphology_tokens:
+    _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
+    num_embeddings: 10
+    embedding_dim: 64
+  dual_diffusion:
+    enabled: true
+    auxiliary_history_mode: diffuse_all
+    tf_channels: 64
+    condition_on_tf: false
+    condition_on_tf_clock: false
+    condition_mode: "off"
+    schedule_mode: aligned
+    tf_lead_logit: 0.0
+    tf_loss_weight: 0.0
+    parameter_matched_control: true
+    video_only_control: false
+    state_gate_init: 0.0
+    state_gate_trainable: true
+    clock_gate_init: 0.0
+    clock_gate_trainable: true
+    evaluation_nfe_steps: [1]
+    evaluation_condition_sources: ["off"]
+    capture_latent_trajectories: false
+    artifact_batch_limit: 1
+
+optimizer_factory: {lr: 1.0e-4, betas: [0.9, 0.95]}
+lr_scheduler_factory:
+  lr_lambda:
+    warmup_steps: 20
+    total_steps: ${trainer.config.max_iter}
+    final_learning_rate: 1.0e-6
+
+wandb:
+  enabled: true
+  mode: online
+  entity: zijiandu
+  project: dual-video-diffusion-private
+  group: null
+  name: ${name}
+  tags: [abc, videorepa, token-relation-distillation, controlled-screen, seed-1234]
+  settings:
+    start_method: thread
+    save_code: false
+    finish_timeout: 120.0
+    finish_timeout_raises: false
+
+trainer:
+  _target_: robot_wm.utils.videorepa_trd_trainer.VideoRepaTRDTrainer
+  config:
+    max_iter: 200
+    gradient_accumulation_steps: 1
+    throughput_warmup_steps: 20
+    load_path: ${oc.env:TRD_VPM_SNAPSHOT}
+    exclude_keys: []
+    logging: {log_every: 5}
+    saving: {save_every: 200}
+    validation: {val_every: 50, n_val_samples: 4, save_best: false}
+    visualization: {viz_every: 200, require_success: true}
+    gradient_clipping: {max_norm: 1.0}
+
+hydra:
+  run:
+    dir: ${oc.env:TRD_RUN_ROOT}/${name}
+  sweep:
+    dir: ${oc.env:TRD_RUN_ROOT}/${name}
