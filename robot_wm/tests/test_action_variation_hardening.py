@@ -147,6 +147,7 @@ def test_guarded_launcher_sets_registered_pythonpath_and_batch_one():
     assert "Dry-run is the default" in submit
     assert "--gpus-per-node 8" in submit
     assert "--gpus-per-node 0" not in submit
+    assert "--gpus-per-node 1" in submit
     assert '--dependency "afterok:$ARM_JOB_ID"' in submit
     excluded = "pool0-0081,pool0-0089,pool0-0200,pool0-0343"
     assert f"#SBATCH --exclude={excluded}" in sbatch
@@ -171,6 +172,24 @@ def test_guarded_launcher_sets_registered_pythonpath_and_batch_one():
     )
     assert '"runtime_verification_receipt": runtime_verification' in evaluator
     assert '"runtime_verification_receipts": {' in analyzer
+
+
+def test_registration_preserves_virtualenv_launcher_and_binds_real_binary(tmp_path):
+    real_python = tmp_path / "python-real"
+    real_python.write_bytes(b"#!/bin/sh\n")
+    real_python.chmod(0o700)
+    launcher = tmp_path / "python"
+    launcher.symlink_to(real_python)
+
+    # This is the contract used by command_register: keep the launcher for
+    # sys.executable/pyvenv.cfg while hashing its resolved executable target.
+    assert launcher.is_file()
+    assert launcher.resolve(strict=True) == real_python
+    record = screen.base._file_record(launcher.resolve(strict=True))
+    runtime = {"python": str(launcher), "python_file": record}
+    assert Path(runtime["python"]).resolve(strict=True) == Path(
+        runtime["python_file"]["path"]
+    )
 
 
 def _runtime_registration(tmp_path: Path) -> dict:

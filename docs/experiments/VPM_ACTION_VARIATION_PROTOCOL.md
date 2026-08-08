@@ -197,3 +197,10 @@ of control rather than in the action encoder.
 - `tools/slurm/action_variation_workflow.py`
 - `tools/slurm/action_variation.sbatch`
 - `tools/slurm/submit_action_variation.sh`
+
+The registration preserves the absolute virtual-environment launcher path and
+separately hashes its resolved interpreter target.  This is intentional:
+invoking the target directly would bypass the virtual environment's
+`pyvenv.cfg`.  The analysis dependency requests one GPU because this cluster's
+`batch` partition rejects jobs without a GPU allocation, although analysis does
+not use that device for a scientific computation.
