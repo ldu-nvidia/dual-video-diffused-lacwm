@@ -3,8 +3,8 @@
 Date frozen: 2026-08-08, before planner fitting, arm continuation, or candidate
 validation metrics
 
-Status: implementation and protocol only; no job or metric is created by this
-commit
+Status: completed; the candidate failed the generated-plan quality and action
+attribution gates.  See `VPM_CAUSAL_MOTION_PLAN_RESULTS.md`.
 
 ## Question and claim boundary
 
