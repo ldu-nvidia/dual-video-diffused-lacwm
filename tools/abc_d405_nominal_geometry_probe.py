@@ -213,6 +213,27 @@ def _decode_top_calibration(raw_mcap: Path) -> dict[str, Any]:
 
 
 def _read_video_frames(video: Path, frame_indices: Sequence[int]) -> np.ndarray:
+    requested = [int(index) for index in frame_indices]
+    if requested != sorted(requested) or len(requested) != len(set(requested)):
+        raise ValueError("frame_indices must be strictly increasing and unique")
+    try:
+        import av
+    except ImportError:
+        av = None
+    if av is not None:
+        targets = set(requested)
+        decoded: dict[int, np.ndarray] = {}
+        with av.open(str(video)) as container:
+            for index, frame in enumerate(container.decode(video=0)):
+                if index in targets:
+                    decoded[index] = frame.to_ndarray(format="rgb24")
+                if len(decoded) == len(targets):
+                    break
+        missing = [index for index in requested if index not in decoded]
+        if missing:
+            raise RuntimeError(f"Could not decode frames {missing} from {video} with PyAV")
+        return np.stack([decoded[index] for index in requested], axis=0)
+
     try:
         import cv2
     except ImportError as exc:  # pragma: no cover - dependency guidance
@@ -223,7 +244,7 @@ def _read_video_frames(video: Path, frame_indices: Sequence[int]) -> np.ndarray:
         raise RuntimeError(f"Could not open video: {video}")
     frames = []
     try:
-        for index in frame_indices:
+        for index in requested:
             capture.set(cv2.CAP_PROP_POS_FRAMES, int(index))
             ok, bgr = capture.read()
             if not ok:
