@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=ac-recover-fit
+#SBATCH --account=coreai_chef_posttrain
+#SBATCH --partition=batch
+#SBATCH --qos=short
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=256G
+#SBATCH --time=02:00:00
+#SBATCH --exclude=pool0-0081,pool0-0089,pool0-0200,pool0-0343
+
+set -euo pipefail
+
+[[ $# -eq 2 ]] || { echo "usage: $0 REGISTRATION PYTHON" >&2; exit 2; }
+REGISTRATION=$1
+PYTHON_BIN=$2
+REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
+TOOL=$REPO/tools/action_cycle_recoverability.py
+[[ -f $REGISTRATION && -x $PYTHON_BIN ]] || { echo "registered runtime input is missing" >&2; exit 2; }
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+export WANDB_ENTITY=zijiandu
+export WANDB_PROJECT=dual-video-diffusion-private
+unset WANDB_RUN_GROUP WANDB_GROUP || true
+ROOT=$(dirname -- "$REGISTRATION")
+export WANDB_DIR=$ROOT/wandb
+export WANDB_CACHE_DIR=$ROOT/wandb-cache
+export WANDB_CONFIG_DIR=$ROOT/wandb-config
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+"$PYTHON_BIN" "$TOOL" validate-registration --registration "$REGISTRATION"
+"$PYTHON_BIN" "$TOOL" wandb-check >/dev/null
+"$PYTHON_BIN" "$TOOL" analyze --registration "$REGISTRATION" --wandb
+
