@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-SCHEMA = "lacwm-action-conditioning-audit-v1"
+SCHEMA = "lacwm-action-conditioning-audit-v2"
 REQUIRED_KEYS = {
     "morphology_tokens.weight",
     "action_encoder.net.0.weight",
@@ -139,6 +139,7 @@ def tensor_stats(value: Tensor) -> dict[str, float | list[int]]:
         ),
         "cyclic_shuffle_cosine_mean": float(cosine.mean()),
         "cyclic_shuffle_cosine_min": float(cosine.min()),
+        "centered_effective_rank": effective_rank(value),
     }
 
 
@@ -185,6 +186,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     control = replay["control"]
     zero_control = zero_replay["control"]
     action_component = control - zero_control
+    active_future_actions = actions[:, 4:12]
+    within_chunk_delta = (
+        active_future_actions[:, :, 1:] - active_future_actions[:, :, :-1]
+    )
+    chunk_endpoint_delta = (
+        active_future_actions[:, :, -1] - active_future_actions[:, :, 0]
+    )
     result: dict[str, Any] = {
         "schema": SCHEMA,
         "source": {
@@ -206,6 +214,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             name: tensor_stats(value)
             for name, value in (
                 ("future_actions", replay["future_actions"]),
+                ("within_chunk_action_delta", within_chunk_delta),
+                ("chunk_endpoint_action_delta", chunk_endpoint_delta),
                 ("encoded_actions", replay["encoded_actions"]),
                 ("pooled_actions", replay["pooled_actions"]),
                 ("control", control),
