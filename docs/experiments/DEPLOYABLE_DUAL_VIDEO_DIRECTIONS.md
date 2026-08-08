@@ -20,6 +20,7 @@ ABC screen, not protected-test or general video-quality claims.
 | LaMo macro-motion drift loss | effects were approximately neutral; best temporal point effect was +0.47% at NFE 4 with a negative simultaneous bound | rejected at this budget |
 | two-clock consistency | NFE-1 latent/decoded MSE improved +0.49%/+0.68%, but temporal MSE worsened 0.28%; all metrics worsened by NFE 4 | rejected at this budget |
 | observed V-JEPA anchor plus generated increments | semantic NMSE improved 46--49%, but increment NMSE was 1.00--1.17, temporal attribution versus shuffled/donor controls was below 0.3%, and a mean/static increment was as good or better | static identity works; future motion does not |
+| generated Haar frequency forcing | auxiliary-only, synchronous-joint, and leading-joint arms all regressed the NFE-1 video-only control; the best joint arm was 6.39%/3.86%/0.74% worse in latent/decoded/temporal error and aligned equaled shuffled at NFE 1 | rejected at this budget and ordering |
 
 Across the residual, LaMo, two-clock, and observed-anchor screens, action or
 sample shuffling changes the relevant outputs by at most small fractions of a
