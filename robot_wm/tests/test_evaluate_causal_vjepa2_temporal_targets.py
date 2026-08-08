@@ -79,6 +79,14 @@ def test_training_source_compatibility_requires_exact_inference_git_objects():
     assert set(result["paths"]) == set(evaluator.INFERENCE_CRITICAL_PATHS)
 
 
+def test_checkpoint_validation_uses_the_shared_checkpoint_schema_owner():
+    source = inspect.getsource(evaluator._load_checkpoint)  # noqa: SLF001
+    source += inspect.getsource(evaluator.load_calibration_receipt)
+    assert "screen.CHECKPOINT_SCHEMA" in source
+    assert "temporal.CHECKPOINT_SCHEMA" not in source
+    assert evaluator.screen.CHECKPOINT_SCHEMA == evaluator.vlf.CHECKPOINT_SCHEMA
+
+
 def test_generated_sampler_rejects_non_float32_trajectory_state():
     with pytest.raises(ValueError, match="float32"):
         evaluator.sample_generated_temporal(

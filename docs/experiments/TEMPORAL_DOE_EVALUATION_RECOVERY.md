@@ -19,6 +19,14 @@ default NCCL process group.  No arm summary, per-clip metric file, selection,
 or protected-test access was produced.  The original study and its failure
 state remain immutable.
 
+After the CPU-collective repair passed that point, recovery job `504954`
+exposed a second dormant evaluator-only typo while validating the first
+checkpoint: two checks looked up `CHECKPOINT_SCHEMA` on the temporal trainer
+module rather than on the shared semantic-screen/checkpoint module that owns
+the constant.  This also occurred before a sampler call or metric row.  The
+repair changes only those two validation references to the already frozen
+shared schema constant.
+
 ## Minimal repair
 
 Only the evaluator's metadata exchange changes.  Each rank still reads its

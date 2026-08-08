@@ -614,7 +614,7 @@ def _load_checkpoint(
     )
     doe_common_identity = training_doe_common_identity(training_config)
     if (
-        payload.get("schema") != temporal.CHECKPOINT_SCHEMA
+        payload.get("schema") != screen.CHECKPOINT_SCHEMA
         or payload.get("arm") != "phase1"
         or payload.get("completed_updates") != screen.TRAIN_UPDATES
         or payload.get("model_config") != model_config
@@ -749,7 +749,7 @@ def load_calibration_receipt(
         or config.get("checkpoint_updates") != [screen.CALIBRATION_UPDATES]
         or _primary_calibration_common(config)
         != _primary_calibration_common(primary_config)
-        or payload.get("schema") != temporal.CHECKPOINT_SCHEMA
+        or payload.get("schema") != screen.CHECKPOINT_SCHEMA
         or payload.get("arm") != "phase1"
         or payload.get("completed_updates") != screen.CALIBRATION_UPDATES
         or payload.get("model_config") != model_config
