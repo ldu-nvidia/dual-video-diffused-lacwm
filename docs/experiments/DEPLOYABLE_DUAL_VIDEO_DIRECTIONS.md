@@ -729,6 +729,11 @@ then holds Wan calls and trainable parameters fixed across `OFF`, `AC-PRED`,
 against the 5--10 Hz budget. A Franka/DROID action interface and single-camera
 pretraining do not directly match ABC's multi-morphology, three-view action
 contract, so action remapping and per-view token alignment are explicit risks.
+The released training configuration makes that concrete: one left camera,
+eight frames at 4 Hz, 7-D state/action tokens, no camera extrinsics, and a
+24-layer 1024-wide predictor on a ViT-g encoder. It is not a cheap drop-in
+condition; cache the observed encoder state and measure predictor-only as well
+as end-to-end latency before Wan integration.
 
 If this predictor is useful, the cleaner dual design is to generate/sample a
 compact action-conditioned interaction hypothesis first and make RGB share that

@@ -430,7 +430,10 @@ future. It should first face an aligned/zero/shuffled/time-shifted action screen
 on disjoint train data. Only a sample-specific predictive gain authorizes a
 matched `OFF/AC-PRED/AC-SHUFFLED/ORACLE` Wan experiment, with predictor latency
 included. The released Franka/DROID, monocular action contract also creates a
-nontrivial remapping risk for ABC's three views and morphologies.
+nontrivial remapping risk for ABC's three views and morphologies: its official
+configuration uses one left camera, eight frames at 4 Hz, 7-D state/action
+tokens, no extrinsics, and a 24-layer 1024-wide predictor on ViT-g. Predictor-
+only and complete latency must therefore be gated before integration.
 
 ## Phased execution decision
 
