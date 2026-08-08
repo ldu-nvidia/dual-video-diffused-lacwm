@@ -2,9 +2,10 @@
 
 Date frozen: 2026-08-08
 
-Status: preregistered train512/validation64 exploratory screen; validation has
-not been opened by this tool at registration time; no protected test and no
-generator run are permitted by this protocol
+Status: preregistered train512/validation64 exploratory screen, now completed;
+the registration was written before this tool opened validation state targets;
+no protected test or generator was run. See
+`NOMINAL_TRACKING_RESIDUAL_STAGE0_RESULT.md` for the sealed result.
 
 ## Question and claim boundary
 
