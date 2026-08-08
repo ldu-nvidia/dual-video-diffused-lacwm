@@ -44,6 +44,12 @@ The sealed dense proxy result and post-hoc horizon diagnostics are in
 A complementary training-only route that distills a privileged clean-feature
 teacher into a feature-free on-policy student is frozen in
 [`PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`](docs/experiments/PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md).
+Its first NFE-4 train-only eligibility gate stopped before student training:
+clean V-JEPA was uniformly helpful at the pure-noise video update but slightly
+harmful at the final low-noise update, leaving only 50% favorable units versus
+the registered 60% requirement. The exact timestep split and immutable evidence
+are in
+[`PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`](docs/experiments/PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md).
 The read-only confidence-gating audit and its fail-closed result are documented
 in [`CONFIDENCE_GATED_AUXILIARY_AUDIT_RESULT.md`](docs/experiments/CONFIDENCE_GATED_AUXILIARY_AUDIT_RESULT.md).
 

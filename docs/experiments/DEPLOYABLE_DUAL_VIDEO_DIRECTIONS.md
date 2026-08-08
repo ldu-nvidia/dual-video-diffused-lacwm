@@ -654,11 +654,17 @@ novelty to target-video semantic/TF supervision of on-policy **video** velocity,
 low-NFE generation, and closed-loop attribution.
 
 The exact train-only teacher eligibility gate, six controlled arms (including
-a mandatory PFD-style video-residual baseline), leakage
-assertions, and development thresholds are frozen in
-`PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`.  It is a
-prospective training-only alternative, not a completed positive result or an
-inference-time dual-diffusion claim.
+a mandatory PFD-style video-residual baseline), leakage assertions, and
+development thresholds are frozen in
+`PRIVILEGED_ON_POLICY_VIDEO_DISTILLATION_PROTOCOL.md`. The first NFE-4 gate is
+now complete and returned `STOP_NO_ELIGIBLE_TEACHER`: aggregate aligned
+velocity MSE improved 18.004% over off and 9.681% over shuffled, but only
+64/128 = 50% of clip/timestep units improved versus the required 60%. The
+entire positive coverage occurred at the first pure-noise video update
+(64/64 clips, +90.444%); the final low-noise update regressed 1.917% on 64/64.
+Thus no student was trained. A schedule-masked early-update residual teacher is
+a post-hoc hypothesis requiring a disjoint train-only gate, not a positive
+deployable result. See `PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`.
 
 ## Direction 12: per-view low-frequency motion supervision
 
@@ -692,9 +698,10 @@ training-only two-token motion-loss route, not dense causal motion scaffolds.
 2. Replay planned actions through the robot-only controller, construct analytic
    flow, and run flow-off/aligned/time-shifted/shuffled/oracle conditioning at
    equal Wan calls while reporting end-to-end scaffold cost and RGB quality.
-3. In parallel, run the train-only privileged-teacher eligibility gate on
-   student-visited states.  If it passes, compare gated on-policy distillation
-   with off-policy, ungated, shuffled-teacher, and base continuations.
+3. Keep unrestricted all-step privileged distillation stopped. On a disjoint
+   train-only subset, preregister and test a high-noise-update-only teacher; if
+   it passes, compare it with off-policy, shuffled, base, and the mandatory
+   `PFD-VIDEO` residual-adapter baseline.
 4. Distill only a demonstrably stronger causal flow-conditioned teacher with an
    inference-consistent/self-forced objective to two or four calls. The current
    VPM NFE-4 trajectory is worse than NFE 1 and is not a valid teacher.
