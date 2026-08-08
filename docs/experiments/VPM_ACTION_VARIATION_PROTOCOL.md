@@ -61,6 +61,11 @@ update and the same Wan calls at evaluation. The small candidate residual
 gradient is the intended intervention; no claim of bit-exact backward FLOPs is
 made.
 
+The inherited parameter-matched auxiliary head receives an all-zero placeholder
+in both arms. Its input and clock gates and loss are exact zero, and the dataset
+must not expose or open an auxiliary-target array. The placeholder preserves the
+parent parameter/call topology without supplying any clean future feature.
+
 ## Frozen continuation
 
 Both arms load every historical key from the update-1,000 VPM snapshot:

@@ -5,12 +5,17 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 from torch import nn
 
+from lam.action_variation_conditioned_model import (
+    ActionVariationConditionedVPM,
+    ActionVariationContractError,
+)
 from robot_wm.utils.action_variation_trainer import (
     _load_parent_state_exact,
     _state_sha256,
@@ -119,6 +124,31 @@ def test_state_sha256_supports_scalar_parameters_and_hashes_their_value():
 
     assert _state_sha256(first) == _state_sha256(same)
     assert _state_sha256(first) != _state_sha256(changed)
+
+
+def test_action_screen_uses_only_an_inert_auxiliary_placeholder():
+    model = SimpleNamespace(
+        forward_model=SimpleNamespace(
+            tf_token_adapter=SimpleNamespace(tf_channels=64)
+        )
+    )
+    rgb = torch.ones(2, 13, 3, 8, 8, dtype=torch.bfloat16)
+    latent_shape = (2, 16, 4, 3, 5)
+
+    inert = ActionVariationConditionedVPM._resolve_auxiliary_clean(
+        model, rgb, latent_shape, None
+    )
+
+    assert inert.shape == (2, 64, 4, 3, 5)
+    assert inert.dtype == rgb.dtype
+    assert torch.count_nonzero(inert) == 0
+    with pytest.raises(ActionVariationContractError, match="forbids cached"):
+        ActionVariationConditionedVPM._resolve_auxiliary_clean(
+            model,
+            rgb,
+            latent_shape,
+            torch.zeros_like(inert),
+        )
 
 
 def test_parent_load_misses_exactly_residual_and_rejects_any_other_missing_key():

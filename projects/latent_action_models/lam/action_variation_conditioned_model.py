@@ -117,6 +117,34 @@ class ActionVariationConditionedVPM(DualExplicitActionDiTModel):
             self.paired_audit_exact["clean_latent"] = tensor_sha256(latent)
         return latent
 
+    def _resolve_auxiliary_clean(
+        self,
+        rgb: Tensor,
+        latent_shape: tuple[int, ...],
+        auxiliary_target: Tensor | None,
+    ) -> Tensor:
+        """Keep the inherited parameter-matched head inert and future-free.
+
+        The VPM snapshot retains an unused auxiliary topology for parameter
+        matching, while this action-only screen deliberately does not open a
+        cached future feature.  State/clock injection and the auxiliary loss
+        are exact no-ops, so a deterministic zero placeholder preserves that
+        topology without providing future information to the video branch.
+        """
+
+        if auxiliary_target is not None:
+            raise ActionVariationContractError(
+                "action-variation training forbids cached auxiliary targets"
+            )
+        if len(latent_shape) != 5 or int(latent_shape[0]) != int(rgb.shape[0]):
+            raise ActionVariationContractError("invalid video latent geometry")
+        channels = int(self.forward_model.tf_token_adapter.tf_channels)
+        return rgb.new_zeros(
+            int(latent_shape[0]),
+            channels,
+            *tuple(int(value) for value in latent_shape[2:]),
+        )
+
     def _latent_actions(
         self,
         rgb: Tensor,
