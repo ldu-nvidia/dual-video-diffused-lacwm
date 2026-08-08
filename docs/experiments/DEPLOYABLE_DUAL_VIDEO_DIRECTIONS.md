@@ -10,10 +10,14 @@ Decision summary: the experiments reject oracle future-video features as a
 deployment mechanism and reject the tested autonomous semantic, Fourier,
 scratchpad, action-token, and training-only relation/spectrum formulations at
 this budget. They do **not** imply that every dual state requires unavailable
-future RGB. The best remaining causal hypothesis is an action-derived dense
-motion scaffold computed before RGB denoising from the proposed joint trajectory
-plus robot geometry/camera calibration, followed—if it actually improves a
-strong teacher—by inference-consistent few-step distillation.
+future RGB. The best remaining causal engineering route is an action-derived
+dense motion scaffold computed before RGB denoising from the proposed joint
+trajectory plus robot geometry/camera calibration. Current Robot-Factored,
+OSCAR, ContactFlow, FlowWAM, and iMaC results make that scaffold a strong
+baseline but a crowded novelty space. The differentiated hypotheses are a
+generated stochastic interaction residual and privileged on-policy transfer to
+a feature-free student, followed—only if either improves a strong teacher—by
+inference-consistent few-step distillation.
 
 ## Completed deployable evidence through 2026-08-08
 
@@ -477,6 +481,18 @@ plus renderer, RAFT, VAE encode, and refiner is not evidence of real-time DAgger
 [RealWonder](https://arxiv.org/abs/2603.05449) provides related external evidence:
 physics-derived optical flow and coarse RGB condition a distilled four-step
 causal generator, with reported 13.2 FPS, but at a much larger training budget.
+[Robot-Factored World Models](https://arxiv.org/html/2607.22535) is closer still:
+it replays proposed commands through a robot-only controller, renders the
+nominal URDF mesh and end-effector depth, pairs them with static RGB/scene
+depth, and VAE-encodes all streams for latent Wan conditioning. It reports
+substantial gains over numeric state conditioning on an enhanced-extrinsic
+DROID subset, but its [public repository](https://github.com/bjkim95/rofacto)
+currently says that code is forthcoming. [OSCAR](https://arxiv.org/html/2606.04463)
+already covers a lighter 2-D kinematic skeleton interface, while
+[ContactFlow](https://arxiv.org/html/2607.26579) covers planned 3-D object-contact
+points and displacement as a seven-channel video control. Consequently this
+Stage 1 is an important local reproduction/feasibility test, not a novel action
+representation by itself.
 
 The current immutable ABC cache cannot faithfully instantiate this route. It
 retains three RGB views and 14 real action values (12 joints plus two grippers),

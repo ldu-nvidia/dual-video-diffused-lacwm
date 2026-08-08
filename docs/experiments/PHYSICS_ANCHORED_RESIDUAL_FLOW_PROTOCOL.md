@@ -185,14 +185,21 @@ with no material task-success loss, not merely a fast DiT kernel.
 - Do not access the protected lockbox until a mechanism is frozen.
 
 The potentially novel contribution is the factorization of known embodiment
-motion and uncertain contact/object residuals, generated in causal order and
-validated at a few-call closed-loop robotics latency—not flow conditioning in
-isolation. [FlowWAM](https://arxiv.org/html/2607.13017) already covers dual
+motion and an **explicitly generated stochastic** contact/object residual,
+validated at few-call closed-loop robotics latency—not flow or robot rendering
+in isolation. [FlowWAM](https://arxiv.org/html/2607.13017) already covers dual
 RGB/flow modeling and fixed desired-flow world-model conditioning;
 [RealWonder](https://arxiv.org/html/2603.05449) covers physics flow plus a
-four-step video generator; [iMaC](https://arxiv.org/html/2606.09813) covers
-URDF/FK motion and deterministic contact-distance images; and
-[EA-WM](https://arxiv.org/html/2605.06192) covers event-supervised, gated fusion
-of kinematic visual fields. Our claim therefore requires a **generated
-stochastic interaction residual**, clear generated-versus-oracle attribution,
-and measured few-call closed-loop utility.
+four-step video generator; and
+[Robot-Factored World Models](https://arxiv.org/html/2607.22535) already covers
+the deployment-available nominal-controller trajectory, URDF mesh rendering,
+end-effector/scene depth, and Wan latent conditioning. In addition,
+[OSCAR](https://arxiv.org/html/2606.04463) covers 2-D kinematic skeleton
+conditioning, [ContactFlow](https://arxiv.org/html/2607.26579) covers sparse
+3-D object-contact trajectories rendered as a seven-channel control video,
+[iMaC](https://arxiv.org/html/2606.09813) covers URDF/FK motion and deterministic
+contact-distance images, and [EA-WM](https://arxiv.org/html/2605.06192) covers
+event-supervised gated fusion of kinematic visual fields. Gate 1 is therefore a
+reproduction/feasibility baseline. A research claim requires a generated
+interaction residual beyond deterministic geometry/contact intent, clear
+generated-versus-oracle attribution, and measured few-call closed-loop utility.

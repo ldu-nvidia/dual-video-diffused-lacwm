@@ -15,7 +15,7 @@ causally from known inputs, or discarded after serving as training supervision.
 The completed screens do not support autonomous V-JEPA/TF features, generated
 frequency states, one-call scratchpads, explicit action tokens, or the tested
 training-only relation/spectrum losses as quality-improving mechanisms at this
-budget. The most credible remaining route is:
+budget. The most credible remaining **technical** route is:
 
 1. compute robot-only image motion from the proposed joint trajectory, robot
    model, and calibrated cameras before RGB denoising;
@@ -28,7 +28,11 @@ budget. The most credible remaining route is:
 This is not merely conceptual. A leakage-controlled train512/val64 proxy screen
 found that planned actions add statistically positive information about future
 per-view motion summaries. It is still too weak to authorize generator training,
-and exact ABC rendering first requires a robot/camera calibration gate.
+and exact ABC rendering first requires a robot/camera calibration gate. A
+current literature audit also shows that nominal robot rendering is now an
+important baseline rather than a standalone novelty claim; the publishable
+increment would need generated uncertainty/contact residuals, privileged-to-
+causal transfer, or a demonstrated low-call closed-loop advantage.
 
 ## Causal taxonomy
 
@@ -178,14 +182,28 @@ rules are frozen in `PHYSICS_ANCHORED_RESIDUAL_FLOW_PROTOCOL.md`.
 
 ## Novelty boundary
 
-“Condition video on optical flow” is no longer a sufficient contribution:
-[FlowWAM](https://arxiv.org/html/2607.13017) and
-[RealWonder](https://arxiv.org/html/2603.05449) already occupy that space.
-[iMaC](https://arxiv.org/html/2606.09813) further conditions video on
-URDF/FK-rendered motion plus deterministic robot--scene contact-distance images,
-and [EA-WM](https://arxiv.org/html/2605.06192) uses structured kinematic visual
-fields with event-supervised fusion gates. A defensible new claim would need the
-combination of:
+“Condition video on optical flow or rendered robot motion” is no longer a
+sufficient contribution. The closest current primary work occupies these
+pieces:
+
+| Existing work | Inference-time condition already demonstrated |
+|---|---|
+| [FlowWAM](https://arxiv.org/html/2607.13017) | fixed desired optical flow jointly attended with RGB |
+| [RealWonder](https://arxiv.org/html/2603.05449) | simulator flow/coarse RGB plus a four-step causal generator |
+| [Robot-Factored World Models](https://arxiv.org/html/2607.22535) | controller-realized nominal trajectory rendered as URDF mesh RGB and end-effector depth, paired with static RGB/depth |
+| [OSCAR](https://arxiv.org/html/2606.04463) | 2-D kinematic skeleton video across embodiments |
+| [ContactFlow](https://arxiv.org/html/2607.26579) | sparse 3-D object-contact points and displacement projected as a seven-channel control video |
+| [iMaC](https://arxiv.org/html/2606.09813) / [EA-WM](https://arxiv.org/html/2605.06192) | deterministic FK/contact-distance fields and event-supervised kinematic fusion |
+
+Robot-Factored World Models is especially close to our Stage-1 scaffold: it
+already separates command realization from scene response, replays commands in
+a robot-only controller, and conditions a latent Wan model on nominal rendered
+geometry. OSCAR makes a coarse skeleton alternative explicit, and ContactFlow
+occupies deterministic planned-contact conditioning. These papers are external
+evidence that a calibrated causal visual action interface can help; they also
+mean that reproducing one on ABC/LACWM is a baseline, not the paper.
+
+A defensible new claim would need the combination of:
 
 - a **physics-anchored stochastic residual motion state** that separates known
   robot kinematics from uncertain object/contact consequences;
@@ -195,9 +213,10 @@ combination of:
 - calibration/command-tracking uncertainty that survives robot, view, and task
   transfer.
 
-That would be a substantive physical-AI/world-model contribution. A modest
-MSE gain from fixed clean flow alone would be useful engineering evidence but
-not, by itself, a major algorithmic innovation.
+That could be a substantive physical-AI/world-model contribution. A modest MSE
+gain from fixed clean flow, skeletons, mesh RGB, depth, or deterministic contact
+points alone would be useful reproduction/engineering evidence but not, by
+itself, a major algorithmic innovation.
 
 ## Other inference-causal directions
 
@@ -211,9 +230,9 @@ Ranked after the completed evidence and prior-art audit:
 2. **Generated contact/event tokens.** If a dense residual is too hard, predict
    an 8--32-token state for contacted object/slot, onset/release, attachment,
    signed displacement, and visibility change. The novelty would be generating
-   the uncertain outcome before RGB, not iMaC-style deterministic proximity or
-   EA-WM-style training supervision. Require action-shuffle sensitivity before
-   generator integration.
+   the uncertain outcome before RGB, not ContactFlow-style planned contact,
+   iMaC-style deterministic proximity, or EA-WM-style training supervision.
+   Require action-shuffle sensitivity before generator integration.
 3. **Cross-view 3-D interaction tracks.** Generate a compact, view-consistent
    object-trajectory state and project it into all three cameras. This may be
    lower entropy than RGB but carries substantially higher calibration/tracking
