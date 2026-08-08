@@ -56,6 +56,9 @@ video update (89.95% velocity-MSE gain over off; 64/64 favorable). This passes
 only the prerequisite for a feature-free `PFD-VIDEO` student screen; no student
 or deployable gain exists yet. See
 [`PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md`](docs/experiments/PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md).
+The required `BASE-PM`/direct-residual/aligned/shuffled PFD student comparison
+is specified in
+[`PRIVILEGED_HIGH_NOISE_VIDEO_RESIDUAL_STUDENT_PROTOCOL.md`](docs/experiments/PRIVILEGED_HIGH_NOISE_VIDEO_RESIDUAL_STUDENT_PROTOCOL.md).
 The read-only confidence-gating audit and its fail-closed result are documented
 in [`CONFIDENCE_GATED_AUXILIARY_AUDIT_RESULT.md`](docs/experiments/CONFIDENCE_GATED_AUXILIARY_AUDIT_RESULT.md).
 

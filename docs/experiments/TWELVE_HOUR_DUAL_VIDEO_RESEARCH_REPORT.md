@@ -417,6 +417,8 @@ transfer. The teacher/student velocity distance is still large (mean 1.23269),
 so reachability is unresolved.
 The immutable replication record is
 [`PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md`](PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md).
+The controlled student arms and direct-residual attribution requirement are in
+[`PRIVILEGED_HIGH_NOISE_VIDEO_RESIDUAL_STUDENT_PROTOCOL.md`](PRIVILEGED_HIGH_NOISE_VIDEO_RESIDUAL_STUDENT_PROTOCOL.md).
 
 A second inference-causal semantic route remains untested and should not be
 conflated with the failed encoder-feature branch. The official V-JEPA 2 release
