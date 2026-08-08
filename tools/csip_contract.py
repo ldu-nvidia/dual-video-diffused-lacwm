@@ -258,7 +258,11 @@ def executable_record(path: str | Path) -> dict[str, Any]:
         raise CSIPContractError("runtime Python symlink target is not a file")
     completed = subprocess.run(
         [
-            str(value),
+            # Execute through the registered virtual-environment launcher.
+            # Calling the resolved target directly bypasses pyvenv.cfg and can
+            # hide the environment's installed packages.  We still hash and
+            # bind ``value`` below, so both launcher and executable are sealed.
+            str(launcher),
             "-c",
             (
                 "import json,platform,sys;from importlib.metadata import version;"

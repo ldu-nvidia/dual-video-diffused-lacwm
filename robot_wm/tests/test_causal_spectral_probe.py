@@ -47,6 +47,41 @@ def _latents_from_motion(motion: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     return full, history
 
 
+def test_runtime_identity_probe_executes_venv_launcher_and_hashes_target(
+    tmp_path, monkeypatch
+) -> None:
+    target = tmp_path / "python-real"
+    target.write_bytes(b"#!/bin/sh\n")
+    target.chmod(0o700)
+    launcher = tmp_path / "python"
+    launcher.symlink_to(target)
+    observed: list[str] = []
+
+    def fake_run(argv, **_kwargs):
+        observed.append(argv[0])
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "version": "3.10-test",
+                    "platform": "test-platform",
+                    "packages": {
+                        "torch": "test",
+                        "numpy": "test",
+                        "wandb": "test",
+                        "omegaconf": "test",
+                    },
+                }
+            ),
+        )
+
+    monkeypatch.setattr(csip_contract.subprocess, "run", fake_run)
+    record = csip_contract.executable_record(launcher)
+    assert observed == [str(launcher)]
+    assert record["launcher_path"] == str(launcher)
+    assert record["path"] == str(target.resolve(strict=True))
+
+
 def _volume_unit(features: torch.Tensor) -> torch.Tensor:
     block = 3 * 16 * 2 * 4 * 6
     real = features[:, block : 2 * block].reshape(1, 3, 16, 2, 4, 6)
