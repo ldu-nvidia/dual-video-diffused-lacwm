@@ -159,6 +159,96 @@ def test_frequency_screen_identity_is_content_bound():
     assert not screen.validate_identity(payload)
 
 
+def test_frequency_training_validation_contract_is_exact_val64_and_cycles():
+    from omegaconf import OmegaConf
+
+    config = OmegaConf.load(screen.COMMON_CONFIG)
+    validation = config.trainer.config.validation
+    loader = config.val_data_loader[0]
+    max_iter = int(config.trainer.config.max_iter)
+    val_every = int(validation.val_every)
+    observed = {
+        "dataset_infinite": bool(config.val_dataset.infinite),
+        "dataset_seed": int(config.val_dataset.seed),
+        "image_augmentation": bool(config.val_dataset.img_augment),
+        "future_validity_enabled": bool(
+            config.val_dataset.future_validity.enabled
+        ),
+        "future_validity_max_retries": int(
+            config.val_dataset.future_validity.max_retries
+        ),
+        "single_iterator_reused": True,
+        "drop_last": bool(loader.drop_last),
+        "batch_size_per_rank": int(loader.batch_size),
+        "loader_workers_per_rank": int(loader.num_workers),
+        "persistent_workers": bool(loader.persistent_workers),
+        "local_batches_per_event": int(validation.n_val_samples),
+        "local_clips_per_event": int(loader.batch_size)
+        * int(validation.n_val_samples),
+        "global_clips_per_event": screen.WORLD_SIZE
+        * int(loader.batch_size)
+        * int(validation.n_val_samples),
+        "iterations": [
+            iteration
+            for iteration in range(max_iter)
+            if iteration % val_every == 0 or iteration + 1 == max_iter
+        ],
+        "one_complete_registered_validation_pass_per_event": True,
+    }
+
+    assert screen.validate_training_validation_contract(observed) == observed
+    assert observed["global_clips_per_event"] == screen.EXPECTED_VALIDATION_CLIPS
+
+    changed = dict(observed, local_batches_per_event=8)
+    with pytest.raises(screen.ContractError, match="validation iterator"):
+        screen.validate_training_validation_contract(changed)
+
+
+def test_registration_rejects_self_signed_validation_contract_change(tmp_path):
+    base = {
+        "schema": screen.SCHEMA,
+        "protected_test": {"allowed": False},
+        "training": {
+            "validation_iterator": dict(screen.TRAIN_VALIDATION_CONTRACT)
+        },
+    }
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(screen.identity_payload(base)), encoding="utf-8")
+    assert screen.load_registration(path, verify_files=False)["schema"] == screen.SCHEMA
+
+    changed = dict(screen.TRAIN_VALIDATION_CONTRACT)
+    changed["local_batches_per_event"] = 8
+    base["training"] = {"validation_iterator": changed}
+    path.write_text(json.dumps(screen.identity_payload(base)), encoding="utf-8")
+    with pytest.raises(screen.ContractError, match="validation iterator"):
+        screen.load_registration(path, verify_files=False)
+
+
+def test_standalone_evaluation_bounds_infinite_validation_to_four_batches():
+    batches = [
+        {"clip_index": torch.tensor([2 * index, 2 * index + 1])}
+        for index in range(screen.TRAIN_VALIDATION_LOCAL_BATCHES_PER_EVENT)
+    ]
+
+    def infinite_batches():
+        while True:
+            yield from batches
+
+    observed = list(evaluator._exact_validation_batches(infinite_batches()))
+    assert len(observed) == screen.TRAIN_VALIDATION_LOCAL_BATCHES_PER_EVENT
+    assert torch.cat([batch["clip_index"] for batch in observed]).tolist() == list(
+        range(screen.TRAIN_VALIDATION_LOCAL_CLIPS_PER_EVENT)
+    )
+
+    with pytest.raises(evaluator.EvaluationError, match="ended before"):
+        list(evaluator._exact_validation_batches(iter(batches[:3])))
+
+    repeated = list(batches)
+    repeated[-1] = {"clip_index": torch.tensor([0, 7])}
+    with pytest.raises(evaluator.EvaluationError, match="repeats"):
+        list(evaluator._exact_validation_batches(iter(repeated)))
+
+
 def _manifest_row(index: int, *, split: str, episode: int | None = None):
     episode = index if episode is None else episode
     return {
@@ -215,6 +305,8 @@ def test_validation_loader_uses_iterable_rank_sharding_without_sampler():
             yield from range(0, 8, 2)
 
     loader = evaluator._validation_loader(RankShard(), pin_memory=False)
+    assert loader.batch_size == screen.TRAIN_VALIDATION_BATCH_SIZE_PER_RANK
+    assert loader.drop_last is False
     assert [batch.tolist() for batch in loader] == [[0, 2], [4, 6]]
 
 
@@ -310,6 +402,8 @@ def test_protocol_declares_exact_shapes_and_no_protected_test():
     assert "`[B,16,4,24,120]`" in protocol
     assert "no protected-test phase" in protocol.lower()
     assert "exactly `NFE` Wan calls" in protocol
+    assert "4 batches x 2 clips x 8 ranks = 64 clips" in protocol
+    assert "fresh source commit" in protocol
 
 
 def test_frequency_wandb_finish_is_bounded_and_preserves_local_sync_files():
@@ -347,6 +441,25 @@ def test_frequency_launcher_exports_registered_runtime_before_activation(
     assert source.index('export WAN_DIR="$WAN_DIR_VALUE"') < activation
     assert source.index('export VIDEOX_HOME="$VIDEOX_HOME_VALUE"') < activation
     assert "/mnt/data2/" not in source
+
+
+def test_frequency_training_workflow_binds_validation_contract_and_registration():
+    source = screen.TRAIN_SBATCH.read_text(encoding="utf-8")
+    assert '--registration "$FREQ_SCREEN_REGISTRATION"' in source
+    assert '"val_dataset.infinite=true"' in source
+    assert '"val_dataset.seed=1234"' in source
+    assert '"val_dataset.img_augment=false"' in source
+    assert '"val_dataset.future_validity.enabled=false"' in source
+    assert '"val_dataset.future_validity.max_retries=0"' in source
+    assert '"val_data_loader.0.batch_size=2"' in source
+    assert '"val_data_loader.0.drop_last=false"' in source
+    assert '"val_data_loader.0.num_workers=2"' in source
+    assert '"val_data_loader.0.persistent_workers=false"' in source
+    assert '"trainer.config.validation.n_val_samples=4"' in source
+
+    preflight = screen.WARMSTART_PREFLIGHT.read_text(encoding="utf-8")
+    assert "validate_training_validation_contract(" in preflight
+    assert 'parser.add_argument("--registration", type=Path, required=True)' in preflight
 
 
 def test_completion_receipt_must_be_final_and_identity_bound(tmp_path):

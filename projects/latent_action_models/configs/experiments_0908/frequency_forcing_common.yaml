@@ -24,7 +24,15 @@ dataset: &training_dataset
       cache_metadata: ${oc.env:FREQ_TRAIN_CACHE_METADATA}
 val_dataset:
   <<: *training_dataset
-  infinite: false
+  # Trainer._validate() reuses one iterator at updates 0, 50, 100, 150, and
+  # 199.  Each rank owns eight of the frozen 64 clips, so four local batches
+  # of two are one exact global pass.  Cycle that deterministic rank shard so
+  # every validation event gets one complete pass instead of exhausting the
+  # finite iterator during the first event.
+  infinite: true
+  # The immutable manifest already fixes the validation population. Never
+  # replace a registered clip with a retry sample during the exact val64 pass.
+  future_validity: {enabled: false, max_retries: 0}
   datasets:
     ABC:
       clip_manifest: ${oc.env:FREQ_VAL_CLIP_MANIFEST}
@@ -47,6 +55,7 @@ val_data_loader:
   - _target_: torchdata.stateful_dataloader.StatefulDataLoader
     dataset: ${val_dataset}
     batch_size: 2
+    drop_last: false
     num_workers: 2
     pin_memory: true
     prefetch_factor: 2
@@ -119,7 +128,8 @@ trainer:
       - forward_model.tf_velocity_head
     logging: {log_every: 5}
     saving: {save_every: 200}
-    validation: {val_every: 50, n_val_samples: 8, save_best: false}
+    # 4 local batches x 2 clips x 8 ranks = all 64 registered validation clips.
+    validation: {val_every: 50, n_val_samples: 4, save_best: false}
     visualization: {viz_every: 200, require_success: true}
     gradient_clipping: {max_norm: 1.0}
 

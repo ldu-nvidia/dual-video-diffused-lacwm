@@ -13,7 +13,7 @@ PY=$BASE/envs/lacwm-b200-py310/bin/python
 CACHE=$BASE/artifacts/dual_video_diffusion/vjepa2_cache_builds/vjepa2-cache-20260729-03-immutable1be7690
 WARM=$BASE/runs/dual_video_diffusion/vjepa2_controlled_study/vjepa2-controlled-20260730-seed1234-9cf8e69-v3/vpm_parameter_matched_video/snapshot.pt
 PARENT=$BASE/artifacts/dual_video_diffusion/frequency_forcing
-STUDY=$PARENT/frequency-forcing-seed1234-20260807-v1
+STUDY=$PARENT/frequency-forcing-seed1234-20260808-FINALSHORT-v3
 REG=$STUDY/protocol_registration.json
 ```
 
@@ -26,6 +26,12 @@ f67c7bae50c4c279bf6372e098833be32699aca24232d7d489a1f7a45b5a8e21
 The runtime, Wan asset, VideoX-Fun checkout, 512-clip training manifest/cache,
 64-clip validation manifest/cache, and checkpoint paths were observed on
 `gcp-nrt-cs-001-vscode-01` on 2026-08-07. Registration revalidates them.
+
+Replace `FINALSHORT` in `STUDY` with the short hash of `FINAL_COMMIT`. Never
+reuse or overwrite the pre-amendment
+`frequency-forcing-seed1234-20260808-56e2e24-v2` root. It is immutable failure
+evidence for the finite validation-iterator defect. A retry accepts no
+checkpoint, metric, arm manifest, or other partial state from that root.
 
 ## 1. Prepare the exact source and log parent
 
@@ -92,7 +98,7 @@ Array mapping:
 ```
 
 Each arm trains for 200 updates. Historical telemetry is about `0.52 s/update`
-after warmup; model construction, four small validations, one NFE-1
+after warmup; model construction, five exact 64-clip trainer validations, one NFE-1
 visualization, W&B, checkpoint hashing, and final snapshot dominate. Budget
 roughly 15–25 minutes per arm. With concurrency two, expected allocated wall
 time is roughly 30–50 minutes plus queue delay. Treat this as an estimate, not

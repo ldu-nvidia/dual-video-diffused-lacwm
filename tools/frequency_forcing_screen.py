@@ -46,7 +46,7 @@ DATASET_CONFIG = (
 TRAIN_SBATCH = REPO_ROOT / "tools/slurm/frequency_forcing_screen.sbatch"
 EVALUATE_SBATCH = REPO_ROOT / "tools/slurm/frequency_forcing_evaluate.sbatch"
 
-SCHEMA = "video-frequency-forcing-screen-v1"
+SCHEMA = "video-frequency-forcing-screen-v2"
 ARM_SCHEMA = "video-frequency-forcing-arm-v1"
 RESULT_SCHEMA = "video-frequency-forcing-validation-row-v1"
 EVALUATION_COMPLETE_SCHEMA = "video-frequency-forcing-evaluation-complete-v1"
@@ -60,6 +60,34 @@ MICRO_BATCH = 1
 GLOBAL_BATCH = WORLD_SIZE * MICRO_BATCH
 EXPECTED_TRAIN_CLIPS = 512
 EXPECTED_VALIDATION_CLIPS = 64
+TRAIN_VALIDATION_BATCH_SIZE_PER_RANK = 2
+TRAIN_VALIDATION_NUM_WORKERS_PER_RANK = 2
+TRAIN_VALIDATION_LOCAL_BATCHES_PER_EVENT = 4
+TRAIN_VALIDATION_LOCAL_CLIPS_PER_EVENT = (
+    TRAIN_VALIDATION_BATCH_SIZE_PER_RANK
+    * TRAIN_VALIDATION_LOCAL_BATCHES_PER_EVENT
+)
+TRAIN_VALIDATION_GLOBAL_CLIPS_PER_EVENT = (
+    WORLD_SIZE * TRAIN_VALIDATION_LOCAL_CLIPS_PER_EVENT
+)
+TRAIN_VALIDATION_ITERATIONS = [0, 50, 100, 150, 199]
+TRAIN_VALIDATION_CONTRACT = {
+    "dataset_infinite": True,
+    "dataset_seed": SEED,
+    "image_augmentation": False,
+    "future_validity_enabled": False,
+    "future_validity_max_retries": 0,
+    "single_iterator_reused": True,
+    "drop_last": False,
+    "batch_size_per_rank": TRAIN_VALIDATION_BATCH_SIZE_PER_RANK,
+    "loader_workers_per_rank": TRAIN_VALIDATION_NUM_WORKERS_PER_RANK,
+    "persistent_workers": False,
+    "local_batches_per_event": TRAIN_VALIDATION_LOCAL_BATCHES_PER_EVENT,
+    "local_clips_per_event": TRAIN_VALIDATION_LOCAL_CLIPS_PER_EVENT,
+    "global_clips_per_event": TRAIN_VALIDATION_GLOBAL_CLIPS_PER_EVENT,
+    "iterations": TRAIN_VALIDATION_ITERATIONS,
+    "one_complete_registered_validation_pass_per_event": True,
+}
 TARGET_SHAPE = [6, 4, 24, 120]
 NFE_GRID = [1, 2, 4, 8]
 SOURCES = [
@@ -198,6 +226,15 @@ def validate_identity(value: Mapping[str, Any]) -> bool:
     unsigned = dict(value)
     unsigned.pop("identity_sha256", None)
     return hashlib.sha256(canonical_json(unsigned)).hexdigest() == recorded
+
+
+def validate_training_validation_contract(value: Any) -> dict[str, Any]:
+    """Reject registrations/config receipts that can exhaust or oversample val64."""
+    if not isinstance(value, Mapping) or dict(value) != TRAIN_VALIDATION_CONTRACT:
+        raise ContractError("training validation iterator contract differs")
+    if TRAIN_VALIDATION_GLOBAL_CLIPS_PER_EVENT != EXPECTED_VALIDATION_CLIPS:
+        raise ContractError("training validation contract does not cover val64 exactly")
+    return dict(value)
 
 
 def sha256_file(path: Path) -> str:
@@ -608,6 +645,7 @@ def command_register(args: argparse.Namespace) -> int:
                 "world_size": WORLD_SIZE,
                 "micro_batch_per_rank": MICRO_BATCH,
                 "global_batch": GLOBAL_BATCH,
+                "validation_iterator": dict(TRAIN_VALIDATION_CONTRACT),
                 "same_optimizer_and_data_order": True,
                 "same_non_auxiliary_warm_start": True,
                 "arms": [asdict(arm) for arm in ARMS],
@@ -658,6 +696,12 @@ def load_registration(path: Path, *, verify_files: bool = True) -> dict[str, Any
         raise ContractError("registration schema or identity is invalid")
     if registration.get("protected_test", {}).get("allowed") is not False:
         raise ContractError("registration does not fail closed on protected test")
+    training = registration.get("training")
+    if not isinstance(training, Mapping):
+        raise ContractError("registration lacks a training contract")
+    validate_training_validation_contract(
+        training.get("validation_iterator")
+    )
     if verify_files:
         validate_source(str(registration["source"]["commit"]))
         for record in registration["implementation"].values():

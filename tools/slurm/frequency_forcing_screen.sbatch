@@ -139,6 +139,7 @@ export TMPDIR="$IPC_TMPDIR"
   > "$RUN_DIR/runtime.json"
 
 "$PYTHON_BIN" "$WARMSTART_PREFLIGHT" \
+  --registration "$FREQ_SCREEN_REGISTRATION" \
   --selector "$CONFIG_SELECTOR" \
   --warmstart "$WARMSTART" \
   --output "$RUN_DIR/warmstart_preflight.json" >/dev/null
@@ -152,6 +153,16 @@ cd "$PROJECT_ROOT"
   "seed=1234" \
   "trainer.config.load_path=$WARMSTART" \
   "trainer.config.max_iter=200" \
+  "val_dataset.infinite=true" \
+  "val_dataset.seed=1234" \
+  "val_dataset.img_augment=false" \
+  "val_dataset.future_validity.enabled=false" \
+  "val_dataset.future_validity.max_retries=0" \
+  "val_data_loader.0.batch_size=2" \
+  "val_data_loader.0.drop_last=false" \
+  "val_data_loader.0.num_workers=2" \
+  "val_data_loader.0.persistent_workers=false" \
+  "trainer.config.validation.n_val_samples=4" \
   "trainer.config.saving.save_path=$RUN_DIR/snapshot.pt" \
   "trainer.config.visualization.viz_path=$RUN_DIR/visualization" \
   "hydra.run.dir=$RUN_DIR" \

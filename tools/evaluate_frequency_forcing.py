@@ -191,6 +191,49 @@ def _validate_config(config: Any, arm: contract.Arm) -> None:
         or int(config.seed) != contract.SEED
     ):
         raise EvaluationError("resolved representation/training contract changed")
+    if len(config.val_data_loader) != 1:
+        raise EvaluationError("resolved config must have one validation loader")
+    val_loader = config.val_data_loader[0]
+    validation = config.trainer.config.validation
+    max_iter = int(config.trainer.config.max_iter)
+    val_every = int(validation.val_every)
+    observed_validation_contract = {
+        "dataset_infinite": bool(config.val_dataset.infinite),
+        "dataset_seed": int(config.val_dataset.seed),
+        "image_augmentation": bool(config.val_dataset.img_augment),
+        "future_validity_enabled": bool(
+            config.val_dataset.future_validity.enabled
+        ),
+        "future_validity_max_retries": int(
+            config.val_dataset.future_validity.max_retries
+        ),
+        "single_iterator_reused": True,
+        "drop_last": bool(val_loader.drop_last),
+        "batch_size_per_rank": int(val_loader.batch_size),
+        "loader_workers_per_rank": int(val_loader.num_workers),
+        "persistent_workers": bool(val_loader.persistent_workers),
+        "local_batches_per_event": int(validation.n_val_samples),
+        "local_clips_per_event": (
+            int(val_loader.batch_size) * int(validation.n_val_samples)
+        ),
+        "global_clips_per_event": (
+            contract.WORLD_SIZE
+            * int(val_loader.batch_size)
+            * int(validation.n_val_samples)
+        ),
+        "iterations": [
+            iteration
+            for iteration in range(max_iter)
+            if iteration % val_every == 0 or iteration + 1 == max_iter
+        ],
+        "one_complete_registered_validation_pass_per_event": True,
+    }
+    try:
+        contract.validate_training_validation_contract(
+            observed_validation_contract
+        )
+    except contract.ContractError as exc:
+        raise EvaluationError(str(exc)) from exc
     for split_name in ("dataset", "val_dataset", "viz_dataset"):
         dataset = config[split_name]
         target = str(dataset.datasets.ABC.get("_target_", ""))
@@ -362,11 +405,43 @@ def _validation_loader(dataset: Any, *, pin_memory: bool):
         raise EvaluationError("validation dataset must provide iterable rank sharding")
     return DataLoader(
         dataset,
-        batch_size=2,
+        batch_size=contract.TRAIN_VALIDATION_BATCH_SIZE_PER_RANK,
         num_workers=0,
         pin_memory=pin_memory,
-        drop_last=True,
+        drop_last=False,
     )
+
+
+def _exact_validation_batches(loader: Any):
+    """Yield one val64 rank shard even when the trainer dataset is infinite."""
+    iterator = iter(loader)
+    seen_clip_indexes: set[int] = set()
+    for _ in range(contract.TRAIN_VALIDATION_LOCAL_BATCHES_PER_EVENT):
+        try:
+            batch = next(iterator)
+        except StopIteration as exc:
+            raise EvaluationError(
+                "validation iterator ended before one exact val64 pass"
+            ) from exc
+        if (
+            not isinstance(batch, Mapping)
+            or "clip_index" not in batch
+            or int(batch["clip_index"].numel())
+            != contract.TRAIN_VALIDATION_BATCH_SIZE_PER_RANK
+        ):
+            raise EvaluationError("validation batch is not exact batch two")
+        clip_indexes = {
+            int(value) for value in batch["clip_index"].reshape(-1).tolist()
+        }
+        if (
+            len(clip_indexes) != contract.TRAIN_VALIDATION_BATCH_SIZE_PER_RANK
+            or seen_clip_indexes.intersection(clip_indexes)
+        ):
+            raise EvaluationError("validation rank pass repeats a clip index")
+        seen_clip_indexes.update(clip_indexes)
+        yield batch
+    if len(seen_clip_indexes) != contract.TRAIN_VALIDATION_LOCAL_CLIPS_PER_EVENT:
+        raise EvaluationError("validation rank pass is not eight unique clips")
 
 
 def _sample_cell(
@@ -618,13 +693,19 @@ def evaluate(args: argparse.Namespace) -> int:
                 "validation clips must divide evenly across the frozen world size"
             )
         local_clips = contract.EXPECTED_VALIDATION_CLIPS // world
-        if local_clips % 2:
+        if local_clips != contract.TRAIN_VALIDATION_LOCAL_CLIPS_PER_EVENT:
+            raise EvaluationError(
+                "rank-local validation size differs from the registered pass"
+            )
+        if local_clips % contract.TRAIN_VALIDATION_BATCH_SIZE_PER_RANK:
             raise EvaluationError(
                 "rank-local validation clips must divide evenly by evaluation batch two"
             )
         loader = _validation_loader(dataset, pin_memory=True)
         rows = []
-        for cpu_batch in loader:
+        # val_dataset is deliberately infinite for the reusable trainer
+        # iterator.  Bound standalone evaluation to one exact rank-local pass.
+        for cpu_batch in _exact_validation_batches(loader):
             batch = _move_batch(cpu_batch, device)
             if "auxiliary_target" in batch:
                 raise EvaluationError("validation dataset exposed cached V-JEPA target")

@@ -1,8 +1,21 @@
 # Deployable video Frequency-Forcing screen (prospective)
 
-Date frozen: 2026-08-07, before candidate training or validation metrics
+Scientific design frozen: 2026-08-07, before candidate training or validation metrics
+
+Operational iterator amendment frozen: 2026-08-08, before any retry is
+registered or launched
 
 Status: implementation/protocol only; no job has been launched by this change
+
+The pre-amendment `frequency-forcing-seed1234-20260808-56e2e24-v2`
+allocation is preserved as immutable failed-attempt evidence. Its FPM arm
+requested eight batches from a finite rank-local validation stream containing
+only four batches and stopped at the first scheduled validation. No checkpoint,
+metric, or partial state from that root is eligible for a retry. This amendment
+only makes that operational iterator reusable and bounds each event to one
+complete pass; it does not change an arm, target, optimizer update, evaluation
+endpoint, or decision threshold. A retry requires a fresh source commit,
+registration, study root, and run identity.
 
 Clock convention: `sigma=1` is Gaussian noise and `sigma=0` is clean data.
 
@@ -89,6 +102,18 @@ Common training factors:
   evaluation noise;
 - private W&B destination `zijiandu/dual-video-diffusion-private`, no group.
 
+Trainer-side validation occurs after iterations `0,50,100,150,199`. One
+iterator is constructed and reused across those events, so its deterministic
+seed-1234, unaugmented rank shard is configured as infinite. Each event
+consumes exactly four local batches of two:
+`4 batches x 2 clips x 8 ranks = 64 clips`, one complete pass
+over the registered validation split. `drop_last=false` is safe because each
+rank owns exactly eight clips. Registration records this contract, the
+warm-start preflight verifies the resolved Hydra config, and post-training
+evaluation rejects a checkpoint whose saved config differs. Validation-time
+future-validity retries are disabled, so no registered clip can be silently
+replaced by another sample.
+
 W&B finalization is bounded at 120 seconds and non-raising after the final
 checkpoint and completion receipt are durable. Any unsent run files remain in
 the arm-local W&B directory for later `wandb sync`; timeout does not discard
@@ -126,6 +151,9 @@ video and auxiliary noise. The iterable dataset captures rank/world before
 iteration and performs its native distributed sharding; evaluation audits one
 and only one row for every global clip/source/NFE cell. The reported NFE must
 equal both the sampler's counter and an independent Wan forward hook.
+Because the shared validation dataset now cycles for trainer safety, the
+standalone evaluator explicitly consumes exactly four local batches and then
+stops; iterating it to exhaustion is forbidden.
 
 Sources:
 

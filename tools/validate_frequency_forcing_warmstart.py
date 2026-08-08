@@ -69,6 +69,10 @@ def _seed_all(seed: int) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    registration_path = args.registration.resolve(strict=True)
+    registration = contract.load_registration(
+        registration_path, verify_files=False
+    )
     checkpoint = args.warmstart.resolve(strict=True)
     if checkpoint.is_symlink() or not checkpoint.is_file():
         raise PreflightError("warm start must be a canonical regular file")
@@ -119,6 +123,54 @@ def run(args: argparse.Namespace) -> int:
         or int(config.seed) != contract.SEED
     ):
         raise PreflightError("resolved common representation/training contract changed")
+    val_loaders = config.val_data_loader
+    validation = config.trainer.config.validation
+    if len(val_loaders) != 1:
+        raise PreflightError("training requires exactly one validation loader")
+    val_loader = val_loaders[0]
+    max_iter = int(config.trainer.config.max_iter)
+    val_every = int(validation.val_every)
+    validation_iterations = [
+        iteration
+        for iteration in range(max_iter)
+        if iteration % val_every == 0 or iteration + 1 == max_iter
+    ]
+    observed_validation_contract = {
+        "dataset_infinite": bool(config.val_dataset.infinite),
+        "dataset_seed": int(config.val_dataset.seed),
+        "image_augmentation": bool(config.val_dataset.img_augment),
+        "future_validity_enabled": bool(
+            config.val_dataset.future_validity.enabled
+        ),
+        "future_validity_max_retries": int(
+            config.val_dataset.future_validity.max_retries
+        ),
+        "single_iterator_reused": True,
+        "drop_last": bool(val_loader.drop_last),
+        "batch_size_per_rank": int(val_loader.batch_size),
+        "loader_workers_per_rank": int(val_loader.num_workers),
+        "persistent_workers": bool(val_loader.persistent_workers),
+        "local_batches_per_event": int(validation.n_val_samples),
+        "local_clips_per_event": (
+            int(val_loader.batch_size) * int(validation.n_val_samples)
+        ),
+        "global_clips_per_event": (
+            contract.WORLD_SIZE
+            * int(val_loader.batch_size)
+            * int(validation.n_val_samples)
+        ),
+        "iterations": validation_iterations,
+        "one_complete_registered_validation_pass_per_event": True,
+    }
+    try:
+        contract.validate_training_validation_contract(
+            observed_validation_contract
+        )
+        contract.validate_training_validation_contract(
+            registration["training"]["validation_iterator"]
+        )
+    except contract.ContractError as exc:
+        raise PreflightError(str(exc)) from exc
     model = instantiate(config.model)
     current = model.state_dict()
     expected_missing = sorted(
@@ -169,6 +221,7 @@ def run(args: argparse.Namespace) -> int:
     payload = _identity(
         {
             "schema": "video-frequency-forcing-warmstart-preflight-v1",
+            "registration_identity_sha256": registration["identity_sha256"],
             "arm": arm.code,
             "selector": args.selector,
             "warmstart": str(checkpoint),
@@ -181,6 +234,7 @@ def run(args: argparse.Namespace) -> int:
             "non_auxiliary_loaded_keys": len(filtered),
             "new_projection_shape": list(projection_shape),
             "new_velocity_head_shape": list(head_shape),
+            "training_validation_iterator": observed_validation_contract,
             "status": "pass",
         }
     )
@@ -191,6 +245,7 @@ def run(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registration", type=Path, required=True)
     parser.add_argument("--selector", required=True)
     parser.add_argument("--warmstart", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
