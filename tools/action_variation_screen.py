@@ -657,8 +657,8 @@ def registered_input_records(registration: Mapping[str, Any]) -> dict[str, Any]:
         "train_actions": registration["training"]["actions"],
         "validation_manifest": registration["validation"]["manifest"],
         "validation_metadata": registration["validation"]["cache_metadata"],
-        "validation_rgb": registration["validation"]["rgb"],
-        "validation_actions": registration["validation"]["actions"],
+        "validation_rgb": registration["validation"]["arrays"]["rgb"],
+        "validation_actions": registration["validation"]["arrays"]["actions"],
         "action_delta_stats": registration["action_delta_stats"]["file"],
     }
 
