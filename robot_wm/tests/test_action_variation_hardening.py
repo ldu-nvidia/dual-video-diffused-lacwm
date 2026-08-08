@@ -207,7 +207,10 @@ def _runtime_registration(tmp_path: Path) -> dict:
         "validation": {
             "manifest": dict(record),
             "cache_metadata": dict(record),
-            "arrays": {"rgb": dict(record), "actions": dict(record)},
+            "arrays": {
+                "rgb": {**record, "full_sha256_verified": True},
+                "actions": {**record, "full_sha256_verified": True},
+            },
         },
         "action_delta_stats": {"file": {**record, "sha256": "c" * 64}},
         "runtime": {
@@ -268,6 +271,20 @@ def _write_runtime_receipt(registration: dict, arm: screen.Arm):
 def test_registered_input_and_runtime_receipts_are_exact(tmp_path, monkeypatch):
     registration = _runtime_registration(tmp_path)
     expected = screen.registered_input_records(registration)
+    assert "full_sha256_verified" not in expected["validation_rgb"]
+    monkeypatch.setattr(
+        screen.base,
+        "_revalidate_record",
+        lambda record, _label: {
+            key: record[key] for key in ("path", "bytes", "sha256")
+        },
+    )
+    revalidated = screen.revalidate_registered_inputs(registration)
+    assert revalidated == expected
+    assert (
+        screen.validate_registered_input_revalidation(revalidated, registration)
+        == expected
+    )
     assert (
         screen.validate_registered_input_revalidation(expected, registration)
         == expected
