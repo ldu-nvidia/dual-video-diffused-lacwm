@@ -128,11 +128,12 @@ learning rate `1e-4`, 20-step warmup, cosine decay, validation after updates
 
 Evaluate all 64 registered validation clips at NFE `{1,2,4}` with sample-keyed
 identical video and auxiliary noise. For each two-clip loader cell, execute one
-batch-2 artifact audit and two synchronized batch-1 endpoint timings, one per
-clip. Each generation independently hooks the Wan forward, block 14, and the
-midpoint head and records exactly `NFE` calls; the receipt therefore records
-exactly `3*NFE` total evaluation calls for the two-clip cell. This duplication
-is evaluation instrumentation, not an extra call in one generated rollout.
+batch-2 artifact audit, one batch-2 profiled-path equivalence audit, and two
+synchronized batch-1 endpoint timings, one per clip. Each generation
+independently hooks the Wan forward, block 14, and the midpoint head and records
+exactly `NFE` calls; the receipt therefore records exactly `4*NFE` total
+evaluation calls for the two-clip cell. This duplication is evaluation
+instrumentation, not an extra call in one generated rollout.
 
 For the `MID-ON` checkpoint run:
 
@@ -151,11 +152,16 @@ Rows record latent NMSE, decoded RGB MSE, decoded temporal-difference MSE
 including the history/future boundary, auxiliary NMSE/DC/motion NMSE, peak
 memory, independent midpoint-head/block/Wan hook counts, VAE history encode,
 Wan, midpoint overhead, decode, and externally measured end-to-end wall time
-with CUDA synchronization. Each synchronized batch-1 timed generation
-collects no artifacts, and its decoded bytes must match the corresponding
-sample from the batch-2 audit. Latency is descriptive at equal NFE only; it is
-excluded from the frozen gate and cannot establish acceleration, throughput,
-FPS, or real-time DAgger.
+with CUDA synchronization. The batch-2 profiled call collects no artifacts and
+must match the batch-2 artifact audit byte-for-byte, proving that profiling and
+artifact collection do not alter the result at a fixed numerical batch shape.
+Batch-1 timings also collect no artifacts. Because BF16 SDPA, convolution, and
+VAE kernels may legally choose batch-shape-dependent arithmetic, their bytes
+are compared with batch 2 only as max/mean absolute uint8 difference and
+differing-pixel-fraction diagnostics; they never supply quality metrics or an
+equivalence gate. Latency is descriptive at equal NFE only; it is excluded
+from the frozen gate and cannot establish acceleration, throughput, FPS, or
+real-time DAgger.
 
 ## Frozen gate
 

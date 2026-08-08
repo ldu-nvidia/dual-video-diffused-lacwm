@@ -67,10 +67,13 @@ fully hashing the registration, warm start, final snapshot, and training
 receipts. This prevents nonzero ranks from waiting at the first NCCL collective
 while rank zero alone hashes multi-GB files.
 
-For each two-clip cell they make one batch-2 artifact audit and two batch-1
-synchronized endpoint timings. Every rollout independently proves exactly NFE
-Wan, midpoint-head, and block-14 calls, and each timed output must match its
-artifact-audit sample byte-for-byte. Latency is descriptive at equal NFE only.
+For each two-clip cell they make one batch-2 artifact audit, one batch-2
+profiled-path equivalence audit, and two batch-1 synchronized endpoint timings.
+Every rollout independently proves exactly NFE Wan, midpoint-head, and block-14
+calls. The two batch-2 paths must match byte-for-byte. Batch-1 versus batch-2
+differences are recorded only as diagnostics because BF16 arithmetic can vary
+with batch shape; the batch-2 artifact path alone supplies quality metrics.
+Latency is descriptive at equal NFE only.
 
 The only sources are aligned generated midpoint state, exact off, and global
 future-bin-shuffled generated midpoint state with bins 0--1 preserved. No

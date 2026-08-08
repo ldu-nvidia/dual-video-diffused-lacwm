@@ -9,8 +9,25 @@ import torch
 from omegaconf import OmegaConf
 
 from tools import intra_forward_forcing_screen as screen
+from tools import evaluate_intra_forward_forcing as evaluator
 from tools import smoke_intra_forward_memory as memory_smoke
 from tools import validate_intra_forward_warmstart as preflight
+
+
+def test_cross_batch_uint8_diagnostics_are_descriptive_and_exact():
+    reference = torch.tensor([[[[0, 10], [250, 255]]]], dtype=torch.uint8)
+    candidate = torch.tensor([[[[1, 8], [255, 255]]]], dtype=torch.uint8)
+
+    diagnostics = evaluator._cross_batch_uint8_diagnostics(candidate, reference)
+
+    assert diagnostics["cross_batch_decoded_max_abs_uint8"] == 5
+    assert diagnostics["cross_batch_decoded_mean_abs_uint8"] == pytest.approx(2.0)
+    assert diagnostics["cross_batch_decoded_differing_fraction"] == pytest.approx(
+        0.75
+    )
+    assert diagnostics["timed_decoded_sha256"] != diagnostics[
+        "audit_decoded_sha256"
+    ]
 
 
 def _registration(study_root: Path) -> dict:
@@ -61,8 +78,11 @@ def _registration(study_root: Path) -> dict:
                     "records_end_to_end_and_peak_memory": True,
                     "records_midpoint_head_elapsed": True,
                     "artifact_audit_batch_size": 2,
+                    "same_batch_profile_equivalence_batch_size": 2,
+                    "same_batch_profile_equivalence_exact": True,
                     "endpoint_timing_batch_size": 1,
-                    "generations_per_two_clip_cell": 3,
+                    "cross_batch_output_comparison": "diagnostic_only",
+                    "generations_per_two_clip_cell": 4,
                     "latency_claim_scope": "descriptive_equal_nfe_only",
                 },
             },
@@ -523,11 +543,17 @@ def _write_evaluation_grid(
                     "timed_wan_calls": nfe,
                     "timed_midpoint_head_calls": nfe,
                     "timed_midpoint_block_calls": nfe,
+                    "equivalence_wan_calls": nfe,
+                    "equivalence_midpoint_head_calls": nfe,
+                    "equivalence_midpoint_block_calls": nfe,
+                    "equivalence_transform_calls": 0,
                     "extra_wan_calls": 0,
-                    "evaluation_generations_per_cell": 3,
+                    "evaluation_generations_per_cell": 4,
                     "audit_batch_size": 2,
+                    "equivalence_batch_size": 2,
+                    "equivalence_exact_decoded_bytes": True,
                     "timed_batch_size": 1,
-                    "total_evaluation_wan_calls": 3 * nfe,
+                    "total_evaluation_wan_calls": 4 * nfe,
                     "wan_block_count": 30,
                     "midpoint_block_index": 14,
                     "midpoint_condition_source": {
@@ -558,6 +584,16 @@ def _write_evaluation_grid(
                         if arm.code == "MID-OFF"
                         else f"{clip + 8000 + 100 * screen.SOURCES.index(source):064x}"
                     ),
+                    "equivalence_decoded_sha256": (
+                        f"{clip + 7000:064x}"
+                        if arm.code == "MID-OFF"
+                        else f"{clip + 8000 + 100 * screen.SOURCES.index(source):064x}"
+                    ),
+                    "timed_decoded_sha256": f"{clip + 9000:064x}",
+                    "cross_batch_decoded_max_abs_uint8": 1,
+                    "cross_batch_decoded_mean_abs_uint8": 0.01,
+                    "cross_batch_decoded_differing_fraction": 0.01,
+                    "cross_batch_output_comparison_is_diagnostic_only": True,
                     "raw_target_sha256": f"{clip + 6000:064x}",
                     "snapshot_sha256": snapshot_sha256,
                     "hydra_config_sha256": hydra_config_sha256,

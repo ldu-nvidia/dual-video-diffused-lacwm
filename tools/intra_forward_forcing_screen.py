@@ -49,11 +49,11 @@ MEMORY_SMOKE_SBATCH = (
 )
 SUBMIT_SCRIPT = REPO_ROOT / "tools/slurm/submit_intra_forward_forcing_screen.sh"
 
-SCHEMA = "video-intra-forward-forcing-screen-v1"
+SCHEMA = "video-intra-forward-forcing-screen-v2"
 ARM_SCHEMA = "video-intra-forward-forcing-arm-v1"
-RESULT_SCHEMA = "video-intra-forward-forcing-validation-row-v1"
-EVALUATION_COMPLETE_SCHEMA = "video-intra-forward-forcing-evaluation-complete-v1"
-ANALYSIS_SCHEMA = "video-intra-forward-forcing-analysis-v1"
+RESULT_SCHEMA = "video-intra-forward-forcing-validation-row-v2"
+EVALUATION_COMPLETE_SCHEMA = "video-intra-forward-forcing-evaluation-complete-v2"
+ANALYSIS_SCHEMA = "video-intra-forward-forcing-analysis-v2"
 PREFLIGHT_SCHEMA = "video-intra-forward-forcing-warmstart-preflight-v1"
 INITIALIZATION_ANCHOR_SCHEMA = "video-intra-forward-initialization-anchor-v1"
 INITIALIZATION_MATCH_SCHEMA = "video-intra-forward-initialization-match-v1"
@@ -721,8 +721,11 @@ def command_register(args: argparse.Namespace) -> int:
                     "records_end_to_end_and_peak_memory": True,
                     "records_midpoint_head_elapsed": True,
                     "artifact_audit_batch_size": 2,
+                    "same_batch_profile_equivalence_batch_size": 2,
+                    "same_batch_profile_equivalence_exact": True,
                     "endpoint_timing_batch_size": 1,
-                    "generations_per_two_clip_cell": 3,
+                    "cross_batch_output_comparison": "diagnostic_only",
+                    "generations_per_two_clip_cell": 4,
                     "latency_claim_scope": "descriptive_equal_nfe_only",
                 },
                 "bootstrap_replicates": 10_000,
@@ -812,8 +815,11 @@ def load_registration(path: Path, *, verify_files: bool = True) -> dict[str, Any
             "records_end_to_end_and_peak_memory": True,
             "records_midpoint_head_elapsed": True,
             "artifact_audit_batch_size": 2,
+            "same_batch_profile_equivalence_batch_size": 2,
+            "same_batch_profile_equivalence_exact": True,
             "endpoint_timing_batch_size": 1,
-            "generations_per_two_clip_cell": 3,
+            "cross_batch_output_comparison": "diagnostic_only",
+            "generations_per_two_clip_cell": 4,
             "latency_claim_scope": "descriptive_equal_nfe_only",
         }
     ):
@@ -1548,6 +1554,8 @@ def _validate_mid_off_noop(
         "video_final_sha256",
         "auxiliary_final_sha256",
         "decoded_final_sha256",
+        "equivalence_decoded_sha256",
+        "timed_decoded_sha256",
         "video_nmse",
         "decoded_mse",
         "temporal_mse",
@@ -1823,11 +1831,20 @@ def command_analyze(args: argparse.Namespace) -> int:
             or row.get("timed_wan_calls") != row.get("nfe")
             or row.get("timed_midpoint_head_calls") != row.get("nfe")
             or row.get("timed_midpoint_block_calls") != row.get("nfe")
+            or row.get("equivalence_wan_calls") != row.get("nfe")
+            or row.get("equivalence_midpoint_head_calls") != row.get("nfe")
+            or row.get("equivalence_midpoint_block_calls") != row.get("nfe")
+            or row.get("equivalence_transform_calls") != 0
             or row.get("extra_wan_calls") != 0
-            or row.get("evaluation_generations_per_cell") != 3
+            or row.get("evaluation_generations_per_cell") != 4
             or row.get("audit_batch_size") != 2
+            or row.get("equivalence_batch_size") != 2
+            or row.get("equivalence_exact_decoded_bytes") is not True
             or row.get("timed_batch_size") != 1
-            or row.get("total_evaluation_wan_calls") != 3 * row.get("nfe")
+            or row.get("total_evaluation_wan_calls") != 4 * row.get("nfe")
+            or row.get("equivalence_decoded_sha256")
+            != row.get("decoded_final_sha256")
+            or row.get("cross_batch_output_comparison_is_diagnostic_only") is not True
             or row.get("wan_block_count") != WAN_BLOCK_COUNT
             or row.get("midpoint_block_index") != MIDPOINT_BLOCK_INDEX
             or row.get("midpoint_condition_source")
@@ -1854,6 +1871,11 @@ def command_analyze(args: argparse.Namespace) -> int:
             state_gate = float(row["effective_state_gate"])
             clock_gate = float(row["effective_clock_gate"])
             peak_memory = int(row["peak_memory_allocated_bytes"])
+            cross_batch_max = int(row["cross_batch_decoded_max_abs_uint8"])
+            cross_batch_mean = float(row["cross_batch_decoded_mean_abs_uint8"])
+            cross_batch_fraction = float(
+                row["cross_batch_decoded_differing_fraction"]
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise ContractError(
                 f"metric/latency audit is missing for result cell: {key}"
@@ -1872,6 +1894,11 @@ def command_analyze(args: argparse.Namespace) -> int:
                 for field in hash_fields
             )
             or peak_memory <= 0
+            or not 0 <= cross_batch_max <= 255
+            or not math.isfinite(cross_batch_mean)
+            or not 0.0 <= cross_batch_mean <= 255.0
+            or not math.isfinite(cross_batch_fraction)
+            or not 0.0 <= cross_batch_fraction <= 1.0
             or float(row["midpoint_overhead_latency_ms"])
             > float(row["wan_latency_ms"]) + 1e-6
             or float(row["wan_latency_ms"]) > float(row["end_to_end_latency_ms"]) + 1e-6

@@ -58,6 +58,38 @@ def _hash_tensor(value: Any) -> list[str]:
     return output
 
 
+def _cross_batch_uint8_diagnostics(
+    candidate: Any, reference: Any
+) -> dict[str, Any]:
+    """Describe, but never gate on, shape-dependent BF16 output differences."""
+    import torch
+
+    if (
+        not isinstance(candidate, torch.Tensor)
+        or not isinstance(reference, torch.Tensor)
+        or candidate.dtype != torch.uint8
+        or reference.dtype != torch.uint8
+        or candidate.shape != reference.shape
+        or candidate.ndim < 1
+        or int(candidate.shape[0]) != 1
+    ):
+        raise EvaluationError(
+            "cross-batch diagnostic inputs must be matching B=1 uint8 tensors"
+        )
+    candidate_cpu = candidate.detach().cpu().contiguous()
+    reference_cpu = reference.detach().cpu().contiguous()
+    delta = (candidate_cpu.to(torch.int16) - reference_cpu.to(torch.int16)).abs()
+    return {
+        "timed_decoded_sha256": _hash_tensor(candidate_cpu)[0],
+        "audit_decoded_sha256": _hash_tensor(reference_cpu)[0],
+        "cross_batch_decoded_max_abs_uint8": int(delta.max().item()),
+        "cross_batch_decoded_mean_abs_uint8": float(delta.float().mean().item()),
+        "cross_batch_decoded_differing_fraction": float(
+            delta.ne(0).float().mean().item()
+        ),
+    }
+
+
 def _per_sample_nmse(estimate: Any, target: Any) -> Any:
     import torch
 
@@ -619,6 +651,25 @@ def _sample_cell(
     batch_size = int(batch["rgb"].shape[0])
     if batch_size != contract.TRAIN_VALIDATION_BATCH_SIZE_PER_RANK:
         raise EvaluationError("artifact audit requires the registered batch size two")
+    # The artifact path and the profiling path must be bit-identical when the
+    # numerical batch shape is held fixed.  BF16 kernels are allowed to choose
+    # different arithmetic at B=1, so the endpoint-timing calls below are
+    # compared to B=2 only diagnostically and never supply quality metrics.
+    equivalence_prediction, equivalence_counts = invoke(
+        batch, collect_artifacts=False, profile=True
+    )
+    equivalence_uint8 = (
+        ((equivalence_prediction.float().clamp(-1.0, 1.0) + 1.0) * 127.5)
+        .round()
+        .to(torch.uint8)
+        .cpu()
+    )
+    if _hash_tensor(equivalence_uint8) != _hash_tensor(audited_decoded):
+        raise EvaluationError(
+            "same-batch profiled and artifact deployable outputs differ"
+        )
+    del equivalence_prediction
+
     timed = []
     for offset in range(batch_size):
         single = {
@@ -653,10 +704,9 @@ def _sample_cell(
             .to(torch.uint8)
             .cpu()
         )
-        if _hash_tensor(timed_uint8) != _hash_tensor(
-            audited_decoded[offset : offset + 1]
-        ):
-            raise EvaluationError("timed and audited deployable outputs differ")
+        cross_batch = _cross_batch_uint8_diagnostics(
+            timed_uint8, audited_decoded[offset : offset + 1]
+        )
         timed.append(
             {
                 "counts": timed_counts,
@@ -664,11 +714,16 @@ def _sample_cell(
                 "timed_end_to_end_latency_ms": timed_end_to_end_latency_ms,
                 "peak_memory_allocated_bytes": peak_memory,
                 "batch_size": 1,
+                **cross_batch,
             }
         )
     audit = {
         "audit_counts": audit_counts,
         "audit_batch_size": batch_size,
+        "equivalence_counts": equivalence_counts,
+        "equivalence_batch_size": batch_size,
+        "equivalence_exact_decoded_bytes": True,
+        "equivalence_decoded_sha256": _hash_tensor(equivalence_uint8),
         "timed": timed,
     }
     return artifacts, audit
@@ -697,6 +752,7 @@ def _rows_for_cell(
         artifacts[f"midpoint_head_call_count{infix}_nfe_{nfe}"].reshape(-1)[0]
     )
     audit_counts = audit["audit_counts"]
+    equivalence_counts = audit["equivalence_counts"]
     timed_audits = audit["timed"]
     if (
         recorded_calls != nfe
@@ -704,6 +760,12 @@ def _rows_for_cell(
         or any(audit_counts[name] != nfe for name in ("wan", "head", "block"))
         or audit_counts["transform"] != 0
         or int(audit.get("audit_batch_size", -1)) != 2
+        or any(
+            equivalence_counts[name] != nfe for name in ("wan", "head", "block")
+        )
+        or equivalence_counts["transform"] != 0
+        or int(audit.get("equivalence_batch_size", -1)) != 2
+        or audit.get("equivalence_exact_decoded_bytes") is not True
         or len(timed_audits) != 2
         or any(
             timed_audit.get("batch_size") != 1
@@ -719,6 +781,7 @@ def _rows_for_cell(
             f"call topology differs for {source}/NFE{nfe}: "
             f"artifact={recorded_calls}/{recorded_midpoint_calls}, "
             f"audit={audit_counts}, "
+            f"equivalence={equivalence_counts}, "
             f"timed={[item.get('counts') for item in timed_audits]}"
         )
     if int(artifacts["online_teacher_call_count"].reshape(-1)[0]) != 0:
@@ -807,12 +870,19 @@ def _rows_for_cell(
             "timed_wan_calls": timed_counts["wan"],
             "timed_midpoint_head_calls": timed_counts["head"],
             "timed_midpoint_block_calls": timed_counts["block"],
+            "equivalence_wan_calls": equivalence_counts["wan"],
+            "equivalence_midpoint_head_calls": equivalence_counts["head"],
+            "equivalence_midpoint_block_calls": equivalence_counts["block"],
+            "equivalence_transform_calls": equivalence_counts["transform"],
             "extra_wan_calls": 0,
-            "evaluation_generations_per_cell": 3,
+            "evaluation_generations_per_cell": 4,
             "audit_batch_size": 2,
+            "equivalence_batch_size": 2,
+            "equivalence_exact_decoded_bytes": True,
             "timed_batch_size": 1,
             "total_evaluation_wan_calls": (
                 audit_counts["wan"]
+                + equivalence_counts["wan"]
                 + sum(item["counts"]["wan"] for item in timed_audits)
             ),
             "wan_block_count": contract.WAN_BLOCK_COUNT,
@@ -833,6 +903,20 @@ def _rows_for_cell(
             "video_final_sha256": final_video_hashes[offset],
             "auxiliary_final_sha256": final_aux_hashes[offset],
             "decoded_final_sha256": decoded_hashes[offset],
+            "equivalence_decoded_sha256": audit[
+                "equivalence_decoded_sha256"
+            ][offset],
+            "timed_decoded_sha256": timed_audit["timed_decoded_sha256"],
+            "cross_batch_decoded_max_abs_uint8": timed_audit[
+                "cross_batch_decoded_max_abs_uint8"
+            ],
+            "cross_batch_decoded_mean_abs_uint8": timed_audit[
+                "cross_batch_decoded_mean_abs_uint8"
+            ],
+            "cross_batch_decoded_differing_fraction": timed_audit[
+                "cross_batch_decoded_differing_fraction"
+            ],
+            "cross_batch_output_comparison_is_diagnostic_only": True,
             "raw_target_sha256": decoded_metrics["target_hash"][offset],
             "snapshot_sha256": inputs["snapshot_sha256"],
             "hydra_config_sha256": inputs["hydra_config_sha256"],
