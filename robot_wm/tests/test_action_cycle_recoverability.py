@@ -18,10 +18,13 @@ def test_actual_four_bin_contract_yields_three_aligned_transitions() -> None:
     assert protocol["alignment"]["unused_terminal_action_chunk"] == 12
     assert protocol["alignment"]["future_relevant_guardrail"] == [1, 2]
     assert set(protocol["consumption_integrity"]["full_sha256_before_and_after"]) == {
-        "train_rgb_encode", "validation_rgb_encode", "train_features_analysis",
+        "registration_oracle_train_actions", "train_rgb_encode",
+        "validation_rgb_encode", "rank_index_and_feature_shards_merge",
+        "train_features_analysis",
         "validation_features_analysis", "train_actions_analysis",
         "validation_actions_analysis",
     }
+    assert protocol["consumption_integrity"]["rank_shard_producer_seal_required"] is True
 
 
 def test_action_target_uses_full_aligned_segments_not_within_chunk_delta() -> None:
@@ -59,8 +62,12 @@ def test_temporal_negative_train_oracle_can_attain_frozen_cosine_gate() -> None:
         assert row["perfect_predictor_cosine_gap"] >= 0.10
         assert row["perfect_predictor_mse_gap"] > 0
     register_source = inspect.getsource(probe.command_register)
-    assert register_source.index("temporal_control_oracle_feasibility") < register_source.index(
-        "output_root.mkdir"
+    assert (
+        register_source.index("oracle_action_pre_rehash = full_preconsumption_rehash")
+        < register_source.index("train_actions_for_oracle = np.load")
+        < register_source.index("temporal_control_oracle_feasibility")
+        < register_source.index("oracle_action_post_rehash = full_postconsumption_rehash")
+        < register_source.index("output_root.mkdir")
     )
 
 
@@ -147,20 +154,27 @@ def test_full_preconsumption_hash_rejects_same_size_middle_mutation(tmp_path) ->
     artifact = tmp_path / "array.bin"
     artifact.write_bytes(b"a" * 128)
     record = probe.file_record(artifact)
+    producer = probe.full_producer_seal(
+        record,
+        label="synthetic array producer seal",
+        binding_identity_sha256="1" * 64,
+    )
     receipt = probe.full_preconsumption_rehash(
         record,
         label="synthetic array",
-        registration_identity_sha256="1" * 64,
+        binding_identity_sha256="1" * 64,
     )
+    probe.validate_same_file_identity(producer, receipt)
     assert receipt["full_file_hashed"] is True
     assert receipt["sha256"] == record["sha256"]
     artifact.read_bytes()  # stand in for a complete, unchanged consumer
     post = probe.full_postconsumption_rehash(
         record,
         label="synthetic array after consumption",
-        registration_identity_sha256="1" * 64,
+        binding_identity_sha256="1" * 64,
     )
     probe.validate_consumption_window(receipt, post)
+    probe.validate_same_file_identity(producer, receipt, post)
     with artifact.open("r+b") as handle:
         handle.seek(64)
         handle.write(b"z")
@@ -169,7 +183,98 @@ def test_full_preconsumption_hash_rejects_same_size_middle_mutation(tmp_path) ->
         probe.full_postconsumption_rehash(
             record,
             label="synthetic array after mutated consumption",
-            registration_identity_sha256="1" * 64,
+            binding_identity_sha256="1" * 64,
+        )
+
+
+def test_shard_merge_brackets_memmaps_and_consumes_only_copies() -> None:
+    merge_source = " ".join(inspect.getsource(probe._merge_encoding_shards).split())
+    assert (
+        merge_source.index("feature_pre_rehash = full_preconsumption_rehash")
+        < merge_source.index("features_mmap = np.load")
+        < merge_source.index("features = np.array(features_mmap, copy=True)")
+        < merge_source.index("feature_post_rehash = full_postconsumption_rehash")
+        < merge_source.index("all_features.append(features)")
+        < merge_source.index("values = np.concatenate(all_features)")
+    )
+    assert (
+        "validate_same_file_identity( feature_producer_seal, "
+        "feature_pre_rehash, feature_post_rehash )"
+    ) in merge_source
+
+
+def test_shard_merge_persists_producer_pre_and_post_identities(tmp_path) -> None:
+    output = tmp_path / "encoded"
+    output.mkdir()
+    binding = "2" * 64
+    registration = {
+        "identity_sha256": binding,
+        "inputs": {"train": {"rgb": {"synthetic": True}, "actions": {}}},
+    }
+    index_path = output / "indices.rank00.int64.npy"
+    feature_path = output / "features.rank00.float32.npy"
+    np.save(index_path, np.arange(2, dtype=np.int64), allow_pickle=False)
+    np.save(
+        feature_path,
+        np.zeros((2, 3, 3, probe.FEATURE_DIM), dtype=np.float32),
+        allow_pickle=False,
+    )
+    index_record = probe.file_record(index_path)
+    feature_record = probe.file_record(feature_path)
+    index_seal = probe.full_producer_seal(
+        index_record, label="index producer", binding_identity_sha256=binding
+    )
+    feature_seal = probe.full_producer_seal(
+        feature_record, label="feature producer", binding_identity_sha256=binding
+    )
+    receipt = probe.identity_payload(
+        {
+            "kind": "action-cycle-recoverability-encoding-rank-v1",
+            "registration_identity_sha256": binding,
+            "split": "train",
+            "rank": 0,
+            "world_size": 1,
+            "indices_sha256": index_record["sha256"],
+            "features_sha256": feature_record["sha256"],
+            "indices_file": index_record,
+            "features_file": feature_record,
+            "indices_producer_seal": index_seal,
+            "features_producer_seal": feature_seal,
+            "rows": 2,
+        }
+    )
+    probe.exclusive_json(output / "receipt.rank00.json", receipt)
+    rgb_path = tmp_path / "rgb.bin"
+    rgb_path.write_bytes(b"rgb-consumption-window")
+    rgb_record = probe.file_record(rgb_path)
+    rgb_before = probe.full_preconsumption_rehash(
+        rgb_record, label="RGB before", binding_identity_sha256=binding
+    )
+    rgb_after = probe.full_postconsumption_rehash(
+        rgb_record, label="RGB after", binding_identity_sha256=binding
+    )
+
+    metadata = probe._merge_encoding_shards(
+        output,
+        split="train",
+        count=2,
+        world_size=1,
+        registration=registration,
+        canary={"passed": True},
+        rgb_pre_rehash=rgb_before,
+        rgb_post_rehash=rgb_after,
+    )
+
+    shard = metadata["shards"][0]
+    for key, seal in (
+        ("index_merge_consumption_window", index_seal),
+        ("feature_merge_consumption_window", feature_seal),
+    ):
+        window = shard[key]
+        assert window["unchanged"] is True
+        probe.validate_consumption_window(window["before"], window["after"])
+        probe.validate_same_file_identity(
+            seal, window["producer"], window["before"], window["after"]
         )
 
 

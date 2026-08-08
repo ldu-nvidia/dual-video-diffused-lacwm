@@ -387,10 +387,13 @@ def fixed_protocol() -> dict[str, Any]:
         },
         "consumption_integrity": {
             "full_sha256_before_and_after": [
+                "registration_oracle_train_actions",
                 "train_rgb_encode", "validation_rgb_encode",
+                "rank_index_and_feature_shards_merge",
                 "train_features_analysis", "validation_features_analysis",
                 "train_actions_analysis", "validation_actions_analysis",
             ],
+            "rank_shard_producer_seal_required": True,
             "boundary_identity_fields": [
                 "device", "inode", "bytes", "mtime_ns", "sha256"
             ],
@@ -587,6 +590,32 @@ def stage_identity(registration: Mapping[str, Any], stage: str) -> str:
     )["identity_sha256"]
 
 
+def oracle_input_binding_sha256(
+    *,
+    source_commit: str,
+    train_actions: Mapping[str, Any],
+    train_manifest_sha256: str,
+) -> str:
+    """Identity available before reading actions or creating registration."""
+
+    return identity_payload(
+        {
+            "kind": "action-cycle-registration-oracle-input-binding-v1",
+            "source_commit": validate_commit(
+                source_commit, label="oracle source commit"
+            ),
+            "train_actions": dict(train_actions),
+            "train_manifest_sha256": validate_sha256(
+                train_manifest_sha256, label="oracle train-manifest digest"
+            ),
+            "temporal_control": fixed_protocol()["controls"][
+                "same_clip_task_matched_temporal_misalignment"
+            ],
+            "protected_test_accessed": False,
+        }
+    )["identity_sha256"]
+
+
 def _wandb_private_project() -> dict[str, Any]:
     """Verify that the authenticated W&B viewer owns the private project."""
 
@@ -695,6 +724,16 @@ def command_register(args: argparse.Namespace) -> int:
         count=VALIDATION_CLIPS, full_hash=True,
     )
     validate_train_val_disjoint(train, val)
+    oracle_binding = oracle_input_binding_sha256(
+        source_commit=expected_commit,
+        train_actions=train["actions"],
+        train_manifest_sha256=train["manifest"]["sha256"],
+    )
+    oracle_action_pre_rehash = full_preconsumption_rehash(
+        train["actions"],
+        label="train actions immediately before registration oracle consumption",
+        binding_identity_sha256=oracle_binding,
+    )
     train_actions_for_oracle = np.load(
         train["actions"]["path"], mmap_mode="r", allow_pickle=False
     )
@@ -702,6 +741,14 @@ def command_register(args: argparse.Namespace) -> int:
         train_actions_for_oracle
     )
     del train_actions_for_oracle
+    oracle_action_post_rehash = full_postconsumption_rehash(
+        train["actions"],
+        label="train actions immediately after registration oracle consumption",
+        binding_identity_sha256=oracle_binding,
+    )
+    validate_consumption_window(
+        oracle_action_pre_rehash, oracle_action_post_rehash
+    )
     validate_temporal_oracle_payload(temporal_oracle)
 
     videox = regular_directory(args.videox_home, label="VideoX-Fun repository")
@@ -757,6 +804,12 @@ def command_register(args: argparse.Namespace) -> int:
                 "episode_dir": True,
             },
             "train_only_temporal_control_oracle_feasibility": temporal_oracle,
+            "registration_oracle_action_consumption_window": {
+                "binding_identity_sha256": oracle_binding,
+                "before": oracle_action_pre_rehash,
+                "after": oracle_action_post_rehash,
+                "unchanged": True,
+            },
             "fixed_protocol": fixed_protocol(),
             "wandb": wandb,
             "target_cache_array_opened": False,
@@ -785,12 +838,14 @@ def full_integrity_rehash(
     record: Mapping[str, Any],
     *,
     label: str,
-    registration_identity_sha256: str,
+    binding_identity_sha256: str,
     phase: str,
 ) -> dict[str, Any]:
     """Hash every byte and reject mutation during the verification window."""
 
-    if phase not in {"immediate_preconsumption", "immediate_postconsumption"}:
+    if phase not in {
+        "producer_seal", "immediate_preconsumption", "immediate_postconsumption"
+    }:
         raise ActionCycleProbeError("full-integrity rehash phase is invalid")
 
     path = regular_file(record.get("path", ""), label=label, protected_ok=True)
@@ -815,7 +870,9 @@ def full_integrity_rehash(
         {
             "kind": "action-cycle-consumption-boundary-full-rehash-v1",
             "created_at_utc": now_utc(),
-            "registration_identity_sha256": registration_identity_sha256,
+            "binding_identity_sha256": validate_sha256(
+                binding_identity_sha256, label="consumption-window binding identity"
+            ),
             "label": label,
             "phase": phase,
             "path": str(path),
@@ -834,13 +891,27 @@ def full_preconsumption_rehash(
     record: Mapping[str, Any],
     *,
     label: str,
-    registration_identity_sha256: str,
+    binding_identity_sha256: str,
 ) -> dict[str, Any]:
     return full_integrity_rehash(
         record,
         label=label,
-        registration_identity_sha256=registration_identity_sha256,
+        binding_identity_sha256=binding_identity_sha256,
         phase="immediate_preconsumption",
+    )
+
+
+def full_producer_seal(
+    record: Mapping[str, Any],
+    *,
+    label: str,
+    binding_identity_sha256: str,
+) -> dict[str, Any]:
+    return full_integrity_rehash(
+        record,
+        label=label,
+        binding_identity_sha256=binding_identity_sha256,
+        phase="producer_seal",
     )
 
 
@@ -848,12 +919,12 @@ def full_postconsumption_rehash(
     record: Mapping[str, Any],
     *,
     label: str,
-    registration_identity_sha256: str,
+    binding_identity_sha256: str,
 ) -> dict[str, Any]:
     return full_integrity_rehash(
         record,
         label=label,
-        registration_identity_sha256=registration_identity_sha256,
+        binding_identity_sha256=binding_identity_sha256,
         phase="immediate_postconsumption",
     )
 
@@ -862,7 +933,7 @@ def validate_consumption_window(
     before: Mapping[str, Any], after: Mapping[str, Any]
 ) -> None:
     invariant_fields = (
-        "registration_identity_sha256", "path", "sha256", "bytes", "device",
+        "binding_identity_sha256", "path", "sha256", "bytes", "device",
         "inode", "mtime_ns",
     )
     if (
@@ -877,6 +948,21 @@ def validate_consumption_window(
         raise ActionCycleProbeError(
             "file identity changed across the full memmap consumption window"
         )
+
+
+def validate_same_file_identity(*receipts: Mapping[str, Any]) -> None:
+    fields = (
+        "binding_identity_sha256", "path", "sha256", "bytes", "device",
+        "inode", "mtime_ns",
+    )
+    if not receipts or any(not identity_valid(receipt) for receipt in receipts):
+        raise ActionCycleProbeError("file-identity receipt is invalid")
+    reference = receipts[0]
+    if any(
+        any(receipt.get(field) != reference.get(field) for field in fields)
+        for receipt in receipts[1:]
+    ):
+        raise ActionCycleProbeError("producer and consumer file identities differ")
 
 
 def validate_registration(path: Path, *, full_hash: bool) -> dict[str, Any]:
@@ -898,6 +984,38 @@ def validate_registration(path: Path, *, full_hash: bool) -> dict[str, Any]:
         raise ActionCycleProbeError("registration identity or protocol differs")
     validate_temporal_oracle_payload(
         registration.get("train_only_temporal_control_oracle_feasibility", {})
+    )
+    oracle_window = registration.get(
+        "registration_oracle_action_consumption_window", {}
+    )
+    expected_oracle_binding = oracle_input_binding_sha256(
+        source_commit=registration.get("repository", {}).get("commit", ""),
+        train_actions=registration.get("inputs", {}).get("train", {}).get(
+            "actions", {}
+        ),
+        train_manifest_sha256=registration.get("inputs", {})
+        .get("train", {})
+        .get("manifest", {})
+        .get("sha256", ""),
+    )
+    if (
+        oracle_window.get("unchanged") is not True
+        or oracle_window.get("binding_identity_sha256")
+        != expected_oracle_binding
+        or oracle_window.get("before", {}).get("binding_identity_sha256")
+        != expected_oracle_binding
+        or oracle_window.get("after", {}).get("binding_identity_sha256")
+        != expected_oracle_binding
+        or oracle_window.get("before", {}).get("sha256")
+        != registration.get("inputs", {}).get("train", {}).get("actions", {}).get(
+            "sha256"
+        )
+    ):
+        raise ActionCycleProbeError(
+            "registration oracle action-consumption binding differs"
+        )
+    validate_consumption_window(
+        oracle_window.get("before", {}), oracle_window.get("after", {})
     )
     output_root = Path(registration.get("output_root", "")).resolve(strict=True)
     if registration_path != (output_root / "registration.json").resolve(strict=True):
@@ -1288,27 +1406,84 @@ def _merge_encoding_shards(
         feature_path = output / f"features.rank{rank:02d}.float32.npy"
         receipt_path = output / f"receipt.rank{rank:02d}.json"
         receipt = read_json(receipt_path, label=f"encoding rank {rank} receipt")
-        indices = np.load(index_path, allow_pickle=False)
-        features = np.load(feature_path, mmap_mode="r", allow_pickle=False)
+        index_record = receipt.get("indices_file", {})
+        feature_record = receipt.get("features_file", {})
+        index_producer_seal = receipt.get("indices_producer_seal", {})
+        feature_producer_seal = receipt.get("features_producer_seal", {})
         if (
-            receipt.get("registration_identity_sha256") != registration["identity_sha256"]
+            not identity_valid(receipt)
+            or receipt.get("registration_identity_sha256") != registration["identity_sha256"]
             or receipt.get("split") != split
             or int(receipt.get("rank", -1)) != rank
             or int(receipt.get("world_size", -1)) != world_size
-            or tuple(features.shape) != (len(indices), 3, 3, FEATURE_DIM)
-            or features.dtype != np.float32
-            or indices.dtype != np.int64
-            or receipt.get("features_sha256") != sha256_file(feature_path)
-            or receipt.get("indices_sha256") != sha256_file(index_path)
+            or Path(index_record.get("path", "")).resolve() != index_path.resolve()
+            or Path(feature_record.get("path", "")).resolve() != feature_path.resolve()
+            or receipt.get("features_sha256") != feature_record.get("sha256")
+            or receipt.get("indices_sha256") != index_record.get("sha256")
+            or index_producer_seal.get("phase") != "producer_seal"
+            or feature_producer_seal.get("phase") != "producer_seal"
         ):
             raise ActionCycleProbeError(f"encoding shard {rank} failed integrity validation")
-        all_indices.append(np.asarray(indices))
-        all_features.append(np.asarray(features))
+        index_pre_rehash = full_preconsumption_rehash(
+            index_record,
+            label=f"{split} rank {rank} index shard before merge consumption",
+            binding_identity_sha256=registration["identity_sha256"],
+        )
+        feature_pre_rehash = full_preconsumption_rehash(
+            feature_record,
+            label=f"{split} rank {rank} feature shard before merge consumption",
+            binding_identity_sha256=registration["identity_sha256"],
+        )
+        validate_same_file_identity(index_producer_seal, index_pre_rehash)
+        validate_same_file_identity(feature_producer_seal, feature_pre_rehash)
+        indices_mmap = np.load(index_path, mmap_mode="r", allow_pickle=False)
+        features_mmap = np.load(feature_path, mmap_mode="r", allow_pickle=False)
+        if (
+            tuple(features_mmap.shape) != (len(indices_mmap), 3, 3, FEATURE_DIM)
+            or features_mmap.dtype != np.float32
+            or indices_mmap.dtype != np.int64
+        ):
+            raise ActionCycleProbeError(f"encoding shard {rank} shape/type differs")
+        indices = np.array(indices_mmap, copy=True)
+        features = np.array(features_mmap, copy=True)
+        del indices_mmap, features_mmap
+        index_post_rehash = full_postconsumption_rehash(
+            index_record,
+            label=f"{split} rank {rank} index shard after merge consumption",
+            binding_identity_sha256=registration["identity_sha256"],
+        )
+        feature_post_rehash = full_postconsumption_rehash(
+            feature_record,
+            label=f"{split} rank {rank} feature shard after merge consumption",
+            binding_identity_sha256=registration["identity_sha256"],
+        )
+        validate_consumption_window(index_pre_rehash, index_post_rehash)
+        validate_consumption_window(feature_pre_rehash, feature_post_rehash)
+        validate_same_file_identity(
+            index_producer_seal, index_pre_rehash, index_post_rehash
+        )
+        validate_same_file_identity(
+            feature_producer_seal, feature_pre_rehash, feature_post_rehash
+        )
+        all_indices.append(indices)
+        all_features.append(features)
         shard_records.append(
             {
                 "rank": rank,
-                "indices": file_record(index_path),
-                "features": file_record(feature_path),
+                "indices": index_record,
+                "features": feature_record,
+                "index_merge_consumption_window": {
+                    "producer": index_producer_seal,
+                    "before": index_pre_rehash,
+                    "after": index_post_rehash,
+                    "unchanged": True,
+                },
+                "feature_merge_consumption_window": {
+                    "producer": feature_producer_seal,
+                    "before": feature_pre_rehash,
+                    "after": feature_post_rehash,
+                    "unchanged": True,
+                },
                 "receipt": file_record(receipt_path),
             }
         )
@@ -1372,14 +1547,14 @@ def command_encode(args: argparse.Namespace) -> int:
         rgb_rehash = full_preconsumption_rehash(
             source["rgb"],
             label=f"{split} RGB array immediately before encode consumption",
-            registration_identity_sha256=registration["identity_sha256"],
+            binding_identity_sha256=registration["identity_sha256"],
         )
         exclusive_json(rehash_path, rgb_rehash)
     torch.distributed.barrier()
     rgb_rehash = read_json(rehash_path, label=f"{split} RGB preconsumption rehash")
     if (
         not identity_valid(rgb_rehash)
-        or rgb_rehash.get("registration_identity_sha256")
+        or rgb_rehash.get("binding_identity_sha256")
         != registration["identity_sha256"]
         or rgb_rehash.get("sha256") != source["rgb"]["sha256"]
         or rgb_rehash.get("full_file_hashed") is not True
@@ -1407,7 +1582,7 @@ def command_encode(args: argparse.Namespace) -> int:
         rgb_post_rehash = full_postconsumption_rehash(
             source["rgb"],
             label=f"{split} RGB array immediately after encode consumption",
-            registration_identity_sha256=registration["identity_sha256"],
+            binding_identity_sha256=registration["identity_sha256"],
         )
         validate_consumption_window(rgb_rehash, rgb_post_rehash)
         exclusive_json(post_rehash_path, rgb_post_rehash)
@@ -1422,6 +1597,18 @@ def command_encode(args: argparse.Namespace) -> int:
     feature_path = output / f"features.rank{rank:02d}.float32.npy"
     _exclusive_npy(index_path, indexes)
     _exclusive_npy(feature_path, features)
+    index_record = file_record(index_path)
+    feature_record = file_record(feature_path)
+    index_producer_seal = full_producer_seal(
+        index_record,
+        label=f"{split} rank {rank} produced index shard",
+        binding_identity_sha256=registration["identity_sha256"],
+    )
+    feature_producer_seal = full_producer_seal(
+        feature_record,
+        label=f"{split} rank {rank} produced feature shard",
+        binding_identity_sha256=registration["identity_sha256"],
+    )
     receipt = identity_payload(
         {
             "kind": "action-cycle-recoverability-encoding-rank-v1",
@@ -1430,8 +1617,12 @@ def command_encode(args: argparse.Namespace) -> int:
             "rank": rank,
             "world_size": world_size,
             "device": str(device),
-            "indices_sha256": sha256_file(index_path),
-            "features_sha256": sha256_file(feature_path),
+            "indices_sha256": index_record["sha256"],
+            "features_sha256": feature_record["sha256"],
+            "indices_file": index_record,
+            "features_file": feature_record,
+            "indices_producer_seal": index_producer_seal,
+            "features_producer_seal": feature_producer_seal,
             "rows": len(indexes),
             "elapsed_seconds": elapsed,
             "target_cache_array_opened": False,
@@ -1520,7 +1711,7 @@ def _validate_encoding(
         or rgb_window.get("unchanged") is not True
         or not identity_valid(rgb_pre_rehash)
         or not identity_valid(rgb_post_rehash)
-        or rgb_pre_rehash.get("registration_identity_sha256")
+        or rgb_pre_rehash.get("binding_identity_sha256")
         != registration["identity_sha256"]
         or rgb_pre_rehash.get("sha256")
         != registration["inputs"][split]["rgb"]["sha256"]
@@ -1534,7 +1725,7 @@ def _validate_encoding(
     feature_pre_rehash = full_preconsumption_rehash(
         metadata["features"],
         label=f"{split} encoded features immediately before analysis consumption",
-        registration_identity_sha256=registration["identity_sha256"],
+        binding_identity_sha256=registration["identity_sha256"],
     )
     feature_path = Path(metadata["features"]["path"])
     values = np.load(feature_path, mmap_mode="r", allow_pickle=False)
@@ -1809,7 +2000,7 @@ def command_analyze(args: argparse.Namespace) -> int:
     train_feature_post_rehash = full_postconsumption_rehash(
         train_encoding["features"],
         label="train encoded features immediately after analysis consumption",
-        registration_identity_sha256=registration["identity_sha256"],
+        binding_identity_sha256=registration["identity_sha256"],
     )
     validate_consumption_window(
         train_feature_pre_rehash, train_feature_post_rehash
@@ -1824,13 +2015,13 @@ def command_analyze(args: argparse.Namespace) -> int:
     val_feature_post_rehash = full_postconsumption_rehash(
         val_encoding["features"],
         label="validation encoded features immediately after analysis consumption",
-        registration_identity_sha256=registration["identity_sha256"],
+        binding_identity_sha256=registration["identity_sha256"],
     )
     validate_consumption_window(val_feature_pre_rehash, val_feature_post_rehash)
     train_action_rehash = full_preconsumption_rehash(
         registration["inputs"]["train"]["actions"],
         label="train actions immediately before analysis consumption",
-        registration_identity_sha256=registration["identity_sha256"],
+        binding_identity_sha256=registration["identity_sha256"],
     )
     train_actions = np.load(
         registration["inputs"]["train"]["actions"]["path"], mmap_mode="r",
@@ -1841,13 +2032,13 @@ def command_analyze(args: argparse.Namespace) -> int:
     train_action_post_rehash = full_postconsumption_rehash(
         registration["inputs"]["train"]["actions"],
         label="train actions immediately after analysis consumption",
-        registration_identity_sha256=registration["identity_sha256"],
+        binding_identity_sha256=registration["identity_sha256"],
     )
     validate_consumption_window(train_action_rehash, train_action_post_rehash)
     val_action_rehash = full_preconsumption_rehash(
         registration["inputs"]["val"]["actions"],
         label="validation actions immediately before analysis consumption",
-        registration_identity_sha256=registration["identity_sha256"],
+        binding_identity_sha256=registration["identity_sha256"],
     )
     val_actions = np.load(
         registration["inputs"]["val"]["actions"]["path"], mmap_mode="r",
@@ -1859,7 +2050,7 @@ def command_analyze(args: argparse.Namespace) -> int:
     val_action_post_rehash = full_postconsumption_rehash(
         registration["inputs"]["val"]["actions"],
         label="validation actions immediately after analysis consumption",
-        registration_identity_sha256=registration["identity_sha256"],
+        binding_identity_sha256=registration["identity_sha256"],
     )
     validate_consumption_window(val_action_rehash, val_action_post_rehash)
     train_targets, target_mean, target_std, target_active = _standardize_targets(

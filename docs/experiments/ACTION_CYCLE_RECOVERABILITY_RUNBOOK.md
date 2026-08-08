@@ -44,10 +44,14 @@ Before submission, confirm no active duplicate study and use a fresh absent
 large RGB/action arrays, verifies the exact clean VideoX commit and Wan asset
 digests, checks private W&B ownership, and computes the train-only oracle
 feasibility of the nonoverlapping cyclic temporal control before registration
-is written. Each RGB split is fully rehashed immediately before and after
-encoding; train/validation encoded features and actions are fully rehashed
-immediately before and after analysis consumes them. Boundary inode, size,
-mtime, and SHA-256 identities must remain exact. Do not reuse a partial root.
+is written. The oracle's train-action memmap is fully rehashed immediately
+before and after consumption against a preregistration input binding. Each RGB
+split is fully rehashed immediately before and after encoding. Every rank's
+index and feature shard is producer-sealed, fully rehashed before and after
+rank-zero copies its memmap, and only the copies are concatenated.
+Train/validation encoded features and actions are fully rehashed immediately
+before and after analysis consumes them. Boundary device, inode, size, mtime,
+and SHA-256 identities must remain exact. Do not reuse a partial root.
 
 Read-only monitoring:
 

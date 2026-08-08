@@ -92,7 +92,12 @@ oracle-feasibility certificate. A perfect standardized-action predictor is
 scored against the cyclic negative for both the all-three and future-relevant
 transition subsets. Each mean cosine gap must be at least the already frozen
 0.10 gate and each MSE gap must be positive. This is a feasibility invariant,
-not a fitted or validation result; failure aborts registration.
+not a fitted or validation result; failure aborts registration. The entire
+train-action file is SHA-256 hashed immediately before and after this oracle
+read. Both receipts are bound to a preregistration input identity containing
+the source commit, registered train-action record, train-manifest digest, and
+frozen temporal-control protocol; device, inode, size, mtime, and digest must
+remain identical across the read.
 
 ## Preregistered gate
 
@@ -112,10 +117,14 @@ simultaneous lower bound must be strictly positive. Any failure yields
 All inputs, code, Wan assets, encodings, fitted ridge, rows, shuffles, and
 results are content-hashed and bound to the preregistration identity. Every RGB
 array is fully rehashed immediately before and after its complete distributed
-encode consumption. Each encoded-feature and action array is likewise fully
-rehashed around its complete analysis consumption. The two boundary receipts
-must have identical device, inode, size, mtime, and SHA-256; a same-size middle
-mutation or a change retained at the end of the consumption window fails.
+encode consumption. Every per-rank index and feature shard is fully hashed and
+stat-sealed by its producer, then fully rehashed immediately before and after
+the rank-zero merge consumes its memmap. Concatenation uses only in-memory
+copies made inside that bracket. Each final encoded-feature and action array is
+likewise fully rehashed around its complete analysis consumption. The producer,
+pre-read, and post-read receipts must have identical device, inode, size,
+mtime, and SHA-256; a same-size middle mutation or a change retained at the end
+of the consumption window fails.
 W&B is
 locked to the authenticated owner `zijiandu`, private project
 `dual-video-diffusion-private`, with no group.
