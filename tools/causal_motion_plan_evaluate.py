@@ -55,7 +55,7 @@ ENDPOINTS = tuple(
     Endpoint(source, nfe, nfe == 1)
     for nfe in (1, 2, 4)
     for source in ("aligned", "off", "shuffled")
-) + (Endpoint("action_shuffled", 1, False),)
+) + (Endpoint("action_shuffled", 1, True),)
 
 
 def _canonical_json(value: Any) -> bytes:

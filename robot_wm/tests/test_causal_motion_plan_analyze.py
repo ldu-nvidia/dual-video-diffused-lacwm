@@ -8,6 +8,15 @@ import pytest
 from tools import causal_motion_plan_analyze as analyze
 
 
+def test_fixed_family_includes_planner_action_attribution() -> None:
+    assert analyze.FAMILY_CELLS == 12
+    assert analyze.REFERENCES[-1] == (
+        "same_checkpoint_action_shuffled",
+        "PLAN-ON",
+        "action_shuffled",
+    )
+
+
 def test_paired_relative_improvement_and_fixed_thresholds() -> None:
     reference = np.ones(64, dtype=np.float64)
     candidate = np.full(64, 0.8, dtype=np.float64)
@@ -47,3 +56,11 @@ def test_paired_effect_rejects_zero_reference_energy() -> None:
             np.zeros(2),
             bootstrap_indexes=np.zeros((10, 2), dtype=np.int64),
         )
+
+
+def test_latency_summary_does_not_confuse_frame_fps_with_rollout_rate() -> None:
+    summary = analyze.latency_summary([1.0] * 64)
+    assert summary["rollout_hz_from_mean"] == pytest.approx(1.0)
+    assert summary["rollout_hz_from_p95"] == pytest.approx(1.0)
+    assert summary["generated_frame_fps_from_mean"] == pytest.approx(8.0)
+    assert summary["generated_frame_fps_from_p95"] == pytest.approx(8.0)

@@ -23,7 +23,7 @@ from tools import causal_motion_plan_audit as structural
 
 BOOTSTRAP_REPLICATES = 10_000
 BOOTSTRAP_SEED = 20_260_808
-FAMILY_CELLS = 9
+FAMILY_CELLS = 12
 ONE_SIDED_ALPHA = 0.05 / FAMILY_CELLS
 METRICS = (
     "decoded_temporal_difference_mse_unit_range",
@@ -34,7 +34,10 @@ REFERENCES = (
     ("independent_plan_off", "PLAN-OFF", "aligned"),
     ("same_checkpoint_off", "PLAN-ON", "off"),
     ("same_checkpoint_shuffled", "PLAN-ON", "shuffled"),
+    ("same_checkpoint_action_shuffled", "PLAN-ON", "action_shuffled"),
 )
+QUALITY_REFERENCE_NAMES = frozenset(name for name, _, _ in REFERENCES[:3])
+ACTION_REFERENCE_NAME = REFERENCES[3][0]
 
 
 class CAMPAnalysisError(RuntimeError):
@@ -112,6 +115,34 @@ def _cell_pass(metric: str, effect: Mapping[str, float]) -> bool:
     return point >= 0.0 and lower > -0.01
 
 
+def latency_summary(
+    seconds: Sequence[float], *, generated_frames: int = 8
+) -> dict[str, float]:
+    """Separate chunk decision rate from generated-frame throughput."""
+
+    values = np.asarray(seconds, dtype=np.float64)
+    if (
+        values.ndim != 1
+        or values.size < 1
+        or isinstance(generated_frames, bool)
+        or not isinstance(generated_frames, int)
+        or generated_frames < 1
+        or not np.isfinite(values).all()
+        or np.any(values <= 0)
+    ):
+        raise CAMPAnalysisError("latency values are invalid")
+    mean = float(values.mean())
+    p95 = float(np.quantile(values, 0.95, method="linear"))
+    return {
+        "mean_seconds": mean,
+        "p95_seconds": p95,
+        "rollout_hz_from_mean": 1.0 / mean,
+        "rollout_hz_from_p95": 1.0 / p95,
+        "generated_frame_fps_from_mean": float(generated_frames) / mean,
+        "generated_frame_fps_from_p95": float(generated_frames) / p95,
+    }
+
+
 def analyze_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -125,7 +156,12 @@ def analyze_rows(
         or structural_audit.get("expected_validation_clips") != 64
         or structural_audit.get("protected_test_accessed") is not False
         or structural_audit.get("primary_gate_endpoints")
-        != ["aligned_nfe_1", "off_nfe_1", "shuffled_nfe_1"]
+        != [
+            "aligned_nfe_1",
+            "off_nfe_1",
+            "shuffled_nfe_1",
+            "action_shuffled_nfe_1",
+        ]
     ):
         raise CAMPAnalysisError("structural CAMP audit differs")
     if (
@@ -150,7 +186,6 @@ def analyze_rows(
     )
     candidate_rows = [index[("PLAN-ON", clip, "aligned", 1)] for clip in range(64)]
     comparisons: dict[str, Any] = {}
-    all_cells_pass = True
     for name, arm, source in REFERENCES:
         reference_rows = [index[(arm, clip, source, 1)] for clip in range(64)]
         effects = {}
@@ -166,11 +201,22 @@ def analyze_rows(
             )
             passed = _cell_pass(metric, effect)
             effects[metric] = {**effect, "pass": passed}
-            all_cells_pass = all_cells_pass and passed
         comparisons[name] = {
             "reference": {"arm": arm, "condition_source": source, "nfe": 1},
             "metrics": effects,
         }
+    quality_nine_cells_pass = all(
+        effect["pass"]
+        for name in QUALITY_REFERENCE_NAMES
+        for effect in comparisons[name]["metrics"].values()
+    )
+    action_attribution_three_cells_pass = all(
+        effect["pass"]
+        for effect in comparisons[ACTION_REFERENCE_NAME]["metrics"].values()
+    )
+    all_twelve_cells_pass = (
+        quality_nine_cells_pass and action_attribution_three_cells_pass
+    )
     descriptive: dict[str, Any] = {}
     latency_keys = ("history_encode", "planner", "wan", "decode", "end_to_end")
     for arm in structural.ARMS:
@@ -180,6 +226,10 @@ def analyze_rows(
                 for clip in range(64)
             ]
             key = f"{arm}/{endpoint.code}"
+            latency_vectors = {
+                field: [row["latency_seconds"][field] for row in endpoint_rows]
+                for field in latency_keys
+            }
             descriptive[key] = {
                 "primary_gate": endpoint.primary_gate,
                 "metric_means": {
@@ -189,19 +239,16 @@ def analyze_rows(
                     for metric in METRICS
                 },
                 "latency_mean_seconds": {
+                    field: float(np.mean(latency_vectors[field]))
+                    for field in latency_keys
+                },
+                "latency_p95_seconds": {
                     field: float(
-                        np.mean(
-                            [row["latency_seconds"][field] for row in endpoint_rows]
-                        )
+                        np.quantile(latency_vectors[field], 0.95, method="linear")
                     )
                     for field in latency_keys
                 },
-                "decoded_future_fps": float(
-                    8.0
-                    / np.mean(
-                        [row["latency_seconds"]["end_to_end"] for row in endpoint_rows]
-                    )
-                ),
+                "throughput": latency_summary(latency_vectors["end_to_end"]),
                 "generated_plan_nmse_mean": float(
                     np.mean(
                         [row["metrics"]["generated_plan_nmse"] for row in endpoint_rows]
@@ -213,11 +260,12 @@ def analyze_rows(
                     )
                 ),
             }
-    candidate_fps = descriptive["PLAN-ON/aligned_nfe_1"]["decoded_future_fps"]
+    candidate_throughput = descriptive["PLAN-ON/aligned_nfe_1"]["throughput"]
+    candidate_rollout_hz_p95 = candidate_throughput["rollout_hz_from_p95"]
     payload = {
         "schema_version": 1,
         "kind": "causal_motion_plan_preregistered_analysis",
-        "status": "passed" if all_cells_pass else "failed",
+        "status": "passed" if all_twelve_cells_pass else "failed",
         "structural_audit_identity_sha256": structural_audit["identity_sha256"],
         "paired_training_audit_identity_sha256": paired_training_audit[
             "identity_sha256"
@@ -235,19 +283,40 @@ def analyze_rows(
         },
         "fixed_gate": {
             "comparisons": comparisons,
-            "all_nine_cells_pass": all_cells_pass,
+            "quality_nine_cells_pass": quality_nine_cells_pass,
+            "action_attribution_three_cells_pass": action_attribution_three_cells_pass,
+            "all_twelve_cells_pass": all_twelve_cells_pass,
             "nfe_2_or_4_can_rescue": False,
-            "action_shuffle_can_promote": False,
+            "action_shuffle_required_for_action_conditioned_claim": True,
         },
         "descriptive": descriptive,
         "real_time_dagger": {
-            "candidate_decoded_future_fps": candidate_fps,
-            "five_fps_threshold_met": candidate_fps >= 5.0,
-            "claim_allowed": bool(all_cells_pass and candidate_fps >= 5.0),
+            "rate_definition": "action_conditioned_rollouts_per_second_from_p95_end_to_end_latency",
+            "candidate_end_to_end_mean_seconds": candidate_throughput[
+                "mean_seconds"
+            ],
+            "candidate_end_to_end_p95_seconds": candidate_throughput["p95_seconds"],
+            "candidate_rollout_hz_from_mean": candidate_throughput[
+                "rollout_hz_from_mean"
+            ],
+            "candidate_rollout_hz_from_p95": candidate_rollout_hz_p95,
+            "candidate_generated_frame_fps_from_mean": candidate_throughput[
+                "generated_frame_fps_from_mean"
+            ],
+            "candidate_generated_frame_fps_from_p95": candidate_throughput[
+                "generated_frame_fps_from_p95"
+            ],
+            "five_rollout_hz_p95_threshold_met": candidate_rollout_hz_p95 >= 5.0,
+            "claim_allowed": bool(
+                all_twelve_cells_pass and candidate_rollout_hz_p95 >= 5.0
+            ),
         },
     }
     if not all(
-        math.isfinite(float(value["decoded_future_fps"])) and value["decoded_future_fps"] > 0
+        all(
+            math.isfinite(float(metric)) and float(metric) > 0
+            for metric in value["throughput"].values()
+        )
         for value in descriptive.values()
     ):
         raise CAMPAnalysisError("descriptive throughput is invalid")
@@ -281,9 +350,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "output": str(args.output.resolve()),
                 "identity_sha256": result["identity_sha256"],
                 "status": result["status"],
-                "all_nine_cells_pass": result["fixed_gate"]["all_nine_cells_pass"],
-                "candidate_decoded_future_fps": result["real_time_dagger"][
-                    "candidate_decoded_future_fps"
+                "all_twelve_cells_pass": result["fixed_gate"][
+                    "all_twelve_cells_pass"
+                ],
+                "candidate_rollout_hz_from_p95": result["real_time_dagger"][
+                    "candidate_rollout_hz_from_p95"
                 ],
             },
             sort_keys=True,

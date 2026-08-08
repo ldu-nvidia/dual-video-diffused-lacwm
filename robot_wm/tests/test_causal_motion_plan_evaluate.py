@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,32 @@ torch = pytest.importorskip("torch")
 from tools import causal_motion_plan_audit as audit  # noqa: E402
 from tools import causal_motion_plan_evaluate as evaluate  # noqa: E402
 from tools import causal_motion_plan_workflow as workflow  # noqa: E402
+
+
+def test_rendered_environment_binds_registered_source_and_disables_user_site() -> None:
+    registration = {
+        "tool_repository": {"path": "/registered/camp"},
+        "runtime": {
+            "videox_home": "/registered/videox",
+            "wan_dir": "/registered/wan",
+        },
+        "training": {
+            "manifest": {"path": "/data/train.jsonl"},
+            "cache_metadata": {"path": "/data/train.json"},
+        },
+        "validation": {
+            "manifest": {"path": "/data/val.jsonl"},
+            "cache_metadata": {"path": "/data/val.json"},
+        },
+    }
+    environment = workflow._common_environment(registration)
+    assert environment["PYTHONNOUSERSITE"] == "1"
+    assert environment["PYTHONPATH"].split(os.pathsep) == [
+        "/registered/camp",
+        "/registered/camp/projects/latent_action_models",
+        "/registered/camp/tools/env/videox_shim",
+        "/registered/videox",
+    ]
 
 
 def test_evaluator_row_is_accepted_by_fail_closed_audit_schema() -> None:

@@ -482,7 +482,8 @@ def command_register(args: argparse.Namespace) -> int:
                 "nfe_primary": 1,
                 "nfe_descriptive": [2, 4],
                 "controls": ["aligned", "off", "shuffled"],
-                "diagnostic": "action_shuffled_nfe_1",
+                "action_attribution_control": "action_shuffled_nfe_1",
+                "simultaneous_gate_cells": 12,
                 "planner_calls": 2,
                 "clean_future_plan_input_allowed": False,
                 "planner_selection_on_val64_allowed": False,
@@ -504,7 +505,22 @@ def command_register(args: argparse.Namespace) -> int:
 
 
 def _common_environment(registration: Mapping[str, Any]) -> dict[str, str]:
+    # Never inherit an editable install or the submit host's PYTHONPATH.  Every
+    # stage must import this exact registered checkout, its LAM package, the
+    # checked-in VideoX compatibility shim, and the registered clean VideoX
+    # runtime, in that order.
+    repository = Path(registration["tool_repository"]["path"])
+    pythonpath = os.pathsep.join(
+        (
+            str(repository),
+            str(repository / "projects" / "latent_action_models"),
+            str(repository / "tools" / "env" / "videox_shim"),
+            registration["runtime"]["videox_home"],
+        )
+    )
     return {
+        "PYTHONPATH": pythonpath,
+        "PYTHONNOUSERSITE": "1",
         "WAN_DIR": registration["runtime"]["wan_dir"],
         "VIDEOX_HOME": registration["runtime"]["videox_home"],
         "CAMP_TRAIN_CLIP_MANIFEST": registration["training"]["manifest"]["path"],
@@ -541,7 +557,12 @@ def command_stats_command(args: argparse.Namespace) -> int:
         "--output",
         str(output),
     ]
-    print(json.dumps({"environment": {}, "argv": command}, sort_keys=True))
+    print(
+        json.dumps(
+            {"environment": _common_environment(registration), "argv": command},
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -598,7 +619,7 @@ def command_planner_command(args: argparse.Namespace) -> int:
         "wandb.entity=zijiandu",
         "wandb.project=dual-video-diffusion-private",
         "wandb.group=null",
-        "+wandb.id=camp-planner-seed1234-u000400",
+        f"+wandb.id={run_identity}",
         "+wandb.resume=never",
     ]
     print(json.dumps({"environment": environment, "argv": command}, sort_keys=True))
@@ -788,7 +809,7 @@ def command_arm_command(args: argparse.Namespace) -> int:
         "wandb.entity=zijiandu",
         "wandb.project=dual-video-diffusion-private",
         "wandb.group=null",
-        f"+wandb.id={arm.run_name}",
+        f"+wandb.id={sealed['arm_run_identity_sha256'][arm.code]}",
         "+wandb.resume=never",
     ]
     print(json.dumps({"environment": environment, "argv": command}, sort_keys=True))
@@ -822,7 +843,12 @@ def command_evaluation_command(args: argparse.Namespace) -> int:
         "--output-dir",
         str(paths["evaluation"]),
     ]
-    print(json.dumps({"environment": {}, "argv": command}, sort_keys=True))
+    print(
+        json.dumps(
+            {"environment": _common_environment(base), "argv": command},
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -979,7 +1005,12 @@ def command_audit_command(args: argparse.Namespace) -> int:
     for path in row_paths:
         command.extend(("--rows", str(path)))
     command.extend(("--output", str(output)))
-    print(json.dumps({"environment": {}, "argv": command}, sort_keys=True))
+    print(
+        json.dumps(
+            {"environment": _common_environment(base), "argv": command},
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -1024,7 +1055,12 @@ def command_analysis_command(args: argparse.Namespace) -> int:
     for path in row_paths:
         command.extend(("--rows", str(path)))
     command.extend(("--output", str(output)))
-    print(json.dumps({"environment": {}, "argv": command}, sort_keys=True))
+    print(
+        json.dumps(
+            {"environment": _common_environment(base), "argv": command},
+            sort_keys=True,
+        )
+    )
     return 0
 
 

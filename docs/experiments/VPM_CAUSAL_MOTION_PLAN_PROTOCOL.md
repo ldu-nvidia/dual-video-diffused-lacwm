@@ -163,13 +163,13 @@ For every val64 clip and NFE `{1,2,4}`, run:
 - `shuffled`: globally cyclically shuffled generated plan, with local history,
   actions, video noise, and planner noise retained.
 
-At NFE 1 only, also run the non-promoting `action_shuffled` diagnostic: retain
+At NFE 1 only, also run the `action_shuffled` attribution control: retain
 the local history, morphology, Wan actions, video noise, and plan noise, but
 globally cyclically shuffle the actions passed to the two-call planner. This
 still executes exactly two planner calls and one Wan call; it adds no oracle.
 
-`PLAN-OFF` executes all three labels but is required to be bit-identical across
-them because its fusion Boolean is false. `PLAN-ON` provides the causal
+`PLAN-OFF` executes every applicable label and is required to be bit-identical
+across them at a fixed NFE because its fusion Boolean is false. `PLAN-ON` provides the causal
 interventions. NFE 1 is the sole selectable endpoint; NFE 2/4 are descriptive
 and cannot rescue a failed NFE-1 result. An optional clean-plan oracle may be
 added only in a later preregistration; it is absent here.
@@ -190,8 +190,10 @@ also records hashes of cached RGB, cached/local actions, planner actions,
 history latents, video noise, plan noise, generated/injected plan, final latent,
 and decode. Registration rejects unequal data/action/noise hashes across arms
 or endpoints where they must be paired. NFE never hides planner work. The
-screen reports decoded FPS but makes no real-time claim unless end-to-end
-decoded throughput is at least 5 FPS.
+screen reports both generated-frame throughput (`8 / latency`) and
+action-conditioned rollout/decision rate (`1 / latency`). A real-time DAgger
+claim requires at least 5 rollout Hz using p95 end-to-end latency; mean frame
+throughput cannot satisfy that gate.
 
 ## Metrics and fixed gate
 
@@ -204,26 +206,33 @@ Guardrails, lower is better:
 - future Wan-latent NMSE;
 - decoded future RGB MSE.
 
-Diagnostics are plan NMSE/cosine, future latent-delta NMSE, PSNR, action
-shuffle, all stage latencies, and peak memory. NFE 2/4 and action shuffle are
-descriptive only and can neither promote nor rescue the NFE-1 candidate.
+Diagnostics are plan NMSE/cosine, future latent-delta NMSE, PSNR, all stage
+latencies, and peak memory. NFE 2/4 are descriptive only and cannot rescue the
+NFE-1 candidate. The NFE-1 action-shuffle comparison is required for an
+action-conditioned mechanism or DAgger claim; without it, a planner that
+ignores requested actions could pass by using history and noise alone.
 
 At NFE 1 compare `PLAN-ON/aligned` with:
 
 1. independently trained `PLAN-OFF/aligned`;
 2. the same `PLAN-ON` checkpoint with fusion `off`;
 3. the same `PLAN-ON` checkpoint with globally `shuffled` generated plan;
+4. the same `PLAN-ON` checkpoint with globally shuffled planner actions while
+   retaining local actions in Wan.
 
-The family is three references by three claim metrics. Use 10,000 paired clip
+The family is four references by three claim metrics. Use 10,000 paired clip
 bootstraps, seed 20260808, and one-sided simultaneous lower bounds at confidence
-`1 - .05/9`. Every comparison must satisfy:
+`1 - .05/12`. Every comparison must satisfy:
 
 - temporal-MSE improvement at least 3% by point estimate and 1% by simultaneous
   lower bound;
 - latent-NMSE and decoded-MSE point estimates no worse than 0%, with each
   simultaneous lower bound greater than -1%.
 
-The mechanism passes only if all comparisons pass and every artifact proves:
+The first three references form the nine-cell generated-plan quality gate. The
+fourth forms a three-cell planner-action attribution gate. The
+action-conditioned mechanism passes only if all twelve comparisons pass and
+every artifact proves:
 
 - exactly two planner calls and one Wan call at the primary endpoint;
 - zero clean-future/teacher inputs;
@@ -238,8 +247,10 @@ The mechanism passes only if all comparisons pass and every artifact proves:
 - no protected-test access.
 
 Aligned beating off but not shuffled is generic conditioning or regularization,
-not sample-specific motion guidance. A planner diagnostic failure is reported
-but cannot retrospectively cancel or reinterpret the fixed video experiment.
+not sample-specific motion guidance. Aligned beating plan-shuffled but not
+action-shuffled can establish sample-specific history/noise guidance, but not
+planner action attribution or DAgger utility. The nine-cell quality result is
+still reported separately if the three-cell action gate fails.
 
 ## Provenance and execution policy
 

@@ -33,7 +33,9 @@ def _row(
     injected_plan = (
         _hash(f"plan:{injected_donor}") if source == "shuffled" else generated_plan
     )
-    if arm == "PLAN-OFF" and source in audit.BASE_CONDITION_SOURCES:
+    if arm == "PLAN-OFF" and (
+        source in audit.BASE_CONDITION_SOURCES or source == "action_shuffled"
+    ):
         final_latent = _hash(f"PLAN-OFF:final:{clip_index}:nfe:{endpoint.nfe}")
         decode = _hash(f"PLAN-OFF:decode:{clip_index}:nfe:{endpoint.nfe}")
     else:
@@ -113,7 +115,7 @@ def _replace_identity(row: dict) -> dict:
     return audit.identity_payload(unsigned)
 
 
-def test_endpoint_grid_has_only_nfe1_primary_and_action_shuffle_descriptive() -> None:
+def test_endpoint_grid_has_only_nfe1_primary_including_action_attribution() -> None:
     assert len(audit.ENDPOINTS) == 10
     assert {
         (endpoint.condition_source, endpoint.nfe)
@@ -127,8 +129,9 @@ def test_endpoint_grid_has_only_nfe1_primary_and_action_shuffle_descriptive() ->
         "aligned_nfe_1",
         "off_nfe_1",
         "shuffled_nfe_1",
+        "action_shuffled_nfe_1",
     ]
-    assert audit.ENDPOINT_BY_KEY[("action_shuffled", 1)].primary_gate is False
+    assert audit.ENDPOINT_BY_KEY[("action_shuffled", 1)].primary_gate is True
 
 
 def test_complete_paired_grid_passes_and_is_content_bound() -> None:

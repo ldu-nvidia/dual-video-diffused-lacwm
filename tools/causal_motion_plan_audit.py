@@ -53,7 +53,7 @@ ENDPOINTS = tuple(
     Endpoint(source, nfe, nfe == 1)
     for nfe in NFE_GRID
     for source in BASE_CONDITION_SOURCES
-) + (Endpoint("action_shuffled", 1, False),)
+) + (Endpoint("action_shuffled", 1, True),)
 ENDPOINT_BY_KEY = {
     (endpoint.condition_source, endpoint.nfe): endpoint for endpoint in ENDPOINTS
 }
@@ -542,9 +542,12 @@ def audit_rows(
                 )
 
         for nfe in NFE_GRID:
+            control_sources = list(BASE_CONDITION_SOURCES)
+            if nfe == 1:
+                control_sources.append("action_shuffled")
             plan_off_controls = [
                 indexed[("PLAN-OFF", clip_index, source, nfe)]
-                for source in BASE_CONDITION_SOURCES
+                for source in control_sources
             ]
             reference = plan_off_controls[0]["tensor_sha256"]
             if any(
