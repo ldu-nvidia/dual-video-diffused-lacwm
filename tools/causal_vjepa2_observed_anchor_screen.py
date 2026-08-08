@@ -18,6 +18,7 @@ import argparse
 import contextlib
 import inspect
 import json
+import re
 import sys
 import time
 from collections.abc import Mapping, Sequence
