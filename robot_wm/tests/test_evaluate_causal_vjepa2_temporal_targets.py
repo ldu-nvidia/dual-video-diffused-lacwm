@@ -87,6 +87,47 @@ def test_checkpoint_validation_uses_the_shared_checkpoint_schema_owner():
     assert evaluator.screen.CHECKPOINT_SCHEMA == evaluator.vlf.CHECKPOINT_SCHEMA
 
 
+def test_historical_file_receipt_accepts_only_identical_content_at_new_root(tmp_path):
+    historical = tmp_path / "old" / "module.py"
+    current = tmp_path / "new" / "module.py"
+    historical.parent.mkdir()
+    current.parent.mkdir()
+    historical.write_bytes(b"frozen bytes\n")
+    current.write_bytes(historical.read_bytes())
+    record = evaluator.vlf.file_record(historical)
+    assert evaluator._file_record_content_compatible(record, current)  # noqa: SLF001
+    current.write_bytes(b"changed bytes\n")
+    assert not evaluator._file_record_content_compatible(record, current)  # noqa: SLF001
+
+
+def test_producer_attestation_allows_only_content_identical_active_checkout(tmp_path):
+    historical = tmp_path / "old" / "dataset.py"
+    current = tmp_path / "new" / "dataset.py"
+    historical.parent.mkdir()
+    current.parent.mkdir()
+    historical.write_bytes(b"same dataset\n")
+    current.write_bytes(historical.read_bytes())
+    recorded = {
+        "schema": "cache-v1",
+        "split": "val",
+        "producer": {
+            "repo_commit": "a" * 40,
+            "active_base_dataset": evaluator.vlf.file_record(historical),
+        },
+    }
+    current_record = copy.deepcopy(recorded)
+    current_record["producer"]["active_base_dataset"] = evaluator.vlf.file_record(
+        current
+    )
+    assert evaluator._producer_attestation_content_compatible(  # noqa: SLF001
+        recorded, current_record
+    )
+    current_record["split"] = "test"
+    assert not evaluator._producer_attestation_content_compatible(  # noqa: SLF001
+        recorded, current_record
+    )
+
+
 def test_generated_sampler_rejects_non_float32_trajectory_state():
     with pytest.raises(ValueError, match="float32"):
         evaluator.sample_generated_temporal(

@@ -27,6 +27,16 @@ the constant.  This also occurred before a sampler call or metric row.  The
 repair changes only those two validation references to the already frozen
 shared schema constant.
 
+Recovery job `504957` then reached the full checkpoint/config receipt audit
+and failed because three historical file receipts were compared by absolute
+checkout path, despite the evaluator's explicit clean-descendant compatibility
+contract.  The bytes and Git objects were identical; only the clean checkout
+root differed.  The amended audit now reopens both historical and current
+regular files, requires identical SHA-256 and byte size, and permits only the
+active dataset source path inside the producer attestation to change.  Every
+other attestation field remains exact.  This failure also preceded every
+sampler call and metric row.
+
 ## Minimal repair
 
 Only the evaluator's metadata exchange changes.  Each rank still reads its

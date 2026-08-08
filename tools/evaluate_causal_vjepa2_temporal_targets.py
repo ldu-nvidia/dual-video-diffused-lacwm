@@ -206,6 +206,63 @@ def training_source_compatibility(
     }
 
 
+def _file_record_content_compatible(record: Any, current_path: str | Path) -> bool:
+    """Validate a historical file receipt against an unchanged current file.
+
+    A clean descendant checkout necessarily has a different absolute root.  A
+    training receipt therefore cannot be compared to a current ``file_record``
+    byte-for-byte by path.  Require both the historical path and current path
+    to remain regular files and bind them by identical SHA-256 and byte size.
+    Git-object equality for inference-critical paths is checked separately by
+    :func:`training_source_compatibility`.
+    """
+    if not isinstance(record, Mapping) or set(record) != {"path", "sha256", "bytes"}:
+        return False
+    try:
+        historical = vlf.file_record(Path(str(record["path"])))
+        current = vlf.file_record(Path(current_path))
+    except (OSError, ValueError, vlf.PocError):
+        return False
+    return bool(
+        historical == dict(record)
+        and current["sha256"] == record["sha256"]
+        and current["bytes"] == record["bytes"]
+    )
+
+
+def _producer_attestation_content_compatible(
+    recorded: Any,
+    current: Any,
+) -> bool:
+    """Allow only the active clean-checkout path to differ in cache provenance."""
+    if not isinstance(recorded, Mapping) or not isinstance(current, Mapping):
+        return False
+    recorded_copy = json.loads(screen.canonical_json(recorded))
+    current_copy = json.loads(screen.canonical_json(current))
+    recorded_producer = recorded_copy.get("producer")
+    current_producer = current_copy.get("producer")
+    if not isinstance(recorded_producer, dict) or not isinstance(current_producer, dict):
+        return False
+    recorded_active = recorded_producer.get("active_base_dataset")
+    current_active = current_producer.get("active_base_dataset")
+    if (
+        not isinstance(current_active, Mapping)
+        or not _file_record_content_compatible(
+            recorded_active, Path(str(current_active.get("path", "")))
+        )
+    ):
+        return False
+    recorded_producer["active_base_dataset"] = {
+        "sha256": recorded_active["sha256"],
+        "bytes": recorded_active["bytes"],
+    }
+    current_producer["active_base_dataset"] = {
+        "sha256": current_active["sha256"],
+        "bytes": current_active["bytes"],
+    }
+    return recorded_copy == current_copy
+
+
 def preregistration_attestation(current_source: Mapping[str, Any]) -> dict[str, Any]:
     current_commit = str(current_source.get("commit", ""))
     if re.fullmatch(r"[0-9a-f]{40}", current_commit) is None:
@@ -659,14 +716,20 @@ def _load_checkpoint(
         or training_config.get("target_shape") != list(screen.TARGET_SHAPE)
         or training_config.get("model") != model_config
         or training_config.get("parameter_count") != screen.FROZEN_MODEL_PARAMETERS
-        or training_config.get("entrypoint") != vlf.file_record(temporal.__file__)
+        or not _file_record_content_compatible(
+            training_config.get("entrypoint"), temporal.__file__
+        )
         or training_config.get("protected_test_accessed") is not False
         or training_config.get("video_loss_enabled") is not False
         or training_config.get("teacher_model_calls") != 0
         or config_validation_cache != validation_cache
         or not isinstance(cache_access, Mapping)
-        or cache_access.get("bridge") != vlf.file_record(cache_bridge.__file__)
-        or cache_access.get("validation") != producer_attestation
+        or not _file_record_content_compatible(
+            cache_access.get("bridge"), cache_bridge.__file__
+        )
+        or not _producer_attestation_content_compatible(
+            cache_access.get("validation"), producer_attestation
+        )
         or cache_access.get("cache_relabelled_as_current_source") is not False
         or cache_access.get("protected_test_accessed") is not False
         or complete.get("schema") != temporal.RUN_SCHEMA
