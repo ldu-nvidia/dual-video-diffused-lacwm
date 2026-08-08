@@ -50,6 +50,11 @@ EXPECTED_CALIBRATION_CLIPS = 64
 EXPECTED_RGB_SHAPE = (512, 13, 3, 180, 960)
 EXPECTED_RGB_DTYPE = "float16"
 CAUSAL_TOLERANCE = 1e-4
+# This job has no distributed model state: each rank independently runs one
+# Wan VAE on its assigned GPU and exchanges only small Python records plus
+# 16-channel scalar moments. Keep that control plane on CPU/Gloo.
+COLLECTIVE_BACKEND = "gloo"
+ACCUMULATOR_DEVICE = "cpu"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -283,7 +288,10 @@ def command_fit(args: argparse.Namespace) -> int:
     if local_rank < 0:
         raise MotionPlanStatsError("launch CAMP statistics with torchrun")
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    # GPU tensors never cross ranks in this fit-only reduction. Initializing
+    # NCCL before rank zero hashes the 6.9 GB input adds device-state risk but
+    # no useful work, so small records and moments deliberately use Gloo.
+    dist.init_process_group(backend=COLLECTIVE_BACKEND)
     if dist.get_world_size() != EXPECTED_WORLD_SIZE:
         raise MotionPlanStatsError("CAMP statistics require exactly eight ranks")
     rank = dist.get_rank()
@@ -321,10 +329,12 @@ def command_fit(args: argparse.Namespace) -> int:
     if len(assigned) != EXPECTED_FIT_CLIPS // EXPECTED_WORLD_SIZE:
         raise MotionPlanStatsError("rank planner-fit assignment differs")
     device = torch.device("cuda", local_rank)
-    channel_sum = torch.zeros(PLAN_CHANNELS, dtype=torch.float64, device=device)
+    channel_sum = torch.zeros(
+        PLAN_CHANNELS, dtype=torch.float64, device=ACCUMULATOR_DEVICE
+    )
     channel_square_sum = torch.zeros_like(channel_sum)
-    local_elements = torch.zeros((), dtype=torch.int64, device=device)
-    causal_max = torch.zeros((), dtype=torch.float64, device=device)
+    local_elements = torch.zeros((), dtype=torch.int64, device=ACCUMULATOR_DEVICE)
+    causal_max = torch.zeros((), dtype=torch.float64, device=ACCUMULATOR_DEVICE)
     with torch.inference_mode():
         for index in assigned:
             clip = torch.from_numpy(np.array(rgb[index], copy=True)).unsqueeze(0)
@@ -341,15 +351,23 @@ def command_fit(args: argparse.Namespace) -> int:
             difference = (
                 full_latents[:, :, :HISTORY_TOKENS] - history_latents
             ).abs().max().double()
-            causal_max = torch.maximum(causal_max, difference)
-            if float(difference.item()) > CAUSAL_TOLERANCE:
+            difference_value = float(difference.item())
+            causal_max = torch.maximum(
+                causal_max,
+                torch.tensor(
+                    difference_value,
+                    dtype=torch.float64,
+                    device=ACCUMULATOR_DEVICE,
+                ),
+            )
+            if difference_value > CAUSAL_TOLERANCE:
                 raise MotionPlanStatsError(
                     "full-clip observed Wan tokens differ from history-only encoding"
                 )
             target = motion_plan_target(full_latents, history_latents).double()
             reduce_dims = (0, 2, 3, 4)
-            channel_sum += target.sum(dim=reduce_dims)
-            channel_square_sum += target.square().sum(dim=reduce_dims)
+            channel_sum += target.sum(dim=reduce_dims).cpu()
+            channel_square_sum += target.square().sum(dim=reduce_dims).cpu()
             local_elements += target.shape[0] * target.shape[2] * target.shape[3] * target.shape[4]
     dist.all_reduce(channel_sum, op=dist.ReduceOp.SUM)
     dist.all_reduce(channel_square_sum, op=dist.ReduceOp.SUM)

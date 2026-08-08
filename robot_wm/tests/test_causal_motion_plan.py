@@ -29,6 +29,7 @@ from robot_wm.modeling.dual_diffusion.causal_motion_plan import (  # noqa: E402
     pool_per_view,
     upsample_per_view,
 )
+from tools import causal_motion_plan_stats  # noqa: E402
 
 
 def _canonical_json(value: object) -> bytes:
@@ -81,6 +82,13 @@ def test_train_only_planner_partition_is_fixed_disjoint_and_complete() -> None:
     assert set(fit).isdisjoint(calibration)
     assert sorted((*fit, *calibration)) == list(range(512))
     assert calibration == tuple(range(0, 512, 8))
+
+
+def test_fit_only_stats_use_cpu_collectives_and_accumulators() -> None:
+    # VAE work stays per-GPU; only provenance records and scalar moments move
+    # between ranks. Guard the operational recovery without changing the fit.
+    assert causal_motion_plan_stats.COLLECTIVE_BACKEND == "gloo"
+    assert causal_motion_plan_stats.ACCUMULATOR_DEVICE == "cpu"
 
 
 def test_per_view_pool_and_upsample_never_mix_camera_seams() -> None:

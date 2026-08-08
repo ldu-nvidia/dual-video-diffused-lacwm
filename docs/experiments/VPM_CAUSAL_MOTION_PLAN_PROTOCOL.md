@@ -75,6 +75,12 @@ only to construct this train-fit target. Clean `Q` is constructed only inside
 the statistics job and planner calibration loss. The CAMP video continuation
 never constructs it.
 
+The eight fit workers run independent Wan VAE encoders on their assigned GPUs.
+Only small provenance objects and 16-channel scalar moments cross ranks, so the
+statistics control plane and accumulators use CPU/Gloo. This leaves the fit
+population and estimator unchanged while avoiding an unnecessary pre-model
+NCCL dependency.
+
 ## Planner and train-only calibration
 
 The planner is a roughly 2--3M parameter four-block 3-D convolutional RF model.
