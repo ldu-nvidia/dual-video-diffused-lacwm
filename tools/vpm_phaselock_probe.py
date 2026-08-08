@@ -185,9 +185,19 @@ def _sha256(path: Path, chunk_size: int = 16 * 1024 * 1024) -> str:
 
 
 def _tensor_sha256(tensor: Any) -> str:
-    array = tensor.detach().contiguous().cpu().numpy()
+    import torch
+
+    value = tensor.detach().contiguous().cpu()
+    if value.dtype == torch.bfloat16:
+        # NumPy has no portable bfloat16 scalar type.  Hash the exact IEEE
+        # payload through a uint16 view while retaining the logical dtype tag.
+        array = value.view(torch.uint16).numpy()
+        dtype_name = "bfloat16"
+    else:
+        array = value.numpy()
+        dtype_name = str(array.dtype)
     digest = hashlib.sha256()
-    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(dtype_name.encode("ascii"))
     digest.update(_canonical_json(list(array.shape)))
     digest.update(array.tobytes(order="C"))
     return digest.hexdigest()

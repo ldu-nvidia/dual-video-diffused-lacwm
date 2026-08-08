@@ -25,6 +25,15 @@ from tools import action_variation_screen as screen
 from tools import vpm_phaselock_probe as phase
 
 
+def test_exact_tensor_hash_supports_bfloat16_payload_dtype_and_shape():
+    value = torch.tensor([[1.0, -2.5]], dtype=torch.bfloat16)
+
+    assert phase._tensor_sha256(value) == phase._tensor_sha256(value.clone())
+    assert phase._tensor_sha256(value) != phase._tensor_sha256(value + 1)
+    assert phase._tensor_sha256(value) != phase._tensor_sha256(value.float())
+    assert phase._tensor_sha256(value) != phase._tensor_sha256(value.reshape(2, 1))
+
+
 def test_registration_recomputes_stats_instead_of_trusting_source_label(tmp_path):
     actions = np.zeros((512, 13, 5, 23), dtype=np.float32)
     actions[..., 0] = np.arange(5, dtype=np.float32).reshape(1, 1, 5) * 2.0
