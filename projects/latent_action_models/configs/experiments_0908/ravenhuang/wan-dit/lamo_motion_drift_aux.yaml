@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - /experiments_0908/lamo_motion_drift_common
+  - _self_
+
+name: lamo-motion-drift-vpm-drift-seed1234-u000200
+model:
+  motion_drift:
+    weight: 0.4
+    epsilon: 1.0e-6
+    tau: 1
+wandb:
+  tags: [abc, vpm, lamo, motion-drift, auxiliary, seed-1234]
+

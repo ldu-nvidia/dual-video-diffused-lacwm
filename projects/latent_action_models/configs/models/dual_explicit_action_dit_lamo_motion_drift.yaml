@@ -1,0 +1,13 @@
+defaults:
+  - dual_explicit_action_dit_vjepa
+  - _self_
+
+_target_: lam.lamo_motion_drift_model.LamoMotionDriftVPM
+
+# Arm files change only this scalar.  The implementation still computes the
+# exact same x0 and macro-drift diagnostic in the zero-weight arm.
+motion_drift:
+  weight: 0.0
+  epsilon: 1.0e-6
+  tau: 1
+
