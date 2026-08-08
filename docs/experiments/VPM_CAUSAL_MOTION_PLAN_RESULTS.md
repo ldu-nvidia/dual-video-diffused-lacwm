@@ -104,6 +104,15 @@ steady-state aligned rate.  Future endpoint evaluators must execute and record
 an excluded causal warm-up before latency collection.  This latency limitation
 does not affect the paired quality metrics or the failed causal-quality gate.
 
+As a post-hoc systems diagnostic, summing history encode, planner, and Wan time
+per clip over the 64 warmed `PLAN-ON/off_nfe_1` rows gives mean `0.10192 s` and
+empirical p95 `0.11776 s`, or `8.49` latent rollouts/s.  This excludes RGB
+decode and is not a video-output or quality claim.  It identifies a distinct
+physical-AI path worth testing: let a DAgger policy consume the generated Wan
+latent through a learned adapter and decode only for visualization.  The RGB
+decoder alone consumed about `0.130 s` in the warmed rows and is therefore a
+material part of the present 5-Hz bottleneck.
+
 ## Interpretation
 
 Moving auxiliary generation before Wan fixes the NFE-1 causal-ordering defect
