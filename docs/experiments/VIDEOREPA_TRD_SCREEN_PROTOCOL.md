@@ -105,7 +105,19 @@ Both arms use seed 1234, eight B200 GPUs, batch one per GPU, fresh AdamW,
 identical LR schedule, train clip order, corruption/timestep stream, LoRA
 dropout, parameter schema, and one Wan call per update. The parent state is
 loaded with `strict=True`; exclusions and remapping are forbidden. A production
-shape 8-GPU forward/backward canary must finish first.
+shape 8-GPU forward/backward canary must finish first. Before that canary, a
+separate single-process GPU check generates one train clip at NFE 1 through the
+actual history-only deployment sampler. It also runs ordinary VPM
+condition-off inference from the same keyed noise and requires bitwise equality
+of the initial state, history reference, native BF16 Wan video velocity,
+returned FP32 future, and decoded uint8 video. The persisted FP16 final-latent
+evidence must also match bitwise, but is not presented as a native-FP32 check.
+The custom path must make exactly one Wan call and zero calls to each watched
+auxiliary/TRD module; the ordinary reference must call each of the control
+adapter, TF projection, TF norm, clock net, and TF velocity head exactly once.
+This prevents the comparison from silently using a partially bypassed
+reference. Any difference fails the dependency chain before either full arm
+can start.
 
 Trainer validation and visualization use only the train512 cache and are
 monitoring telemetry, not selection data. The sealed val64 paths are not
@@ -143,6 +155,11 @@ They diagnose action dependence but are not model-selection endpoints.
 The analysis reports paired within-arm error degradation for shuffled and zero
 actions relative to aligned actions, with the same 10,000-sample bootstrap;
 these diagnostic intervals cannot change the primary pass/fail decision.
+Every cell records the SHA-256, shape, and dtype of the exact action tensor
+passed to the sampler. The contract requires those hashes to remain fixed
+across NFE, requires every shuffled hash to equal its declared donor clip's
+aligned hash, requires all zero hashes to agree, and requires the complete hash
+grid to be identical between arms.
 
 ## Preregistered decision gate
 
@@ -171,7 +188,11 @@ training-only relational distillation.
   RGB/action hashes; the unused val clean-feature array is never opened;
 - multi-GiB hashes run before any NCCL process group;
 - persisted B200 runtime receipts;
+- identity-bound, revalidated deployment-sampler equivalence receipt;
 - non-requeueable jobs and fresh outputs;
+- `short` QOS wall time fixed to `02:00:00`, and one allocated GPU for
+  seal/analysis bookkeeping because the `batch` partition rejects GPU-less
+  jobs;
 - default node exclusion:
   `pool0-0081,pool0-0089,pool0-0200,pool0-0343`;
 - no protected test path, metric, or fallback.

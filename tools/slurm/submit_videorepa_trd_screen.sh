@@ -10,7 +10,7 @@ EXPECTED_COMMIT=""
 PARTITION=batch
 ACCOUNT=coreai_chef_posttrain
 QOS=short
-TIME_LIMIT=04:00:00
+TIME_LIMIT=02:00:00
 EXCLUDE_NODES="pool0-0081,pool0-0089,pool0-0200,pool0-0343"
 EXECUTE=0
 
@@ -21,11 +21,12 @@ Usage: submit_videorepa_trd_screen.sh --registration PATH --python PATH
        --expected-commit SHA [--partition NAME] [--account NAME] [--qos NAME]
        [--time HH:MM:SS] [--exclude NODELIST] [--execute]
 
-Dry-run is the default. --execute submits a production-shape 8xB200 memory
-canary, matched TRD-OFF/TRD-ON jobs, a post-training seal, target-free val64
-evaluation at NFE 1/2/4 with action controls, and final analysis. Every stage
-is non-requeueable; validation is dependency-gated after the seal. No protected
-test path is accepted. The four known bad nodes are excluded by default.
+Dry-run is the default. --execute submits a one-clip NFE-1 deployment/equivalence
+canary, a production-shape 8xB200 memory canary, matched TRD-OFF/TRD-ON jobs,
+a post-training seal, target-free val64 evaluation at NFE 1/2/4 with exact
+action-tensor hashes, and final analysis. Every stage is non-requeueable;
+validation is dependency-gated after the seal. No protected test path is
+accepted. The four known bad nodes are excluded by default.
 EOF
 }
 while (($#)); do
@@ -47,6 +48,9 @@ done
   die "--registration must be an absolute regular file"
 [[ "$PYTHON_BIN" == /* && -x "$PYTHON_BIN" ]] || die "--python is unavailable"
 [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "--expected-commit is invalid"
+if [[ "$QOS" == short && "$TIME_LIMIT" != 02:00:00 ]]; then
+  die "short QOS requires the cluster-compatible --time 02:00:00"
+fi
 [[ "$EXCLUDE_NODES" =~ ^[A-Za-z0-9_,.-]+$ ]] || die "--exclude is invalid"
 for required_node in pool0-0081 pool0-0089 pool0-0200 pool0-0343; do
   [[ ",$EXCLUDE_NODES," == *",$required_node,"* ]] || \
@@ -109,6 +113,7 @@ TRAIN_ID="$(sbatch "${GPU_BASE[@]}" --job-name "$JOB_BASE" \
 SEAL_ID="$(sbatch --parsable --job-name "$JOB_BASE-seal" \
   --dependency "afterok:$TRAIN_ID" --partition "$PARTITION" --account "$ACCOUNT" \
   --qos "$QOS" --time 01:00:00 --nodes 1 --ntasks 1 --cpus-per-task 16 \
+  --gpus-per-node 1 \
   --mem 128G --exclude "$EXCLUDE_NODES" --chdir "$LOG_DIR" \
   --output "$LOG_DIR/%x-%j.out" --error "$LOG_DIR/%x-%j.err" \
   "$SBATCH_SCRIPT" --mode seal "${COMMON[@]}")"
@@ -123,6 +128,7 @@ EVAL_ID="$(sbatch "${GPU_BASE[@]}" --job-name "$JOB_BASE-eval" \
 ANALYSIS_ID="$(sbatch --parsable --job-name "$JOB_BASE-analysis" \
   --dependency "afterok:$EVAL_ID" --partition "$PARTITION" --account "$ACCOUNT" \
   --qos "$QOS" --time 01:00:00 --nodes 1 --ntasks 1 --cpus-per-task 16 \
+  --gpus-per-node 1 \
   --mem 128G --exclude "$EXCLUDE_NODES" --chdir "$LOG_DIR" \
   --output "$LOG_DIR/%x-%j.out" --error "$LOG_DIR/%x-%j.err" \
   "$SBATCH_SCRIPT" --mode analyze "${COMMON[@]}")"

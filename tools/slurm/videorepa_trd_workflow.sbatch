@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=160
 #SBATCH --mem=1000G
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --partition=batch
 #SBATCH --exclude=pool0-0081,pool0-0089,pool0-0200,pool0-0343
 #SBATCH --open-mode=append
@@ -55,10 +55,12 @@ PYTHON_BIN="$(cd "$(dirname "$PYTHON_BIN")" && pwd -P)/$(basename "$PYTHON_BIN")
 
 HELPER="$REPO_ROOT/tools/videorepa_trd_screen.py"
 EVALUATOR="$REPO_ROOT/tools/evaluate_videorepa_trd.py"
+DEPLOYMENT_CANARY="$REPO_ROOT/tools/videorepa_trd_deployment_canary.py"
 TRAINER="$REPO_ROOT/projects/latent_action_models/train.py"
 ACTIVATE="$REPO_ROOT/tools/env/activate_b200.sh"
 VERIFY_RUNTIME="$REPO_ROOT/tools/env/verify_b200_runtime.py"
-for path in "$HELPER" "$EVALUATOR" "$TRAINER" "$ACTIVATE" "$VERIFY_RUNTIME"; do
+for path in "$HELPER" "$EVALUATOR" "$DEPLOYMENT_CANARY" "$TRAINER" \
+  "$ACTIVATE" "$VERIFY_RUNTIME"; do
   [[ -f "$path" && ! -L "$path" ]] || die "required implementation missing: $path"
 done
 
@@ -115,6 +117,13 @@ else
   "$PYTHON_BIN" "$HELPER" verify-arm --registration "$REGISTRATION" --arm "$ARM" >/dev/null
 fi
 
+if [[ "$MODE" == train ]]; then
+  # A successful dependency is necessary but not sufficient: revalidate the
+  # identity-bound report in every arm before allocating model state/NCCL.
+  "$PYTHON_BIN" "$DEPLOYMENT_CANARY" verify \
+    --registration "$REGISTRATION" >/dev/null
+fi
+
 if [[ "$MODE" == canary ]]; then
   ARM="TRD-ON"
 fi
@@ -162,7 +171,11 @@ unset TRD_VALIDATION_CLIP_MANIFEST TRD_VALIDATION_CACHE_METADATA \
 
 if [[ "$MODE" == canary ]]; then
   CANARY_DIR="$STUDY_ROOT/memory_canary"
-  [[ ! -e "$CANARY_DIR" && ! -L "$CANARY_DIR" ]] || die "canary output is not fresh"
+  DEPLOYMENT_CANARY_DIR="$STUDY_ROOT/deployment_sampler_canary"
+  [[ ! -e "$CANARY_DIR" && ! -L "$CANARY_DIR" ]] || \
+    die "memory-canary output is not fresh"
+  [[ ! -e "$DEPLOYMENT_CANARY_DIR" && ! -L "$DEPLOYMENT_CANARY_DIR" ]] || \
+    die "deployment-canary output is not fresh"
   CANARY_ID="$("$PYTHON_BIN" - "$RUN_IDENTITY" <<'PY'
 import hashlib, sys
 print(hashlib.sha256((sys.argv[1] + ':trd-memory-canary-v1').encode()).hexdigest())
@@ -173,6 +186,12 @@ PY
   export LACWM_RUN_IDENTITY_SHA256="$CANARY_ID"
   export WANDB_MODE=disabled
   export WANDB_DISABLED=true
+  # This is a real one-clip, NFE-1 deployment generation on GPU.  It also
+  # compares the custom auxiliary-free Wan path to the ordinary VPM
+  # condition-off sampler from identical keyed noise and fails on any bit.
+  "$PYTHON_BIN" "$DEPLOYMENT_CANARY" run --registration "$REGISTRATION"
+  "$PYTHON_BIN" "$DEPLOYMENT_CANARY" verify \
+    --registration "$REGISTRATION" >/dev/null
   cd "$PROJECT_ROOT"
   "$PYTHON_BIN" -m torch.distributed.run --standalone --nproc_per_node=8 "$TRAINER" \
     "+experiments_0908=$CONFIG_NAME" \
@@ -185,10 +204,11 @@ PY
     "trainer.config.validation.n_val_samples=1" \
     "viz_data_loader=[]" "wandb.enabled=false"
   for path in "$CANARY_DIR/snapshot.pt" "$CANARY_DIR/training_complete.json" \
-    "$CANARY_DIR/trd_training_trace_complete.json"; do
+    "$CANARY_DIR/trd_training_trace_complete.json" \
+    "$DEPLOYMENT_CANARY_DIR/report.json"; do
     [[ -s "$path" && ! -L "$path" ]] || die "canary output missing: $path"
   done
-  echo "TRD production-shape forward/backward canary complete"
+  echo "TRD deployment-equivalence and production-shape memory canaries complete"
   exit 0
 fi
 

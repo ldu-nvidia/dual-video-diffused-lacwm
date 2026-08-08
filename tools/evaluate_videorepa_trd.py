@@ -27,9 +27,12 @@ class TRDEvaluationError(RuntimeError):
 
 
 def _hash_sample(value) -> str:
-    return hashlib.sha256(
-        value.detach().cpu().contiguous().numpy().tobytes()
-    ).hexdigest()
+    import torch
+
+    # ``reshape`` makes scalar tensors safe before viewing their logical bytes;
+    # the evaluation actions are FP32, but this also supports BF16 artifacts.
+    octets = value.detach().cpu().contiguous().reshape(-1).view(torch.uint8)
+    return hashlib.sha256(octets.numpy().tobytes(order="C")).hexdigest()
 
 
 def _per_sample_nmse(estimate, target):
@@ -239,6 +242,9 @@ def _sample_cell(model, batch, *, actions, nfe):
     model.artifact_batch_limit = None
     model.capture_latent_trajectories = False
     before = int(model._trd_forward_hook_installations)
+    action_sha256 = _hash_sample(actions[0])
+    action_shape = [int(value) for value in actions[0].shape]
+    action_dtype = str(actions.dtype)
     calls = 0
     auxiliary_calls = 0
 
@@ -290,6 +296,8 @@ def _sample_cell(model, batch, *, actions, nfe):
         for handle in handles:
             handle.remove()
     after = int(model._trd_forward_hook_installations)
+    if _hash_sample(actions[0]) != action_sha256:
+        raise TRDEvaluationError("sampler mutated the exact action tensor")
     artifacts = model.pop_visualization_artifacts()
     if (
         calls != nfe
@@ -305,7 +313,15 @@ def _sample_cell(model, batch, *, actions, nfe):
         or "ground_truth_future_uint8" in artifacts
     ):
         raise TRDEvaluationError("deployable sampler leakage/call contract differs")
-    return artifacts, calls, after - before, auxiliary_calls
+    return (
+        artifacts,
+        calls,
+        after - before,
+        auxiliary_calls,
+        action_sha256,
+        action_shape,
+        action_dtype,
+    )
 
 
 def _move_sampling_batch(batch, device, *, history_frames: int):
@@ -363,7 +379,15 @@ def _rows_for_batch(
     )
     rows = []
     clip_index = int(batch["clip_index"].item())
-    for (control, nfe), (artifacts, calls, trd_hooks, auxiliary_calls) in cells.items():
+    for (control, nfe), (
+        artifacts,
+        calls,
+        trd_hooks,
+        auxiliary_calls,
+        action_sha256,
+        action_shape,
+        action_dtype,
+    ) in cells.items():
         infix = "_off"
         final_latent = artifacts[f"video_final{infix}_nfe_{nfe}"]
         decoded = artifacts[f"decoded_future{infix}_nfe_{nfe}"]
@@ -399,6 +423,9 @@ def _rows_for_batch(
                     if control == "episode_shuffled"
                     else None
                 ),
+                "action_tensor_sha256": action_sha256,
+                "action_tensor_shape": action_shape,
+                "action_tensor_dtype": action_dtype,
                 "nfe": int(nfe),
                 "clip_index": clip_index,
                 "latent_nmse": float(latent_nmse),
@@ -547,6 +574,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                     "validation_clips": contract.VALIDATION_CLIPS,
                     "nfe_grid": list(contract.NFE_GRID),
                     "action_controls": list(contract.ACTION_CONTROLS),
+                    "exact_action_tensors_hashed": True,
                     "target_array_opened": False,
                     "sampler_clean_feature_calls": 0,
                     "sampler_future_rgb_calls": 0,

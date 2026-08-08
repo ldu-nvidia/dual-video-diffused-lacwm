@@ -28,7 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 SCHEMA_VERSION = 1
 REGISTRATION_KIND = "videorepa_trd_registration"
 SEAL_KIND = "videorepa_trd_post_training_seal"
-RESULT_SCHEMA = "videorepa_trd_paired_quality_v1"
+RESULT_SCHEMA = "videorepa_trd_paired_quality_v2"
 TRAIN_UPDATES = 200
 SEED = 1234
 WORLD_SIZE = 8
@@ -63,6 +63,11 @@ SPLIT_IDENTITIES = {
 }
 NFE_GRID = (1, 2, 4)
 ACTION_CONTROLS = ("aligned", "episode_shuffled", "zero")
+ACTION_SAMPLE_SHAPE = (13, 5, 157)
+ACTION_TENSOR_DTYPE = "torch.float32"
+ZERO_ACTION_SHA256 = hashlib.sha256(
+    bytes(ACTION_SAMPLE_SHAPE[0] * ACTION_SAMPLE_SHAPE[1] * ACTION_SAMPLE_SHAPE[2] * 4)
+).hexdigest()
 PRIMARY_CONTROL = "aligned"
 PRIMARY_NFE = 1
 VIDEOX_COMMIT = "1d6d9c3e1540968466937129fef4b288041e06de"
@@ -550,8 +555,15 @@ def command_register(args: argparse.Namespace) -> int:
                 "margin": 0.05,
                 "projection": None,
                 "inference_teacher_or_trd_branch": False,
+                "pre_arm_deployment_sampler_canary": {
+                    "split": "train",
+                    "clips": 1,
+                    "nfe": 1,
+                    "ordinary_vpm_condition_off_equivalence": "bitwise",
+                },
                 "nfe_grid": list(NFE_GRID),
                 "action_controls": list(ACTION_CONTROLS),
+                "exact_action_tensor_sha256_per_cell": True,
                 "primary_endpoint": {"control": PRIMARY_CONTROL, "nfe": PRIMARY_NFE},
                 "protected_test_accessed": False,
             },
@@ -881,6 +893,7 @@ def validate_result_rows(rows: Sequence[Mapping[str, Any]], arm: Arm) -> None:
         ):
             raise TRDContractError(f"{arm.code} result row violates protocol")
         for digest_key in (
+            "action_tensor_sha256",
             "video_initial_sha256",
             "video_final_sha256",
             "decoded_sha256",
@@ -907,8 +920,21 @@ def validate_result_rows(rows: Sequence[Mapping[str, Any]], arm: Arm) -> None:
         if (
             len({row["video_initial_sha256"] for row in clip_rows}) != 1
             or len({row["raw_target_sha256"] for row in clip_rows}) != 1
+            or any(
+                row.get("action_tensor_shape") != list(ACTION_SAMPLE_SHAPE)
+                or row.get("action_tensor_dtype") != ACTION_TENSOR_DTYPE
+                for row in clip_rows
+            )
         ):
-            raise TRDContractError("NFE/control cells did not share noise and target")
+            raise TRDContractError(
+                "NFE/control cells did not preserve noise/target/action schema"
+            )
+        for control in ACTION_CONTROLS:
+            control_rows = [
+                row for row in clip_rows if row["action_control"] == control
+            ]
+            if len({row["action_tensor_sha256"] for row in control_rows}) != 1:
+                raise TRDContractError("one action control changed across NFE")
         for nfe in NFE_GRID:
             cell = [
                 row
@@ -935,6 +961,28 @@ def validate_result_rows(rows: Sequence[Mapping[str, Any]], arm: Arm) -> None:
                 or int(shuffled["action_donor_clip_index"]) == clip_index
             ):
                 raise TRDContractError("action donor contract differs")
+
+    aligned_actions = {
+        (int(row["nfe"]), int(row["clip_index"])): row["action_tensor_sha256"]
+        for row in rows
+        if row["action_control"] == "aligned"
+    }
+    for row in rows:
+        if row["action_control"] == "episode_shuffled":
+            donor_key = (int(row["nfe"]), int(row["action_donor_clip_index"]))
+            if row["action_tensor_sha256"] != aligned_actions.get(donor_key):
+                raise TRDContractError(
+                    "shuffled action hash does not match its exact donor tensor"
+                )
+    zero_hashes = {
+        row["action_tensor_sha256"]
+        for row in rows
+        if row["action_control"] == "zero"
+    }
+    if zero_hashes != {ZERO_ACTION_SHA256}:
+        raise TRDContractError(
+            "zero action hash is not the exact canonical FP32 zero tensor"
+        )
 
 
 def _bootstrap(values, *, seed: int, samples: int = 10_000) -> dict[str, float]:
@@ -1068,6 +1116,7 @@ def command_analyze(args: argparse.Namespace) -> int:
             or int(inventory.get("validation_clips", -1)) != VALIDATION_CLIPS
             or inventory.get("nfe_grid") != list(NFE_GRID)
             or inventory.get("action_controls") != list(ACTION_CONTROLS)
+            or inventory.get("exact_action_tensors_hashed") is not True
             or inventory.get("target_array_opened") is not False
             or inventory.get("sampler_clean_feature_calls") != 0
             or inventory.get("sampler_future_rgb_calls") != 0
@@ -1122,6 +1171,10 @@ def command_analyze(args: argparse.Namespace) -> int:
 
     if keyed(off_rows, "raw_target_sha256") != keyed(on_rows, "raw_target_sha256"):
         raise TRDContractError("paired arms did not share exact score targets")
+    if keyed(off_rows, "action_tensor_sha256") != keyed(
+        on_rows, "action_tensor_sha256"
+    ):
+        raise TRDContractError("paired arms did not share exact action tensors")
     if keyed(off_rows, "action_donor_clip_index") != keyed(
         on_rows, "action_donor_clip_index"
     ):

@@ -43,28 +43,35 @@ Render the dependency chain without submitting:
   --python "$PY" \
   --expected-commit "$COMMIT" \
   --account coreai_chef_posttrain \
-  --qos short
+  --qos short \
+  --time 02:00:00
 ```
 
 After reviewing the dry run and checking unrelated active jobs, launch by adding
 `--execute`. The chain is:
 
-1. exact-shape 8xB200 TRD-ON forward/backward memory canary;
-2. concurrent matched TRD-OFF/TRD-ON update-200 training;
-3. CPU post-training seal (no validation access);
-4. concurrent target-free val64 evaluation for both arms;
-5. CPU paired analysis.
+1. one-train-clip NFE-1 GPU deployment canary with bitwise ordinary-VPM
+   condition-off equivalence;
+2. exact-shape 8xB200 TRD-ON forward/backward memory canary;
+3. concurrent matched TRD-OFF/TRD-ON update-200 training;
+4. post-training seal (no validation access; one GPU is allocated only because
+   the cluster's `batch` partition rejects GPU-less jobs);
+5. concurrent target-free val64 evaluation for both arms;
+6. paired analysis (same bookkeeping-only GPU allocation).
 
 Read-only monitoring:
 
 ```bash
 squeue -u "$USER" -o '%.18i %.30j %.2t %.10M %.20R'
 find "$STUDY" -maxdepth 3 -type f \
-  \( -name 'training_complete.json' -o -name 'inventory.json' \
+  \( -name 'report.json' -o -name 'training_complete.json' -o -name 'inventory.json' \
      -o -name 'analysis.json' \) -print
 ```
 
 The final result is `$STUDY/analysis.json`. A valid result must bind the
 registration and post-training seal identities, contain 576 rows per arm,
 report zero teacher/target/TRD/auxiliary inference calls, cover clip indices
-0--63 exactly, and state `protected_test_accessed: false`.
+0--63 exactly, bind each cell's exact action-tensor SHA-256 to its declared
+control/donor, and state `protected_test_accessed: false`. The prerequisite
+`$STUDY/deployment_sampler_canary/report.json` must report exact (zero-tolerance)
+equivalence between the custom and ordinary condition-off paths.

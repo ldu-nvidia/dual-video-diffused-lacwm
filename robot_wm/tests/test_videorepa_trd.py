@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import inspect
 import json
 import os
@@ -18,6 +19,8 @@ from robot_wm.modeling.dual_diffusion.token_relation_distillation import (
     wan_tokens_to_grid,
 )
 from tools import videorepa_trd_screen as screen
+from tools import videorepa_trd_deployment_canary as deployment_canary
+from tools.evaluate_videorepa_trd import _hash_sample
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -102,6 +105,9 @@ def test_arm_contract_has_one_gradient_level_difference():
         len(value["manifest_sha256"]) == 64 and len(value["cache_id"]) == 64
         for value in screen.SPLIT_IDENTITIES.values()
     )
+    assert _hash_sample(torch.zeros(screen.ACTION_SAMPLE_SHAPE)) == (
+        screen.ZERO_ACTION_SHA256
+    )
 
 
 def test_deployable_override_has_no_auxiliary_wan_call():
@@ -137,18 +143,29 @@ def _synthetic_rows(arm: screen.Arm):
         for nfe in screen.NFE_GRID:
             initial = f"{clip:02d}".ljust(64, "0")
             for control in screen.ACTION_CONTROLS:
+                donor = (
+                    clip
+                    if control == "aligned"
+                    else (clip + 1) % screen.VALIDATION_CLIPS
+                    if control == "episode_shuffled"
+                    else None
+                )
+                action_digest = (
+                    f"{donor:02x}" + "a" * 62
+                    if donor is not None
+                    else screen.ZERO_ACTION_SHA256
+                )
                 rows.append(
                     {
                         "schema": screen.RESULT_SCHEMA,
                         "arm": arm.code,
                         "action_control": control,
                         "action_donor_clip_index": (
-                            clip
-                            if control == "aligned"
-                            else (clip + 1) % screen.VALIDATION_CLIPS
-                            if control == "episode_shuffled"
-                            else None
+                            donor
                         ),
+                        "action_tensor_sha256": action_digest,
+                        "action_tensor_shape": list(screen.ACTION_SAMPLE_SHAPE),
+                        "action_tensor_dtype": screen.ACTION_TENSOR_DTYPE,
                         "nfe": nfe,
                         "clip_index": clip,
                         "latent_nmse": 0.3,
@@ -186,6 +203,147 @@ def test_result_grid_requires_target_free_inference_and_paired_noise():
     rows[0]["sampler_received_clean_feature"] = True
     with pytest.raises(screen.TRDContractError, match="violates protocol"):
         screen.validate_result_rows(rows, screen.ARMS[0])
+
+
+def test_result_grid_binds_shuffled_actions_to_exact_donor_tensor():
+    rows = _synthetic_rows(screen.ARMS[0])
+    for shuffled in rows:
+        if (
+            shuffled["action_control"] == "episode_shuffled"
+            and shuffled["clip_index"] == 0
+        ):
+            shuffled["action_tensor_sha256"] = "f" * 64
+    with pytest.raises(screen.TRDContractError, match="exact donor tensor"):
+        screen.validate_result_rows(rows, screen.ARMS[0])
+
+
+def test_deployment_canary_report_is_identity_bound_and_exact():
+    registration = {
+        "identity_sha256": "1" * 64,
+        "source": {"git_commit": "2" * 40},
+        "parent_snapshot": {"file": {"sha256": "3" * 64}},
+    }
+    comparison = {
+        "shape": [1],
+        "dtype": "torch.float32",
+        "custom_sha256": "4" * 64,
+        "ordinary_vpm_sha256": "4" * 64,
+        "bitwise_equal": True,
+        "max_abs_error": 0.0,
+        "mean_abs_error": 0.0,
+    }
+    report = screen._identity(
+        {
+            "schema_version": deployment_canary.CANARY_SCHEMA_VERSION,
+            "kind": deployment_canary.CANARY_KIND,
+            "status": "passed_before_full_arm_training",
+            "registration_identity_sha256": registration["identity_sha256"],
+            "source_git_commit": registration["source"]["git_commit"],
+            "parent_snapshot_sha256": registration["parent_snapshot"]["file"][
+                "sha256"
+            ],
+            "clip_split": "train",
+            "clip_index": 0,
+            "nfe": 1,
+            "condition_source": "off",
+            "sample_id": 0,
+            "history_tensor_sha256": "5" * 64,
+            "history_input_owned_storage": True,
+            "action_tensor_sha256": "6" * 64,
+            "action_tensor_shape": list(screen.ACTION_SAMPLE_SHAPE),
+            "action_tensor_dtype": screen.ACTION_TENSOR_DTYPE,
+            "action_tensor_unchanged": True,
+            "custom_deployment_counts": {
+                "wan_calls": 1,
+                "auxiliary_branch_calls": 0,
+                "auxiliary_module_calls": dict(
+                    deployment_canary.ZERO_AUXILIARY_MODULE_CALLS
+                ),
+                "trd_hook_installations": 0,
+            },
+            "ordinary_vpm_condition_off_counts": {
+                "wan_calls": 1,
+                "auxiliary_branch_calls": 5,
+                "auxiliary_module_calls": dict(
+                    deployment_canary.ORDINARY_VPM_AUXILIARY_MODULE_CALLS
+                ),
+                "trd_hook_installations": 0,
+            },
+            "fixed_noise": dict(comparison),
+            "history_reference_latents": dict(comparison),
+            "native_video_velocity": dict(comparison),
+            "future_output": dict(comparison),
+            "final_video_latent_fp16_evidence": dict(comparison),
+            "decoded_future_uint8": dict(comparison),
+            "numerical_tolerance": {"rtol": 0.0, "atol": 0.0},
+            "custom_path_received_future_rgb": False,
+            "custom_path_received_clean_feature": False,
+            "target_array_opened": False,
+            "validation_split_accessed": False,
+            "protected_test_accessed": False,
+            "passed": True,
+        }
+    )
+    for name, (shape, dtype) in (
+        deployment_canary.EXPECTED_COMPARISON_SPECS.items()
+    ):
+        report[name]["shape"] = shape
+        report[name]["dtype"] = dtype
+    report["history_tensor_shape"] = [5, 3, 180, 960]
+    report["history_tensor_dtype"] = "torch.float32"
+    report = screen._identity(
+        {key: value for key, value in report.items() if key != "identity_sha256"}
+    )
+    deployment_canary._validate_report(registration, report)
+
+    partial_reference = deepcopy(report)
+    partial_reference["ordinary_vpm_condition_off_counts"] = {
+        "wan_calls": 1,
+        "auxiliary_branch_calls": 1,
+        "auxiliary_module_calls": {
+            name: int(name == "control_adapter")
+            for name in deployment_canary.AUXILIARY_MODULE_NAMES
+        },
+        "trd_hook_installations": 0,
+    }
+    partial_reference = screen._identity(
+        {
+            key: value
+            for key, value in partial_reference.items()
+            if key != "identity_sha256"
+        }
+    )
+    with pytest.raises(
+        deployment_canary.TRDDeploymentCanaryError,
+        match="report differs",
+    ):
+        deployment_canary._validate_report(registration, partial_reference)
+
+    impossible_schema = deepcopy(report)
+    impossible_schema["fixed_noise"]["shape"] = [999]
+    impossible_schema["fixed_noise"]["dtype"] = "torch.int8"
+    impossible_schema = screen._identity(
+        {
+            key: value
+            for key, value in impossible_schema.items()
+            if key != "identity_sha256"
+        }
+    )
+    with pytest.raises(
+        deployment_canary.TRDDeploymentCanaryError,
+        match="numerical equivalence",
+    ):
+        deployment_canary._validate_report(registration, impossible_schema)
+
+    report["future_output"]["bitwise_equal"] = False
+    report = screen._identity(
+        {key: value for key, value in report.items() if key != "identity_sha256"}
+    )
+    with pytest.raises(
+        deployment_canary.TRDDeploymentCanaryError,
+        match="numerical equivalence",
+    ):
+        deployment_canary._validate_report(registration, report)
 
 
 def test_registration_cli_has_no_protected_test_argument():
@@ -261,11 +419,19 @@ def test_slurm_workflow_is_nonrequeueable_and_excludes_all_bad_nodes():
     assert "rev-parse --is-inside-work-tree" in sbatch
     assert "Dry-run is the default" in launcher
     assert "--execute" in launcher
+    assert "TIME_LIMIT=02:00:00" in launcher
+    assert "short QOS requires the cluster-compatible" in launcher
+    assert launcher.count("--gpus-per-node 1") == 2
     assert "afterok:$TRAIN_ID" in launcher
     assert "afterok:$SEAL_ID" in launcher
     assert "same-name TRD workflow stage is already active" in launcher
     assert '"viz_data_loader=[]"' in sbatch
     assert '"viz_data_loader=null"' not in sbatch
+    assert "videorepa_trd_deployment_canary.py" in sbatch
+    assert sbatch.index('"$DEPLOYMENT_CANARY" run') < sbatch.index(
+        'torch.distributed.run --standalone --nproc_per_node=8 "$TRAINER"'
+    )
+    assert '"$DEPLOYMENT_CANARY" verify' in sbatch
 
 
 @pytest.mark.parametrize(
