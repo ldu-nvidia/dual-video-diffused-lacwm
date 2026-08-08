@@ -15,7 +15,6 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -26,7 +25,6 @@ from robot_wm.modeling.networks.action_delta_residual import (  # noqa: E402
 from tools import dual_abc_pilot  # noqa: E402
 from tools import two_clock_consistency_evaluate as base  # noqa: E402
 from tools import vpm_phaselock_probe as phase  # noqa: E402
-
 
 SCHEMA_VERSION = 1
 KIND_REGISTRATION = "action_variation_registration"
@@ -73,14 +71,16 @@ class Endpoint:
     code: str
     nfe: int
     action_source: str
+    residual_mode: str
     primary_gate: bool
 
 
 ENDPOINTS = tuple(
-    Endpoint(f"aligned_nfe_{nfe}", nfe, "aligned", True) for nfe in NFE_GRID
+    Endpoint(f"aligned_nfe_{nfe}", nfe, "aligned", "native", True) for nfe in NFE_GRID
 ) + (
-    Endpoint("zero_nfe_1", 1, "zero", False),
-    Endpoint("global_shuffled_nfe_1", 1, "global_shuffled", False),
+    Endpoint("zero_nfe_1", 1, "zero", "native", False),
+    Endpoint("global_shuffled_nfe_1", 1, "global_shuffled", "native", False),
+    Endpoint("aligned_residual_masked_nfe_1", 1, "aligned", "hard_mask", False),
 )
 ENDPOINT_BY_CODE = {endpoint.code: endpoint for endpoint in ENDPOINTS}
 
@@ -115,6 +115,101 @@ def identity_valid(payload: Mapping[str, Any]) -> bool:
         isinstance(identity, str)
         and len(identity) == 64
         and hashlib.sha256(_canonical_json(unsigned)).hexdigest() == identity
+    )
+
+
+CONFIG_CONTRACT_KEYS = (
+    "name",
+    "seed",
+    "debug",
+    "dataset",
+    "val_dataset",
+    "viz_dataset",
+    "data_loader",
+    "val_data_loader",
+    "viz_data_loader",
+    "model",
+    "optimizer_factory",
+    "lr_scheduler_factory",
+    "trainer",
+    "wandb",
+)
+
+
+def _config_value(config: Any, *path: str) -> Any:
+    value = config
+    for key in path:
+        if isinstance(value, Mapping):
+            value = value[key]
+        else:
+            value = getattr(value, key)
+    return value
+
+
+def canonical_config_contract(config: Any) -> dict[str, Any]:
+    """Hash the complete resolved scientific job config plus external paths.
+
+    Hydra's runtime output resolver is intentionally left as its raw expression;
+    every scientific/runtime input path is separately resolved in ``bindings``.
+    This lets the pre-training workflow and the saved Hydra config produce the
+    same canonical identity.
+    """
+
+    if (
+        isinstance(config, Mapping)
+        and type(config).__module__ != "omegaconf.dictconfig"
+    ):
+        raw = json.loads(json.dumps(config))
+    else:
+        try:
+            from omegaconf import DictConfig, OmegaConf
+        except ImportError as exc:  # pragma: no cover - cluster runtime dependency
+            raise ActionVariationScreenError(
+                "OmegaConf is required for config binding"
+            ) from exc
+        if not isinstance(config, DictConfig):
+            raise ActionVariationScreenError("resolved config must be a mapping")
+        raw = OmegaConf.to_container(config, resolve=False)
+    if not isinstance(raw, dict) or any(key not in raw for key in CONFIG_CONTRACT_KEYS):
+        raise ActionVariationScreenError(
+            "resolved config lacks a canonical job section"
+        )
+    selected = {key: raw[key] for key in CONFIG_CONTRACT_KEYS}
+    bindings = {
+        "train_manifest": str(
+            _config_value(config, "dataset", "datasets", "ABC", "clip_manifest")
+        ),
+        "train_cache_metadata": str(
+            _config_value(config, "dataset", "datasets", "ABC", "cache_metadata")
+        ),
+        "validation_manifest": str(
+            _config_value(config, "val_dataset", "datasets", "ABC", "clip_manifest")
+        ),
+        "validation_cache_metadata": str(
+            _config_value(config, "val_dataset", "datasets", "ABC", "cache_metadata")
+        ),
+        "viz_manifest": str(
+            _config_value(config, "viz_dataset", "datasets", "ABC", "clip_manifest")
+        ),
+        "viz_cache_metadata": str(
+            _config_value(config, "viz_dataset", "datasets", "ABC", "cache_metadata")
+        ),
+        "action_stats": str(
+            _config_value(config, "model", "action_variation", "stats_path")
+        ),
+        "parent_snapshot": str(_config_value(config, "trainer", "config", "load_path")),
+        "save_path": str(
+            _config_value(config, "trainer", "config", "saving", "save_path")
+        ),
+        "wandb_id": str(_config_value(config, "wandb", "id")),
+    }
+    return identity_payload(
+        {
+            "schema_version": 1,
+            "kind": "action_variation_resolved_config_contract",
+            "selected_config": selected,
+            "resolved_bindings": bindings,
+        }
     )
 
 
@@ -162,6 +257,19 @@ def fixed_protocol() -> dict[str, Any]:
         "primary_metric": "decoded_temporal_difference_mse_unit_range",
         "guardrail_metrics": ["video_future_nmse", "decoded_mse_unit_range"],
         "action_attribution_endpoints": ["zero_nfe_1", "global_shuffled_nfe_1"],
+        "trained_candidate_residual_ablation": "aligned_residual_masked_nfe_1",
+        "causal_attribution": {
+            "interaction": (
+                "(candidate_diagnostic-candidate_aligned)-"
+                "(control_diagnostic-control_aligned)"
+            ),
+            "normalizer": "mean_control_aligned",
+            "primary_minimum_relative_improvement": 0.005,
+            "trained_candidate_hard_mask_minimum_relative_improvement": 0.005,
+        },
+        "evaluation_local_batch_size": 1,
+        "latency_warmup": "one_unmeasured_aligned_nfe_1_rollout_per_rank",
+        "latency_reporting": "per_endpoint_batch_one",
         "protected_test_access_allowed": False,
         "future_rgb_or_feature_allowed_at_sampling": False,
         "wandb": {
@@ -194,10 +302,10 @@ def _validate_stats(path: Path) -> dict[str, Any]:
     return payload
 
 
-def command_fit_stats(args: argparse.Namespace) -> int:
-    train = base._validate_train_inputs(args.train_manifest, args.train_cache_metadata)
-    actions_record = train["actions"]
-    actions = np.load(actions_record["path"], mmap_mode="r", allow_pickle=False)
+def _computed_action_delta_stats(actions_path: Path) -> dict[str, Any]:
+    """Deterministically derive every fitted value from the pinned train array."""
+
+    actions = np.load(actions_path, mmap_mode="r", allow_pickle=False)
     if actions.shape != (512, 13, 5, 23) or actions.dtype != np.float32:
         raise ActionVariationScreenError(
             "registered train action array shape/type differs"
@@ -210,6 +318,10 @@ def command_fit_stats(args: argparse.Namespace) -> int:
     raw_mean = flat.mean(axis=0)
     raw_std = flat.std(axis=0, ddof=0)
     active_raw = raw_std > 1e-6
+    if not bool(active_raw.any()):
+        raise ActionVariationScreenError(
+            "train action deltas have no active coordinate"
+        )
     mean = np.zeros(157, dtype=np.float64)
     std = np.ones(157, dtype=np.float64)
     active = np.zeros(157, dtype=bool)
@@ -220,6 +332,52 @@ def command_fit_stats(args: argparse.Namespace) -> int:
     whitened[:, active_raw] = (flat[:, active_raw] - raw_mean[active_raw]) / raw_std[
         active_raw
     ]
+    return {
+        "fit_clips": 512,
+        "fit_observations": int(flat.shape[0]),
+        "std_floor": 1e-6,
+        "active_dimensions": int(active.sum()),
+        "mean": [float(value) for value in mean],
+        "std": [float(value) for value in std],
+        "active": [bool(value) for value in active],
+        "whitened_active_mean_abs_max": float(
+            np.abs(whitened[:, active_raw].mean(axis=0)).max()
+        ),
+        "whitened_active_std_error_max": float(
+            np.abs(whitened[:, active_raw].std(axis=0) - 1.0).max()
+        ),
+    }
+
+
+def _validate_stats_against_train(
+    stats: Mapping[str, Any], train: Mapping[str, Any]
+) -> None:
+    """Reject relabeled/stale statistics even when their self-hash is valid."""
+
+    expected_source = {
+        "manifest": train["manifest"],
+        "cache_metadata": train["cache_metadata"],
+        "actions": train["actions"],
+        "rgb_opened": False,
+        "auxiliary_target_opened": False,
+    }
+    expected_values = _computed_action_delta_stats(Path(train["actions"]["path"]))
+    if stats.get("source") != expected_source:
+        raise ActionVariationScreenError(
+            "statistics source is not the complete registered train source"
+        )
+    mismatched = [
+        key for key, value in expected_values.items() if stats.get(key) != value
+    ]
+    if mismatched:
+        raise ActionVariationScreenError(
+            f"statistics were not recomputed from registered train actions: {mismatched}"
+        )
+
+
+def command_fit_stats(args: argparse.Namespace) -> int:
+    train = base._validate_train_inputs(args.train_manifest, args.train_cache_metadata)
+    fitted = _computed_action_delta_stats(Path(train["actions"]["path"]))
     payload = identity_payload(
         {
             "schema": KIND_STATS,
@@ -230,19 +388,7 @@ def command_fit_stats(args: argparse.Namespace) -> int:
             "chunk_size": 5,
             "delta_steps": 4,
             "padding_dim": 157,
-            "fit_clips": 512,
-            "fit_observations": int(flat.shape[0]),
-            "std_floor": 1e-6,
-            "active_dimensions": int(active.sum()),
-            "mean": [float(value) for value in mean],
-            "std": [float(value) for value in std],
-            "active": [bool(value) for value in active],
-            "whitened_active_mean_abs_max": float(
-                np.abs(whitened[:, active_raw].mean(axis=0)).max()
-            ),
-            "whitened_active_std_error_max": float(
-                np.abs(whitened[:, active_raw].std(axis=0) - 1.0).max()
-            ),
+            **fitted,
             "source": {
                 "manifest": train["manifest"],
                 "cache_metadata": train["cache_metadata"],
@@ -311,10 +457,7 @@ def command_register(args: argparse.Namespace) -> int:
     train_descriptors = train.pop("descriptors")
     stats = _validate_stats(args.stats)
     stats_record = base._file_record(args.stats.expanduser().resolve(strict=True))
-    if stats["source"]["actions"]["sha256"] != train["actions"]["sha256"]:
-        raise ActionVariationScreenError(
-            "statistics were not fit from registered train actions"
-        )
+    _validate_stats_against_train(stats, train)
     validation_descriptors = base._manifest_descriptors(
         Path(validated["validation"]["manifest"]["path"]),
         expected_split="val",
@@ -363,7 +506,11 @@ def command_register(args: argparse.Namespace) -> int:
             "validation": validated["validation"],
             "validation_descriptors": validation_descriptors,
             "action_delta_stats": {"file": stats_record, "payload": stats},
-            "runtime": {**validated["runtime"], "python": str(python)},
+            "runtime": {
+                **validated["runtime"],
+                "python": str(python),
+                "python_file": base._file_record(python),
+            },
             "fixed_protocol": fixed_protocol(),
             "wandb": {**wandb, "group": None, "mode": "online"},
             "protected_test_accessed": False,
@@ -395,6 +542,8 @@ def validate_registration(path: Path) -> dict[str, Any]:
         or registration.get("wandb", {}).get("access") != "PRIVATE"
         or registration.get("wandb", {}).get("viewer_username") != "zijiandu"
         or registration.get("wandb", {}).get("group") is not None
+        or Path(registration.get("tool_repository", {}).get("path", "")).resolve()
+        != REPO_ROOT
     ):
         raise ActionVariationScreenError("registration identity/protocol differs")
     canonical = Path(registration["output_root"]) / "registration.json"
@@ -403,7 +552,69 @@ def validate_registration(path: Path) -> dict[str, Any]:
     ) != base._sha256(Path(stats_record.get("path", ""))):
         raise ActionVariationScreenError("registration/statistics artifact changed")
     _validate_stats(Path(stats_record["path"]))
+    _validate_stats_against_train(
+        registration["action_delta_stats"]["payload"], registration["training"]
+    )
     return registration
+
+
+def revalidate_execution_environment(
+    registration: Mapping[str, Any], *, include_historical: bool = True
+) -> dict[str, Any]:
+    """Bind the code/runtime actually executing each study boundary."""
+
+    source = registration["tool_repository"]
+    if base._clean_source(Path(source["path"]), source["git_commit"], "tool") != source:
+        raise ActionVariationScreenError("executing tool checkout differs")
+    records: dict[str, Any] = {"tool_repository": source}
+    if include_historical:
+        historical = registration["historical_model_repository"]
+        if (
+            base._clean_source(
+                Path(historical["path"]), historical["git_commit"], "historical model"
+            )
+            != historical
+        ):
+            raise ActionVariationScreenError("historical model checkout differs")
+        records["historical_model_repository"] = historical
+    runtime = registration["runtime"]
+    videox_raw = Path(runtime["videox_home"])
+    videox = videox_raw.resolve(strict=True)
+    if (
+        not videox.is_dir()
+        or videox_raw.is_symlink()
+        or base._git(videox, "rev-parse", "HEAD") != runtime["videox_commit"]
+        or base._git(videox, "status", "--porcelain", "--untracked-files=all")
+    ):
+        raise ActionVariationScreenError("VideoX runtime changed after registration")
+    wan = Path(runtime["wan_dir"])
+    if (
+        not wan.is_absolute()
+        or wan.resolve(strict=True) != wan
+        or not wan.is_dir()
+        or wan.is_symlink()
+    ):
+        raise ActionVariationScreenError("Wan runtime directory changed")
+    python_record = runtime.get("python_file")
+    if (
+        not isinstance(python_record, Mapping)
+        or base._revalidate_record(python_record, "runtime Python") != python_record
+        or not os.access(Path(python_record["path"]), os.X_OK)
+    ):
+        raise ActionVariationScreenError("runtime Python changed")
+    protocol = registration["protocol"]
+    if base._revalidate_record(protocol, "prospective protocol") != protocol:
+        raise ActionVariationScreenError("prospective protocol changed")
+    records.update(
+        {
+            "videox_home": str(videox),
+            "videox_commit": runtime["videox_commit"],
+            "wan_dir": str(wan),
+            "python": python_record,
+            "protocol": protocol,
+        }
+    )
+    return records
 
 
 def revalidate_registered_inputs(registration: Mapping[str, Any]) -> dict[str, Any]:

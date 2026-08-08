@@ -11,12 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
 import torch
 from torch import Tensor, nn
-
 
 ACTION_DELTA_STATS_SCHEMA = "lacwm-action-delta-whitening-v1"
 
@@ -144,6 +144,11 @@ class WhitenedActionDeltaResidual(nn.Module):
         self.register_buffer("delta_active", active, persistent=True)
         self.raw_gate = nn.Parameter(torch.zeros((), dtype=torch.float32))
         self.enabled = enabled
+        # Evaluation may temporarily mask the *trained* candidate residual to
+        # measure its direct causal contribution.  This is deliberately runtime
+        # state rather than a buffer/parameter so both arms retain an identical
+        # serialized schema.
+        self._runtime_hard_mask = False
         self.action_dim = action_dim
         self.chunk_size = chunk_size
         self.latent_dim = latent_dim
@@ -170,7 +175,18 @@ class WhitenedActionDeltaResidual(nn.Module):
         """Bounded gate; control computes the branch but hard-masks its effect."""
 
         gate = torch.tanh(self.raw_gate)
-        return gate if self.enabled else gate * 0.0
+        return gate if self.enabled and not self._runtime_hard_mask else gate * 0.0
+
+    @contextmanager
+    def runtime_hard_mask(self):
+        """Temporarily force an exact-zero gate without mutating model state."""
+
+        previous = self._runtime_hard_mask
+        self._runtime_hard_mask = True
+        try:
+            yield
+        finally:
+            self._runtime_hard_mask = previous
 
     def standardized_deltas(self, actions: Tensor) -> Tensor:
         if (

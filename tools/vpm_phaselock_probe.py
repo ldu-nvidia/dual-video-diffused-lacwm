@@ -41,7 +41,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 SCHEMA_VERSION = 1
 KIND_REGISTRATION = "vpm_phaselock_probe_registration"
 KIND_ROW = "vpm_phaselock_probe_clip"
@@ -300,7 +299,11 @@ def _exclusive_json(path: Path, payload: Mapping[str, Any]) -> None:
 def guidance_end_step(full_steps: int) -> int:
     """Faithful early-half guidance interval, with one valid low-NFE step."""
 
-    if isinstance(full_steps, bool) or not isinstance(full_steps, int) or full_steps < 1:
+    if (
+        isinstance(full_steps, bool)
+        or not isinstance(full_steps, int)
+        or full_steps < 1
+    ):
         raise PhaseLockProbeError("full_steps must be a positive integer")
     return max(1, full_steps // 2)
 
@@ -370,10 +373,9 @@ def apply_future_delta_guidance(
     if strength == 0:
         return latents
     guided = latents.clone()
-    guided[:, :, history_frames + 1 :] = (
-        latents[:, :, history_frames + 1 :]
-        + float(strength) * (motion_prior.to(latents) - current)
-    )
+    guided[:, :, history_frames + 1 :] = latents[:, :, history_frames + 1 :] + float(
+        strength
+    ) * (motion_prior.to(latents) - current)
     return guided
 
 
@@ -495,8 +497,7 @@ def _validate_study_metadata(
     snapshot_record = outcome.get("snapshot_observed_at_stage_end")
     if (
         not isinstance(snapshot_record, Mapping)
-        or Path(str(snapshot_record.get("path", ""))).resolve()
-        != paths["snapshot"]
+        or Path(str(snapshot_record.get("path", ""))).resolve() != paths["snapshot"]
         or not isinstance(snapshot_record.get("sha256"), str)
         or SHA256_RE.fullmatch(str(snapshot_record["sha256"])) is None
         or (rehash_snapshot and _sha256(paths["snapshot"]) != snapshot_record["sha256"])
@@ -518,8 +519,7 @@ def _validate_study_metadata(
     if (
         not isinstance(manifest_record, Mapping)
         or manifest_record.get("entries") != EXPECTED_VALIDATION_CLIPS
-        or manifest_record.get("sha256")
-        != EXPECTED_VALIDATION_MANIFEST_SHA256
+        or manifest_record.get("sha256") != EXPECTED_VALIDATION_MANIFEST_SHA256
         or not isinstance(cache_record, Mapping)
         or cache_record.get("split") != "val"
         or cache_record.get("clip_count") != EXPECTED_VALIDATION_CLIPS
@@ -537,8 +537,7 @@ def _validate_study_metadata(
     if (
         manifest_record.get("sha256") != _sha256(val_manifest)
         or metadata_record.get("sha256") != _sha256(val_metadata)
-        or metadata_record.get("sha256")
-        != EXPECTED_VALIDATION_METADATA_SHA256
+        or metadata_record.get("sha256") != EXPECTED_VALIDATION_METADATA_SHA256
     ):
         raise PhaseLockProbeError("validation manifest/cache digest differs")
     descriptors = [
@@ -556,13 +555,10 @@ def _validate_study_metadata(
     ):
         raise PhaseLockProbeError("validation descriptors are not dense and unique")
     array_records: dict[str, dict[str, Any]] = {}
-    cache_metadata_payload = _read_json(
-        val_metadata, "validation cache metadata"
-    )
+    cache_metadata_payload = _read_json(val_metadata, "validation cache metadata")
     if (
         cache_metadata_payload.get("split") != "val"
-        or cache_metadata_payload.get("clip_count")
-        != EXPECTED_VALIDATION_CLIPS
+        or cache_metadata_payload.get("clip_count") != EXPECTED_VALIDATION_CLIPS
         or cache_metadata_payload.get("complete") is not True
         or cache_metadata_payload.get("clip_manifest_sha256")
         != EXPECTED_VALIDATION_MANIFEST_SHA256
@@ -580,9 +576,7 @@ def _validate_study_metadata(
             or (rehash_snapshot and _sha256(path) != record["sha256"])
         ):
             raise PhaseLockProbeError(f"validation {name} cache record is invalid")
-        metadata_path = Path(
-            str(cache_metadata_payload.get(f"{name}_file", ""))
-        )
+        metadata_path = Path(str(cache_metadata_payload.get(f"{name}_file", "")))
         if not metadata_path.is_absolute():
             metadata_path = val_metadata.parent / metadata_path
         expected_shape = (
@@ -598,8 +592,7 @@ def _validate_study_metadata(
         )
         if (
             metadata_path.resolve() != path
-            or cache_metadata_payload.get(f"{name}_sha256")
-            != record["sha256"]
+            or cache_metadata_payload.get(f"{name}_sha256") != record["sha256"]
             or record.get("sha256") != expected_sha256
             or cache_metadata_payload.get(f"{name}_shape") != expected_shape
             or cache_metadata_payload.get(f"{name}_dtype") != expected_dtype
@@ -615,9 +608,8 @@ def _validate_study_metadata(
         }
     runtime = study.get("inputs", {}).get("runtime", {})
     videox = _directory(Path(str(runtime.get("videox_home", ""))), "VideoX checkout")
-    if (
-        _git(videox, "rev-parse", "HEAD") != VIDEOX_COMMIT
-        or _git(videox, "status", "--porcelain", "--untracked-files=all")
+    if _git(videox, "rev-parse", "HEAD") != VIDEOX_COMMIT or _git(
+        videox, "status", "--porcelain", "--untracked-files=all"
     ):
         raise PhaseLockProbeError("VideoX runtime is not the frozen clean checkout")
     wan_dir = _directory(Path(str(runtime.get("wan_dir", ""))), "Wan directory")
@@ -650,9 +642,7 @@ def command_register(args: argparse.Namespace) -> int:
     model_repo = _directory(args.model_repo, "historical model repository")
     if tool_repo == model_repo:
         raise PhaseLockProbeError("tool and historical model repositories must differ")
-    tool_identity = _assert_clean_commit(
-        tool_repo, args.tool_commit, "tool"
-    )
+    tool_identity = _assert_clean_commit(tool_repo, args.tool_commit, "tool")
     model_identity = _assert_clean_commit(
         model_repo, TRAINING_COMMIT, "historical model"
     )
@@ -671,9 +661,7 @@ def command_register(args: argparse.Namespace) -> int:
     if completed.returncode:
         raise PhaseLockProbeError("tool commit is not a descendant of training commit")
     study_root = _directory(args.study_root, "controlled-study root")
-    validated = _validate_study_metadata(
-        study_root, model_repo, rehash_snapshot=True
-    )
+    validated = _validate_study_metadata(study_root, model_repo, rehash_snapshot=True)
     output_root = _canonical_fresh_lustre_output(args.output_root)
     output_root.mkdir(parents=True, mode=0o700)
     protocol_files = {}
@@ -683,7 +671,9 @@ def command_register(args: argparse.Namespace) -> int:
         "tools/analyze_vpm_phaselock_probe.py",
         "tools/slurm/vpm_phaselock_probe.sbatch",
     ):
-        path = _regular_file(tool_repo / relative, f"protocol implementation {relative}")
+        path = _regular_file(
+            tool_repo / relative, f"protocol implementation {relative}"
+        )
         protocol_files[relative] = _file_record(path)
     paths = validated["paths"]
     registration = identity_payload(
@@ -773,9 +763,7 @@ def _validate_registration(
         or registration.get("kind") != KIND_REGISTRATION
         or registration.get("training_commit") != TRAINING_COMMIT
         or registration.get("fixed_protocol", {}).get("split") != "validation"
-        or registration.get("fixed_protocol", {}).get(
-            "protected_test_access_allowed"
-        )
+        or registration.get("fixed_protocol", {}).get("protected_test_access_allowed")
         is not False
         or registration.get("fixed_protocol", {}).get("endpoint_grid")
         != [asdict(endpoint) for endpoint in ENDPOINTS]
@@ -817,8 +805,7 @@ def _validate_registration(
         if (
             record.get("sha256") != _sha256(file_path)
             or record.get("bytes") != file_path.stat().st_size
-            or controlled.get(identity_key)
-            != validated[payload_key]["identity_sha256"]
+            or controlled.get(identity_key) != validated[payload_key]["identity_sha256"]
         ):
             raise PhaseLockProbeError(f"registered controlled-study {key} changed")
     registered_validation = registration.get("validation", {})
@@ -829,9 +816,7 @@ def _validate_registration(
             registered_record.get(field) != observed_record.get(field)
             for field in ("path", "sha256", "bytes")
         ):
-            raise PhaseLockProbeError(
-                f"registered validation {key} changed"
-            )
+            raise PhaseLockProbeError(f"registered validation {key} changed")
     for key in ("rgb", "actions"):
         registered_record = registered_validation.get("arrays", {}).get(key, {})
         observed_record = validated["validation"]["arrays"][key]
@@ -839,9 +824,7 @@ def _validate_registration(
             registered_record.get(field) != observed_record.get(field)
             for field in ("path", "sha256", "bytes")
         ):
-            raise PhaseLockProbeError(
-                f"registered validation {key} array changed"
-            )
+            raise PhaseLockProbeError(f"registered validation {key} array changed")
     if (
         registered_validation.get("clip_ids_sha256")
         != validated["validation"]["clip_ids_sha256"]
@@ -903,8 +886,7 @@ def _load_model_and_dataset(
     if (
         not isinstance(snapshot, Mapping)
         or "model" not in snapshot
-        or snapshot.get("run_identity_sha256")
-        != validated["arm"]["identity_sha256"]
+        or snapshot.get("run_identity_sha256") != validated["arm"]["identity_sha256"]
         or snapshot.get("_start_iter") != 1000
     ):
         raise PhaseLockProbeError("VPM snapshot identity/update cursor differs")
@@ -920,9 +902,7 @@ def _load_model_and_dataset(
         or bool(getattr(model, "condition_on_tf_clock", False))
         or model.tf_loss_weight != 0.0
         or not bool(getattr(model, "parameter_matched_control", False))
-        or float(
-            model.forward_model.tf_token_adapter.effective_gate().detach().float()
-        )
+        or float(model.forward_model.tf_token_adapter.effective_gate().detach().float())
         != 0.0
         or float(
             model.forward_model.tf_clock_embedding.effective_gate().detach().float()
@@ -949,9 +929,7 @@ def _load_model_and_dataset(
         raise PhaseLockProbeError("resolved dataset differs from registered validation")
     dataset = _RegisteredValidationInputs(
         rgb_path=Path(registration["validation"]["arrays"]["rgb"]["path"]),
-        actions_path=Path(
-            registration["validation"]["arrays"]["actions"]["path"]
-        ),
+        actions_path=Path(registration["validation"]["arrays"]["actions"]["path"]),
         descriptors=validated["descriptors"],
         padding_dim=int(config.val_dataset.padding_dim),
     )
@@ -996,9 +974,25 @@ class _RegisteredValidationInputs:
         if not 0 <= index < len(self):
             raise IndexError(index)
         rgb = torch.from_numpy(np.array(self._rgb[index], copy=True)).float()
-        actions = torch.from_numpy(
-            np.array(self._actions[index], copy=True)
-        )
+        actions = self.action_only(index)
+        return {
+            "rgb": rgb,
+            "actions": actions,
+            # ABCDataset's frozen morphology mapping in the training source.
+            "morphology_index": torch.tensor(9, dtype=torch.long),
+            "clip_index": torch.tensor(index, dtype=torch.long),
+        }
+
+    def action_only(self, index: int) -> Any:
+        """Load a requested-action sequence without touching the RGB cache."""
+
+        import numpy as np
+        import torch
+
+        index = int(index)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        actions = torch.from_numpy(np.array(self._actions[index], copy=True))
         if actions.shape[-1] > self._padding_dim:
             raise PhaseLockProbeError("cached action dimension exceeds model padding")
         if actions.shape[-1] < self._padding_dim:
@@ -1008,13 +1002,7 @@ class _RegisteredValidationInputs:
                 dtype=actions.dtype,
             )
             actions = torch.cat((actions, padding), dim=-1)
-        return {
-            "rgb": rgb,
-            "actions": actions,
-            # ABCDataset's frozen morphology mapping in the training source.
-            "morphology_index": torch.tensor(9, dtype=torch.long),
-            "clip_index": torch.tensor(index, dtype=torch.long),
-        }
+        return actions
 
 
 def _move_batch(samples: Sequence[Mapping[str, Any]], device: Any) -> dict[str, Any]:
@@ -1039,7 +1027,6 @@ def _prepare_deployable_rollout(
     morphology_index: Any,
     sampling_ids: Any,
 ) -> dict[str, Any]:
-    import torch
     import torch.distributed as dist
 
     if history_rgb.ndim != 5 or history_rgb.shape[1] != model.num_history_frames:
@@ -1075,12 +1062,8 @@ def _prepare_deployable_rollout(
         history_frames,
     )
     z_control = z_control.to(history_rgb.dtype)
-    context = model._build_context(
-        batch_size, history_rgb.device, history_rgb.dtype
-    )
-    clip_fea = model._build_clip(
-        batch_size, history_rgb.device, history_rgb.dtype
-    )
+    context = model._build_context(batch_size, history_rgb.device, history_rgb.dtype)
+    clip_fea = model._build_clip(batch_size, history_rgb.device, history_rgb.dtype)
     rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
     initial_video = model._evaluation_noise(
         video_shape,
@@ -1106,7 +1089,9 @@ def _prepare_deployable_rollout(
         rank=rank,
     )
     if model._auxiliary_history_frames(history_frames) != 0:
-        raise PhaseLockProbeError("VPM deployable auxiliary state must diffuse all bins")
+        raise PhaseLockProbeError(
+            "VPM deployable auxiliary state must diffuse all bins"
+        )
     return {
         "initial_video": initial_video,
         "initial_tf": initial_tf,
@@ -1129,6 +1114,7 @@ def _run_trajectory(
     motion_prior: Any | None = None,
 ) -> dict[str, Any]:
     import torch
+
     from robot_wm.modeling.dual_diffusion.flow import (
         euler_flow_step,
         pair_video_sigma_schedule,
@@ -1145,9 +1131,9 @@ def _run_trajectory(
     device = prepared["device"]
     model.sample_scheduler.set_timesteps(steps, device=device)
     timesteps = tuple(model.sample_scheduler.timesteps)
-    sigmas = model.sample_scheduler.sigmas.to(
-        device=device, dtype=torch.float32
-    )[: steps + 1]
+    sigmas = model.sample_scheduler.sigmas.to(device=device, dtype=torch.float32)[
+        : steps + 1
+    ]
     schedule = pair_video_sigma_schedule(
         sigmas,
         mode=model.tf_schedule_mode,
@@ -1157,7 +1143,6 @@ def _run_trajectory(
         raise PhaseLockProbeError("scheduler did not construct the declared NFE")
     applied_strengths: list[float] = []
     for index, timestep in enumerate(timesteps):
-        video_sigma = schedule.video[index]
         next_video_sigma = schedule.video[index + 1]
         tf_sigma = schedule.time_frequency[index]
         next_tf_sigma = schedule.time_frequency[index + 1]
@@ -1185,11 +1170,9 @@ def _run_trajectory(
             video_state.float(),
         ).prev_sample.to(dtype)
         history_sigma = next_video_sigma.to(device=device, dtype=dtype)
-        video_state[:, :, :history_frames] = (
-            (1.0 - history_sigma) * reference[:, :, :history_frames]
-            + history_sigma
-            * prepared["initial_video"][:, :, :history_frames]
-        )
+        video_state[:, :, :history_frames] = (1.0 - history_sigma) * reference[
+            :, :, :history_frames
+        ] + history_sigma * prepared["initial_video"][:, :, :history_frames]
         tf_state = euler_flow_step(
             tf_state.float(),
             prediction.tf_velocity.float(),
@@ -1197,9 +1180,7 @@ def _run_trajectory(
             next_tf_sigma,
         ).to(dtype)
         strength = (
-            0.0
-            if motion_prior is None
-            else linear_guidance_strength(index, steps)
+            0.0 if motion_prior is None else linear_guidance_strength(index, steps)
         )
         if strength:
             video_state = apply_future_delta_guidance(
@@ -1328,8 +1309,9 @@ def _scoring_targets(model: Any, batch: Mapping[str, Any]) -> dict[str, Any]:
 
     import torch
 
-    with torch.inference_mode(), torch.autocast(
-        device_type="cuda", dtype=torch.bfloat16, enabled=True
+    with (
+        torch.inference_mode(),
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True),
     ):
         video_clean = model._encode_clip(batch["rgb"]).to(batch["rgb"].dtype)
     raw = batch["rgb"].permute(0, 2, 1, 3, 4)
@@ -1383,7 +1365,10 @@ def _endpoint_rows(
     history_frames = int(prepared["history_frames"])
     if video_final.shape != video_clean.shape:
         raise PhaseLockProbeError("generated and scoring video latent shapes differ")
-    if observed_calls != endpoint.total_transformer_calls or result["calls"] != observed_calls:
+    if (
+        observed_calls != endpoint.total_transformer_calls
+        or result["calls"] != observed_calls
+    ):
         raise PhaseLockProbeError(
             f"{endpoint.code} actual calls {observed_calls} != declared "
             f"{endpoint.total_transformer_calls}"
@@ -1436,22 +1421,18 @@ def _endpoint_rows(
                 {
                     "schema_version": SCHEMA_VERSION,
                     "kind": KIND_ROW,
-                    "registration_identity_sha256": registration[
-                        "identity_sha256"
-                    ],
-                    "tool_git_commit": registration["tool_repository"][
-                        "git_commit"
-                    ],
+                    "registration_identity_sha256": registration["identity_sha256"],
+                    "tool_git_commit": registration["tool_repository"]["git_commit"],
                     "training_git_commit": TRAINING_COMMIT,
-                    "study_identity_sha256": registration[
-                        "controlled_study"
-                    ]["study_identity_sha256"],
+                    "study_identity_sha256": registration["controlled_study"][
+                        "study_identity_sha256"
+                    ],
                     "arm_identity_sha256": registration["controlled_study"][
                         "arm_identity_sha256"
                     ],
-                    "stage_identity_sha256": registration[
-                        "controlled_study"
-                    ]["stage_identity_sha256"],
+                    "stage_identity_sha256": registration["controlled_study"][
+                        "stage_identity_sha256"
+                    ],
                     "evaluation_split": "validation",
                     "protected_test_accessed": False,
                     "clip_index": int(clip_index),
@@ -1483,9 +1464,7 @@ def _endpoint_rows(
                         "decoded_mse_unit_range": decoded_metrics[
                             "decoded_mse_unit_range"
                         ][offset],
-                        "decoded_psnr_db": decoded_metrics["decoded_psnr_db"][
-                            offset
-                        ],
+                        "decoded_psnr_db": decoded_metrics["decoded_psnr_db"][offset],
                         "decoded_temporal_difference_mse_unit_range": (
                             decoded_metrics[
                                 "decoded_temporal_difference_mse_unit_range"
@@ -1543,8 +1522,7 @@ def _validate_global_rows(
             raise PhaseLockProbeError("quality row endpoint differs from fixed grid")
         if (
             row.get("clip_id") != descriptors[clip_index].get("clip_id")
-            or row.get("sampling_id")
-            != VALIDATION_SAMPLE_ID_OFFSET + clip_index
+            or row.get("sampling_id") != VALIDATION_SAMPLE_ID_OFFSET + clip_index
             or row.get("actual_transformer_call_count")
             != endpoint.total_transformer_calls
         ):
@@ -1573,8 +1551,8 @@ def _validate_global_rows(
         observed[key] = row
     if set(observed) != expected:
         raise PhaseLockProbeError(
-            f"quality inventory differs: missing={len(expected-set(observed))}, "
-            f"extra={len(set(observed)-expected)}"
+            f"quality inventory differs: missing={len(expected - set(observed))}, "
+            f"extra={len(set(observed) - expected)}"
         )
     pairing_fields = (
         "cached_rgb_input_sha256",
@@ -1609,25 +1587,22 @@ def _validate_global_rows(
                 "preliminary_final_video_sha256",
                 "extracted_motion_prior_sha256",
             ):
-                if aligned["tensor_sha256"].get(field) != shuffled[
-                    "tensor_sha256"
-                ].get(field):
+                if aligned["tensor_sha256"].get(field) != shuffled["tensor_sha256"].get(
+                    field
+                ):
                     raise PhaseLockProbeError(
                         f"preliminary prior changed across control: {candidate}"
                     )
-            if aligned["tensor_sha256"].get(
-                "applied_motion_prior_sha256"
-            ) != aligned["tensor_sha256"].get(
-                "extracted_motion_prior_sha256"
-            ):
+            if aligned["tensor_sha256"].get("applied_motion_prior_sha256") != aligned[
+                "tensor_sha256"
+            ].get("extracted_motion_prior_sha256"):
                 raise PhaseLockProbeError(
                     f"aligned prior is not the sample's extracted prior: {candidate}"
                 )
-            if (
-                aligned.get("motion_prior_donor_sampling_id")
-                != aligned.get("sampling_id")
-                or shuffled.get("motion_prior_donor_sampling_id")
-                == shuffled.get("sampling_id")
+            if aligned.get("motion_prior_donor_sampling_id") != aligned.get(
+                "sampling_id"
+            ) or shuffled.get("motion_prior_donor_sampling_id") == shuffled.get(
+                "sampling_id"
             ):
                 raise PhaseLockProbeError(
                     f"motion-prior donor identity is invalid: {candidate}"
@@ -1640,9 +1615,7 @@ def _validate_global_rows(
                 aligned.get("guidance_strengths") != expected_strengths
                 or shuffled.get("guidance_strengths") != expected_strengths
             ):
-                raise PhaseLockProbeError(
-                    f"guidance schedule changed for {candidate}"
-                )
+                raise PhaseLockProbeError(f"guidance schedule changed for {candidate}")
             donor_sampling_id = shuffled["motion_prior_donor_sampling_id"]
             donor_clip_index = int(donor_sampling_id) - VALIDATION_SAMPLE_ID_OFFSET
             if not 0 <= donor_clip_index < EXPECTED_VALIDATION_CLIPS:
@@ -1650,11 +1623,9 @@ def _validate_global_rows(
                     f"shuffled donor is outside validation: {candidate}"
                 )
             donor = observed[(donor_clip_index, aligned_code)]
-            if shuffled["tensor_sha256"].get(
-                "applied_motion_prior_sha256"
-            ) != donor["tensor_sha256"].get(
-                "extracted_motion_prior_sha256"
-            ):
+            if shuffled["tensor_sha256"].get("applied_motion_prior_sha256") != donor[
+                "tensor_sha256"
+            ].get("extracted_motion_prior_sha256"):
                 raise PhaseLockProbeError(
                     f"shuffled prior hash does not match its donor: {candidate}"
                 )
@@ -1713,13 +1684,17 @@ def command_evaluate(args: argparse.Namespace) -> int:
     output_root = Path(registration["output_root"])
     expected_output = output_root / "evaluation"
     if args.output_dir.expanduser().absolute() != expected_output:
-        raise PhaseLockProbeError(f"evaluation output must be exactly {expected_output}")
+        raise PhaseLockProbeError(
+            f"evaluation output must be exactly {expected_output}"
+        )
     assigned = _expected_rank_indexes(rank, world_size)
     if len(assigned) % EXPECTED_BATCH_SIZE_PER_RANK:
         raise PhaseLockProbeError("rank shard is not divisible by the fixed batch size")
     if rank == 0:
         if expected_output.exists():
-            raise PhaseLockProbeError(f"fresh evaluation output exists: {expected_output}")
+            raise PhaseLockProbeError(
+                f"fresh evaluation output exists: {expected_output}"
+            )
         expected_output.mkdir(parents=True, mode=0o700)
     dist.barrier()
     model, dataset, _config = _load_model_and_dataset(
@@ -1753,8 +1728,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 str(validated["descriptors"][index]["clip_id"])
                 for index in clip_indexes
             ]
-            with torch.inference_mode(), torch.autocast(
-                device_type="cuda", dtype=torch.bfloat16, enabled=True
+            with (
+                torch.inference_mode(),
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True),
             ):
                 prepared = _prepare_deployable_rollout(
                     model,
@@ -1765,9 +1741,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 )
                 for endpoint in ENDPOINTS:
                     hook_calls = 0
-                    result = run_endpoint(
-                        model, prepared, endpoint, sampling_ids
-                    )
+                    result = run_endpoint(model, prepared, endpoint, sampling_ids)
                     observed_calls = hook_calls
                     decoded = model.rgb_tokenizer.decode_temporal(
                         result["video"],
@@ -1775,9 +1749,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                     )
                     decoded_uint8 = (
                         (
-                            decoded[:, :, -FUTURE_RGB_FRAMES:]
-                            .float()
-                            .clamp(-1.0, 1.0)
+                            decoded[:, :, -FUTURE_RGB_FRAMES:].float().clamp(-1.0, 1.0)
                             + 1.0
                         )
                         .mul(127.5)
@@ -1861,8 +1833,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
             content = source_rows.read_bytes()
             if (
                 len(content) != manifest["rows"]["bytes"]
-                or hashlib.sha256(content).hexdigest()
-                != manifest["rows"]["sha256"]
+                or hashlib.sha256(content).hexdigest() != manifest["rows"]["sha256"]
             ):
                 raise PhaseLockProbeError(f"rank {source_rank} rows changed")
             for line in content.splitlines():

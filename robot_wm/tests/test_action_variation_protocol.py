@@ -10,7 +10,7 @@ import pytest
 
 from tools import action_variation_evaluate as evaluation
 from tools import action_variation_screen as screen
-from tools.analyze_action_variation import _effect_gate
+from tools.analyze_action_variation import _effect_gate, paired_interaction_effect
 
 
 def _hash(label: str) -> str:
@@ -20,6 +20,7 @@ def _hash(label: str) -> str:
 def _registration() -> dict:
     return {
         "identity_sha256": "r" * 64,
+        "tool_repository": {"git_commit": "c" * 40},
         "validation_descriptors": [
             {"clip_id": f"clip-{index}", "episode_dir": f"episode-{index}"}
             for index in range(64)
@@ -92,6 +93,7 @@ def _row(index: int, endpoint: screen.Endpoint, arm: screen.Arm) -> dict:
                 "decode": 3.0,
                 "total": 6.0,
             },
+            "evaluator_only_action_control_probe_ms": 0.25,
             "metrics": {
                 "video_future_nmse": 1.0,
                 "video_future_temporal_delta_nmse": 1.0,
@@ -119,6 +121,7 @@ def test_endpoint_grid_has_aligned_quality_and_zero_global_shuffle_attribution()
         "aligned_nfe_4",
         "zero_nfe_1",
         "global_shuffled_nfe_1",
+        "aligned_residual_masked_nfe_1",
     ]
     assert screen.fixed_protocol()["protected_test_access_allowed"] is False
     assert screen.fixed_protocol()["future_rgb_or_feature_allowed_at_sampling"] is False
@@ -171,6 +174,25 @@ def test_decision_gate_requires_primary_bound_and_guardrails():
         "one_sided_simultaneous_lower_bound": {"low": 0.009},
     }
     assert not _effect_gate(failing, primary_minimum=0.01)["passed"]
+
+
+def test_difference_in_differences_rejects_generic_candidate_gain():
+    control_aligned = [1.0] * 64
+    control_diagnostic = [1.1] * 64
+    candidate_aligned = [0.98] * 64
+    # Same two-percent generic gain at both endpoints: candidate retains only
+    # the inherited control action gap, so incremental specificity is zero.
+    candidate_diagnostic = [1.08] * 64
+    effect = paired_interaction_effect(
+        candidate_aligned,
+        candidate_diagnostic,
+        control_aligned,
+        control_diagnostic,
+        label="generic-gain",
+        contrast_count=6,
+    )
+    assert abs(effect["relative_improvement"]) < 1e-12
+    assert effect["one_sided_simultaneous_lower_bound"]["low"] < 0.005
 
 
 def test_cli_has_no_test_or_feature_target_argument():

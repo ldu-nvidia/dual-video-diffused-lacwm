@@ -13,7 +13,6 @@ import torch
 
 from robot_wm.utils.trainer import Trainer
 
-
 PARENT_SNAPSHOT_SHA256 = (
     "f67c7bae50c4c279bf6372e098833be32699aca24232d7d489a1f7a45b5a8e21"
 )
@@ -48,6 +47,25 @@ def _exclusive_json(path: Path, payload: Mapping[str, Any]) -> None:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _load_parent_state_exact(
+    model: torch.nn.Module,
+    parent_state: Mapping[str, torch.Tensor],
+    new_keys: set[str],
+) -> None:
+    """Load a parent once and prove every overlapping tensor is exact."""
+
+    incompatible = model.load_state_dict(parent_state, strict=False)
+    if set(incompatible.missing_keys) != new_keys or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "strict parent load must miss exactly the new action residual state"
+        )
+    loaded_parent = {
+        key: value for key, value in model.state_dict().items() if key in parent_state
+    }
+    if _state_sha256(loaded_parent) != _state_sha256(parent_state):
+        raise RuntimeError("loaded parent tensors differ from the validated snapshot")
 
 
 class ActionVariationTrainer(Trainer):
@@ -113,6 +131,7 @@ class ActionVariationTrainer(Trainer):
         if (
             int(config.get("max_iter", -1)) != 200
             or config.get("transition_handoff_path") is not None
+            or bool(config.get("share_spatial_attention", False))
         ):
             raise RuntimeError("screen fixes a 200-update model-only continuation")
         module = model
@@ -126,9 +145,18 @@ class ActionVariationTrainer(Trainer):
             key: value for key, value in model_state.items() if key in new_keys
         }
         initial_adapter_sha256 = _state_sha256(adapter_state)
+        _load_parent_state_exact(model, parent_state, new_keys)
         del snapshot, parent_state, model_state, adapter_state
 
-        super().__init__(*args, **kwargs)
+        # The base trainer's historical helper reopens the checkpoint and loads
+        # with strict=False.  Suppress that second read: the exact parent state
+        # has already been loaded and audited above, before DDP/optimizer setup.
+        original_load_path = config.get("load_path")
+        config["load_path"] = None
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            config["load_path"] = original_load_path
         if (
             self.resumed
             or self.transitioned
