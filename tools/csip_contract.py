@@ -224,6 +224,24 @@ def clean_source(repo: str | Path, expected_commit: str) -> dict[str, Any]:
     }
 
 
+def clean_pinned_checkout(
+    path: str | Path, *, label: str, expected_commit: str
+) -> dict[str, str]:
+    """Bind a non-symlinked Git checkout to its exact clean commit and tree."""
+
+    value = canonical_directory(path, label)
+    if COMMIT_RE.fullmatch(expected_commit) is None:
+        raise CSIPContractError(f"{label} expected commit is malformed")
+    if git_output(value, "rev-parse", "HEAD") != expected_commit:
+        raise CSIPContractError(f"{label} commit changed")
+    if git_output(value, "status", "--porcelain", "--untracked-files=all"):
+        raise CSIPContractError(f"{label} checkout is dirty")
+    tree = git_output(value, "rev-parse", "HEAD^{tree}")
+    if COMMIT_RE.fullmatch(tree) is None:
+        raise CSIPContractError(f"{label} tree identity is malformed")
+    return {"path": str(value), "git_commit": expected_commit, "git_tree": tree}
+
+
 def executable_record(path: str | Path) -> dict[str, Any]:
     launcher = Path(path).expanduser()
     if (
@@ -408,12 +426,12 @@ def runtime_record(
             "registration must run under the same Python it binds with --python"
         )
     wan = canonical_directory(wan_dir, "Wan model directory")
-    videox = canonical_directory(videox_home, "VideoX checkout")
-    commit = git_output(videox, "rev-parse", "HEAD")
-    if commit != EXPECTED_VIDEOX_COMMIT or git_output(
-        videox, "status", "--porcelain", "--untracked-files=all"
-    ):
-        raise CSIPContractError("VideoX runtime must be a clean commit")
+    videox_record = clean_pinned_checkout(
+        videox_home,
+        label="VideoX checkout",
+        expected_commit=EXPECTED_VIDEOX_COMMIT,
+    )
+    videox = Path(videox_record["path"])
     try:
         from omegaconf import OmegaConf
     except ImportError as exc:
@@ -431,7 +449,8 @@ def runtime_record(
         "python": python_record,
         "wan_dir": str(wan),
         "videox_home": str(videox),
-        "videox_git_commit": commit,
+        "videox_git_commit": videox_record["git_commit"],
+        "videox_git_tree": videox_record["git_tree"],
         "wan_config": config_record,
         "wan_vae": file_record(weights, "Wan VAE weights"),
         "world_size": EXPECTED_WORLD_SIZE,
@@ -501,12 +520,26 @@ def validate_registration(
         or launcher.resolve(strict=True) != Path(runtime["python"]["path"])
     ):
         raise CSIPContractError("registered Python launcher target changed")
+    videox = clean_pinned_checkout(
+        str(runtime.get("videox_home", "")),
+        label="registered VideoX checkout",
+        expected_commit=EXPECTED_VIDEOX_COMMIT,
+    )
+    if videox["git_commit"] != runtime.get("videox_git_commit") or videox[
+        "git_tree"
+    ] != runtime.get("videox_git_tree"):
+        raise CSIPContractError("registered VideoX checkout identity changed")
+    wan = canonical_directory(str(runtime.get("wan_dir", "")), "registered Wan root")
     if (
-        git_output(Path(str(runtime["videox_home"])), "rev-parse", "HEAD")
-        != runtime.get("videox_git_commit")
-        or runtime.get("videox_git_commit") != EXPECTED_VIDEOX_COMMIT
+        str(wan) != runtime.get("wan_dir")
+        or runtime.get("world_size") != EXPECTED_WORLD_SIZE
     ):
-        raise CSIPContractError("registered VideoX commit changed")
+        raise CSIPContractError("registered Wan/runtime geometry changed")
+    config_path = Path(str(runtime["wan_config"].get("path", "")))
+    weights_path = Path(str(runtime["wan_vae"].get("path", "")))
+    videox_path = Path(videox["path"])
+    if videox_path not in config_path.parents or wan not in weights_path.parents:
+        raise CSIPContractError("registered Wan config/weights escaped their roots")
     required = []
     if require_train_cache:
         required.append("train")
@@ -641,6 +674,7 @@ def validate_checkpoint_payload(
     fit = payload.get("fit_indexes")
     calibration = payload.get("calibration_indexes")
     pca = payload.get("action_pca")
+    model_states = payload.get("model_states")
     calibration_metrics = payload.get("calibration_metrics")
     if (
         payload.get("schema_version") != SCHEMA_VERSION
@@ -656,6 +690,8 @@ def validate_checkpoint_payload(
         or payload.get("model_hidden_dim") != 256
         or payload.get("spectral_feature_dim") != SPECTRAL_FEATURE_DIM
         or payload.get("action_target_dim") != ACTION_TARGET_DIM
+        or payload.get("feature_variants") != ["full", "magnitude_only"]
+        or payload.get("paired_initialization") != "identical_state_before_update_1"
         or payload.get("wandb_run_id") != registration.get("wandb", {}).get("run_id")
         or payload.get("validation_clips_read") != 0
         or payload.get("protected_test_clips_read") != 0
@@ -674,8 +710,36 @@ def validate_checkpoint_payload(
         or not isinstance(pca.get("score_scale"), torch.Tensor)
         or tuple(pca["score_scale"].shape) != (ACTION_TARGET_DIM,)
         or not all(torch.isfinite(value).all().item() for value in pca.values())
+        or not isinstance(model_states, Mapping)
+        or set(model_states) != {"full", "magnitude_only"}
+        or any(
+            not isinstance(state, Mapping)
+            or not state
+            or any(
+                not isinstance(value, torch.Tensor)
+                or not torch.isfinite(value).all().item()
+                for value in state.values()
+            )
+            for state in model_states.values()
+        )
         or not isinstance(calibration_metrics, Mapping)
         or set(calibration_metrics) != {"0", "100", "200", "300", "400"}
+        or any(
+            not isinstance(update_metrics, Mapping)
+            or set(update_metrics) != {"full", "magnitude_only"}
+            or any(
+                not isinstance(metrics, Mapping)
+                or set(metrics) != {"mse", "cosine"}
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not torch.isfinite(torch.tensor(float(value))).item()
+                    for value in metrics.values()
+                )
+                for metrics in update_metrics.values()
+            )
+            for update_metrics in calibration_metrics.values()
+        )
     ):
         raise CSIPContractError("CSIP fixed checkpoint payload differs")
 

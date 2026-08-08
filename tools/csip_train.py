@@ -27,6 +27,7 @@ from robot_wm.modeling.dual_diffusion.causal_spectral_probe import (  # noqa: E4
     action_descriptor,
     causal_spectral_features,
     fit_action_pca,
+    magnitude_only_spectral_features,
     phase0_partition_indexes,
 )
 from tools import csip_contract as contract  # noqa: E402
@@ -134,6 +135,9 @@ def _initialize_wandb(registration: dict[str, Any]) -> tuple[Any, Any]:
             "learning_rate": 3e-4,
             "weight_decay": 1e-4,
             "seed": contract.EXPECTED_SEED,
+            "feature_variants": ["full", "magnitude_only"],
+            "paired_initialization": "identical_state_before_update_1",
+            "phase_coordinates_zeroed_for_magnitude_only": True,
             "validation_clips_read": 0,
             "protected_test_clips_read": 0,
         },
@@ -196,9 +200,10 @@ def command_train(args: argparse.Namespace) -> int:
     torch.cuda.manual_seed_all(contract.EXPECTED_SEED)
     torch.use_deterministic_algorithms(True)
 
-    features = _extract_features(full, history, device)
-    if tuple(features.shape) != (512, 9216):
+    full_features = _extract_features(full, history, device)
+    if tuple(full_features.shape) != (512, 9216):
         raise contract.CSIPContractError("training spectral feature geometry differs")
+    magnitude_features = magnitude_only_spectral_features(full_features)
     actions = torch.from_numpy(np.array(actions_np, copy=True)).float()
     fit_indexes = torch.tensor(phase0_partition_indexes(512, "fit"), dtype=torch.long)
     calibration_indexes = torch.tensor(
@@ -206,26 +211,45 @@ def command_train(args: argparse.Namespace) -> int:
     )
     pca = fit_action_pca(action_descriptor(actions[fit_indexes]))
     targets = pca.transform_actions(actions)
-    fit_features = features[fit_indexes].to(device)
+    fit_features = {
+        "full": full_features[fit_indexes].to(device),
+        "magnitude_only": magnitude_features[fit_indexes].to(device),
+    }
     fit_targets = targets[fit_indexes].to(device)
-    calibration_features = features[calibration_indexes].to(device)
+    calibration_features = {
+        "full": full_features[calibration_indexes].to(device),
+        "magnitude_only": magnitude_features[calibration_indexes].to(device),
+    }
     calibration_targets = targets[calibration_indexes].to(device)
 
-    model = FrozenCausalSpectralProbe().to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    models = {
+        "full": FrozenCausalSpectralProbe().to(device),
+        "magnitude_only": FrozenCausalSpectralProbe().to(device),
+    }
+    # Freeze a genuinely matched comparison: identical initialization, batch
+    # order, optimizer, update count, target, and architecture.  Only the
+    # phase-bearing input coordinates differ.
+    models["magnitude_only"].load_state_dict(models["full"].state_dict(), strict=True)
+    optimizers = {
+        name: torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+        for name, model in models.items()
+    }
     generator = torch.Generator(device="cpu").manual_seed(contract.EXPECTED_SEED)
     calibration: dict[str, Any] = {}
     wandb, run = _initialize_wandb(registration)
     try:
-        model.eval()
+        for model in models.values():
+            model.eval()
         with torch.inference_mode():
-            calibration["0"] = _metrics(
-                model(calibration_features), calibration_targets
-            )
+            calibration["0"] = {
+                name: _metrics(model(calibration_features[name]), calibration_targets)
+                for name, model in models.items()
+            }
         wandb.log(
             {
-                "calibration/mse": calibration["0"]["mse"],
-                "calibration/cosine": calibration["0"]["cosine"],
+                f"calibration/{name}/{metric}": value
+                for name, values in calibration["0"].items()
+                for metric, value in values.items()
             },
             step=0,
         )
@@ -237,33 +261,53 @@ def command_train(args: argparse.Namespace) -> int:
                 cursor = 0
             batch_indexes = permutation[cursor : cursor + contract.EXPECTED_BATCH_SIZE]
             cursor += contract.EXPECTED_BATCH_SIZE
-            model.train()
-            optimizer.zero_grad(set_to_none=True)
-            prediction = model(fit_features[batch_indexes.to(device)])
             target = fit_targets[batch_indexes.to(device)]
-            loss = torch.nn.functional.mse_loss(prediction, target)
-            if not bool(torch.isfinite(loss)):
-                raise FloatingPointError("CSIP fit loss became non-finite")
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            wandb.log({"fit/mse": float(loss.item())}, step=update)
+            losses: dict[str, float] = {}
+            for name, model in models.items():
+                model.train()
+                optimizer = optimizers[name]
+                optimizer.zero_grad(set_to_none=True)
+                prediction = model(fit_features[name][batch_indexes.to(device)])
+                loss = torch.nn.functional.mse_loss(prediction, target)
+                if not bool(torch.isfinite(loss)):
+                    raise FloatingPointError(f"CSIP {name} fit loss became non-finite")
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                losses[name] = float(loss.item())
+            wandb.log(
+                {f"fit/{name}/mse": value for name, value in losses.items()},
+                step=update,
+            )
             if update in CALIBRATION_UPDATES:
-                model.eval()
+                for model in models.values():
+                    model.eval()
                 with torch.inference_mode():
-                    metrics = _metrics(model(calibration_features), calibration_targets)
+                    metrics = {
+                        name: _metrics(
+                            model(calibration_features[name]), calibration_targets
+                        )
+                        for name, model in models.items()
+                    }
                 calibration[str(update)] = metrics
                 wandb.log(
                     {
-                        "calibration/mse": metrics["mse"],
-                        "calibration/cosine": metrics["cosine"],
+                        f"calibration/{name}/{metric}": value
+                        for name, values in metrics.items()
+                        for metric, value in values.items()
                     },
                     step=update,
                 )
-        model.eval()
+        for model in models.values():
+            model.eval()
         with torch.inference_mode():
-            fit_metrics = _metrics(model(fit_features), fit_targets)
-        parameter_count = sum(parameter.numel() for parameter in model.parameters())
+            fit_metrics = {
+                name: _metrics(model(fit_features[name]), fit_targets)
+                for name, model in models.items()
+            }
+        parameter_count_per_probe = sum(
+            parameter.numel() for parameter in models["full"].parameters()
+        )
         checkpoint = {
             "schema_version": contract.SCHEMA_VERSION,
             "kind": contract.CHECKPOINT_KIND,
@@ -276,10 +320,18 @@ def command_train(args: argparse.Namespace) -> int:
             "fit_indexes": fit_indexes,
             "calibration_indexes": calibration_indexes,
             "action_pca": pca.state_dict(),
-            "model_state": {
-                key: value.detach().cpu() for key, value in model.state_dict().items()
+            "model_states": {
+                name: {
+                    key: value.detach().cpu()
+                    for key, value in model.state_dict().items()
+                }
+                for name, model in models.items()
             },
-            "optimizer_state": optimizer.state_dict(),
+            "optimizer_states": {
+                name: optimizer.state_dict() for name, optimizer in optimizers.items()
+            },
+            "feature_variants": ["full", "magnitude_only"],
+            "paired_initialization": "identical_state_before_update_1",
             "model_hidden_dim": 256,
             "spectral_feature_dim": 9216,
             "action_target_dim": 16,
@@ -313,7 +365,10 @@ def command_train(args: argparse.Namespace) -> int:
                 "calibration_clips": 64,
                 "fit_metrics": fit_metrics,
                 "calibration_metrics": calibration,
-                "parameter_count": parameter_count,
+                "parameter_count_per_probe": parameter_count_per_probe,
+                "total_trainable_parameter_count": 2 * parameter_count_per_probe,
+                "feature_variants": ["full", "magnitude_only"],
+                "paired_initialization": "identical_state_before_update_1",
                 "wandb": {
                     "entity": contract.EXPECTED_ENTITY,
                     "project": contract.EXPECTED_PROJECT,
@@ -328,8 +383,9 @@ def command_train(args: argparse.Namespace) -> int:
         contract.exclusive_json(report_path, report)
         run.summary["checkpoint_sha256"] = checkpoint_sha256
         run.summary["fixed_update"] = contract.EXPECTED_UPDATES
-        run.summary["fit_mse"] = fit_metrics["mse"]
-        run.summary["calibration_mse"] = calibration["400"]["mse"]
+        for name in models:
+            run.summary[f"fit_{name}_mse"] = fit_metrics[name]["mse"]
+            run.summary[f"calibration_{name}_mse"] = calibration["400"][name]["mse"]
         print(
             json.dumps(
                 {

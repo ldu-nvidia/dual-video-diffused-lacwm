@@ -51,6 +51,10 @@ def _protocol_records() -> dict[str, Any]:
         "tools/csip_train.py",
         "tools/csip_evaluate.py",
         "tools/csip_analyze.py",
+        "tools/env/activate_b200.sh",
+        "tools/env/verify_b200_runtime.py",
+        "tools/slurm/csip_phase0_stage.sbatch",
+        "tools/slurm/submit_csip_phase0.sh",
     )
     return {
         relative: contract.file_record(REPO_ROOT / relative, relative)
@@ -135,6 +139,16 @@ def command_register(args: argparse.Namespace) -> int:
                 ],
                 "relative_energy_floor": 1e-3,
                 "feature_dim": 9216,
+                "phase_comparator": (
+                    "matched_9216_input_with_all_phase_coordinates_zeroed"
+                ),
+                "vae_view_boundary": (
+                    "fft_is_per_view_after_established_width_stacked_wan_encoding;"
+                    "vae_itself_is_not_claimed_seam_independent"
+                ),
+                "phase_increment_mask_scale": (
+                    "one_rms_shared_across_the_two_motion_tokens_per_sample_view_channel"
+                ),
             },
             "action_target": {
                 "source": "train_actions_only",
@@ -155,6 +169,8 @@ def command_register(args: argparse.Namespace) -> int:
                 "weight_decay": 1e-4,
                 "seed": contract.EXPECTED_SEED,
                 "checkpoint_selection": "fixed_final_update_not_metric_selected",
+                "feature_variants": ["full", "magnitude_only"],
+                "paired_initialization": "identical_state_before_update_1",
             },
             "evaluation": {
                 "sealed_validation_clips": 64,
@@ -167,7 +183,23 @@ def command_register(args: argparse.Namespace) -> int:
                 "bootstrap_replicates": contract.BOOTSTRAP_REPLICATES,
                 "bootstrap_seed": contract.BOOTSTRAP_SEED,
                 "familywise_alpha": 0.05,
-                "gate": "aligned_mse_and_cosine_better_than_each_of_three_controls",
+                "family_cells": 8,
+                "gate": (
+                    "full_probe_beats_three_target_controls_and_matched_"
+                    "magnitude_only_under_fixed_practical_effect_thresholds"
+                ),
+                "control_thresholds": {
+                    "relative_mse_point": 0.05,
+                    "relative_mse_lower_bound": 0.01,
+                    "cosine_point": 0.05,
+                    "cosine_lower_bound": 0.01,
+                },
+                "phase_contribution_thresholds": {
+                    "relative_mse_point": 0.03,
+                    "relative_mse_lower_bound": 0.01,
+                    "cosine_point": 0.02,
+                    "cosine_lower_bound": 0.005,
+                },
             },
             "wandb": {
                 **wandb,
@@ -256,6 +288,8 @@ def command_seal(args: argparse.Namespace) -> int:
         or report.get("checkpoint_sha256") != checkpoint_record["sha256"]
         or report.get("completed_updates") != contract.EXPECTED_UPDATES
         or report.get("selection_rule") != "fixed_final_update_not_metric_selected"
+        or report.get("feature_variants") != ["full", "magnitude_only"]
+        or report.get("paired_initialization") != "identical_state_before_update_1"
         or report.get("wandb", {}).get("run_id") != registration["wandb"]["run_id"]
         or report.get("wandb", {}).get("group") is not None
         or report.get("validation_clips_read") != 0

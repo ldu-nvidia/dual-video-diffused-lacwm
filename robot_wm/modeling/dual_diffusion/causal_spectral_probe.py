@@ -59,6 +59,13 @@ SPECTRAL_FEATURE_DIM = (
         + 2 * (FUTURE_TOKENS - 1) * SPECTRAL_HEIGHT * SPECTRAL_WIDTH
     )
 )
+# The flattened representation is ordered as volume log magnitude, volume
+# unit-phase real/imaginary, and phase-increment real/imaginary.  The matched
+# magnitude-only comparator deliberately keeps the full 9,216-input model
+# geometry while zeroing every phase-bearing coordinate.
+VOLUME_MAGNITUDE_FEATURE_DIM = (
+    NUM_VIEWS * WAN_CHANNELS * FUTURE_TOKENS * SPECTRAL_HEIGHT * SPECTRAL_WIDTH
+)
 
 
 class CSIPContractError(RuntimeError):
@@ -229,6 +236,17 @@ def causal_spectral_features(
     if not bool(torch.isfinite(flat).all()):
         raise FloatingPointError("CSIP representation contains non-finite values")
     return flat
+
+
+def magnitude_only_spectral_features(features: Tensor) -> Tensor:
+    """Zero phase coordinates while preserving the fixed ``[B,9216]`` shape."""
+
+    if features.ndim != 2 or features.shape[1] != SPECTRAL_FEATURE_DIM:
+        raise ValueError(f"features must have shape [B,{SPECTRAL_FEATURE_DIM}]")
+    _finite_float(features, "features")
+    result = features.clone()
+    result[:, VOLUME_MAGNITUDE_FEATURE_DIM:] = 0
+    return result
 
 
 def action_descriptor(actions: Tensor) -> Tensor:

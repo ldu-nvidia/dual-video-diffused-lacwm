@@ -1,9 +1,11 @@
 # CSIP Phase-0 execution runbook
 
-This runbook is prepared but has not been executed. It contains no Slurm
-submission helper on purpose: commands are rendered for independent review,
-then the reviewer may wrap them in the cluster's approved scheduler template.
-Do not launch while another eight-B200 study owns the intended allocation.
+This runbook is prepared but has not been executed. The reviewed launcher uses
+two non-requeueable one-node/eight-B200 jobs with an `afterok` dependency: the
+first extracts train latents, fits both matched probes, and seals update 400;
+the second opens val64 only after that seal, then evaluates and analyzes. Do not
+launch while another eight-B200 study owns the intended allocation unless its
+numeric job ID is explicitly included in the exact active-job allowlist.
 
 ## Pinned cluster paths
 
@@ -85,7 +87,7 @@ mkdir -p "$PARENT"
 There is deliberately no test argument. Preserve the registration stdout and
 file hash in the launch-review record.
 
-## 4. Render, review, then execute the train-only stages
+## 4. Render and review the train-only and sealed-validation stages
 
 ```bash
 "$PY" "$REPO/tools/csip_workflow.py" render --registration "$REG" \
@@ -94,13 +96,32 @@ file hash in the launch-review record.
 
 Because study files are immutable outputs, writing the review capture inside
 the study is optional operational evidence and is not consumed by any tool.
-The rendered train extraction uses eight ranks. Submit it through an approved
-one-node/eight-B200 allocation; do not run it on a login node.
+Review both the rendered commands and
+`tools/slurm/csip_phase0_stage.sbatch`. The stage entrypoint revalidates the
+exact clean registered source and VideoX checkouts, registered Python, complete
+B200 environment, output freshness, and non-requeue state before reading data.
 
-Execute only `extract_train`, then `train`. Train extraction writes 512 full
-and independent-history Wan latents in eight content-hashed shards. Training
-opens only those train shards and raw train actions. It refuses to run if a
-validation latent cache exists.
+Dry-run the dependency-safe submitter first. It changes no directory or job:
+
+```bash
+"$REPO/tools/slurm/submit_csip_phase0.sh" \
+  --registration "$REG" \
+  --expected-commit "$FINAL_COMMIT" \
+  --python "$PY"
+```
+
+Immediately before execution, enumerate `squeue -u "$USER"`. Repeat
+`--allow-active-job-id ID` for every and only currently active base allocation
+that is safe to coexist; the execute gate requires exact set equality. Then add
+`--execute`. The launcher submits train and validation as separate jobs and
+passes `--dependency=afterok:<train-job-id>` plus
+`--kill-on-invalid-dep=yes` to the validation job. It never stops another job.
+
+Train extraction writes 512 full and independent-history Wan latents in eight
+content-hashed shards. Training opens only those train shards and raw train
+actions. It refuses to run if a validation latent cache exists. Both the full
+and matched magnitude-only probes use the same initialization, batches,
+targets, optimizers, and 400-update endpoint.
 
 Expected durable training outputs are:
 
@@ -110,12 +131,14 @@ $STUDY/training/report.json
 $STUDY/wandb/
 ```
 
-Do not select an earlier update from cal64. Preserve W&B local state even if
-upload finalization is incomplete.
+The checkpoint contains `full` and `magnitude_only` model states. Do not select
+an earlier update from cal64. Preserve W&B local state even if upload
+finalization is incomplete.
 
-## 5. Seal the fixed checkpoint before opening val64
+## 5. Verify the fixed checkpoint seal before val64 opens
 
-Run the rendered `seal` command. It must report fixed update 400,
+The train Slurm stage runs the rendered `seal` operation only after both probe
+fits return successfully. It must report fixed update 400,
 `validation_clips_read=0`, and `protected_test_clips_read=0` in both checkpoint
 and report. The resulting immutable boundary is:
 
@@ -127,31 +150,37 @@ Do not create or substitute a checkpoint after this point.
 
 ## 6. Extract sealed validation latents and evaluate
 
-Only after the seal exists, execute the rendered validation extraction under
-the same eight-B200 runtime. The command includes `--seal`; without it the tool
-fails before opening validation RGB. Then execute the rendered `evaluate`
-command. It writes exactly one val64 result:
+Only after the seal exists and the train allocation exits successfully does
+Slurm release the dependent validation stage. It executes the rendered
+validation extraction under the same exact eight-B200 runtime. The command
+includes `--seal`; without it the tool fails before opening validation RGB.
+It then executes the rendered `evaluate` command and writes exactly one val64
+result:
 
 ```text
 $STUDY/evaluation/val64.json
 ```
 
 Check that the donor audit reports zero self donors and zero same-episode
-donors. Do not inspect or iterate on condition metrics before running the
+donors. The sealed result contains both matched probe predictions and all four
+targets. Do not inspect or iterate on condition metrics before running the
 preregistered analysis.
 
 ## 7. Apply the one-shot gate
 
-Execute the rendered `analyze` command. It writes:
+The validation stage executes the rendered `analyze` command only after sealed
+evaluation returns successfully. It writes:
 
 ```text
 $STUDY/analysis/bootstrap-gate.json
 ```
 
-Report all six point effects and simultaneous lower bounds, not only passing
-cells. A pass is probe feasibility only. A fail ends the CSIP generator path
-for this representation and seed; no post-hoc checkpoint, crop, phase mask,
-target dimension, control, or bootstrap change is permitted.
+Report all eight point effects, simultaneous lower bounds, and fixed practical
+thresholds, not only passing cells. A pass is probe feasibility only. A fail
+ends the CSIP generator path for this representation and seed; no post-hoc
+checkpoint, crop, phase mask, target dimension, control, threshold, or
+bootstrap change is permitted.
 
 No command in this runbook pushes a branch, registers a model artifact in an
-external registry, edits a generator, or submits a job automatically.
+external registry, or edits a generator. The submit helper is read-only by
+default and submits jobs only with the explicit `--execute` flag.

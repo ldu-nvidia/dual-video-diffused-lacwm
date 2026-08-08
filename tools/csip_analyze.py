@@ -24,8 +24,25 @@ from tools.csip_workflow import validate_seal  # noqa: E402
 
 CONTROLS = ("episode_disjoint_cyclic_shuffled", "zero", "inverse")
 METRICS = ("mse", "cosine")
-FAMILY_CELLS = len(CONTROLS) * len(METRICS)
+PROBES = ("full", "magnitude_only")
+FAMILY_CELLS = len(CONTROLS) * len(METRICS) + len(METRICS)
 FAMILYWISE_ALPHA = 0.05
+CONTROL_THRESHOLDS = {
+    "mse": {"minimum_point": 0.05, "minimum_lower_bound": 0.01, "relative": True},
+    "cosine": {
+        "minimum_point": 0.05,
+        "minimum_lower_bound": 0.01,
+        "relative": False,
+    },
+}
+PHASE_THRESHOLDS = {
+    "mse": {"minimum_point": 0.03, "minimum_lower_bound": 0.01, "relative": True},
+    "cosine": {
+        "minimum_point": 0.02,
+        "minimum_lower_bound": 0.005,
+        "relative": False,
+    },
+}
 
 
 def paired_effect(
@@ -34,6 +51,9 @@ def paired_effect(
     *,
     metric: str,
     bootstrap_indexes: np.ndarray,
+    minimum_point: float = 0.0,
+    minimum_lower_bound: float = 0.0,
+    relative: bool | None = None,
 ) -> dict[str, Any]:
     if (
         aligned.shape != (64,)
@@ -44,32 +64,59 @@ def paired_effect(
         or metric not in METRICS
     ):
         raise contract.CSIPContractError("paired CSIP effect inputs differ")
+    if relative is None:
+        relative = metric == "mse"
+    if relative != (metric == "mse") or minimum_point < 0 or minimum_lower_bound < 0:
+        raise contract.CSIPContractError(
+            "paired CSIP practical-effect contract differs"
+        )
     # Positive is always favorable to aligned.
     differences = control - aligned if metric == "mse" else aligned - control
     bootstrap = differences[bootstrap_indexes].mean(axis=1)
     alpha_cell = FAMILYWISE_ALPHA / FAMILY_CELLS
     effect = float(differences.mean())
+    lower_bound = float(np.quantile(bootstrap, alpha_cell, method="linear"))
     result: dict[str, Any] = {
         "direction": "control_minus_aligned"
         if metric == "mse"
         else "aligned_minus_control",
         "mean_effect": effect,
-        "simultaneous_one_sided_lower_bound": float(
-            np.quantile(bootstrap, alpha_cell, method="linear")
-        ),
+        "simultaneous_one_sided_lower_bound": lower_bound,
         "bootstrap_nonpositive_fraction_with_plus_one": float(
             (1 + np.count_nonzero(bootstrap <= 0.0)) / (len(bootstrap) + 1)
         ),
         "cell_alpha": alpha_cell,
+        "practical_threshold": {
+            "minimum_point": minimum_point,
+            "minimum_lower_bound": minimum_lower_bound,
+            "scale": "relative_to_reference_mean" if relative else "absolute",
+        },
     }
     if metric == "mse":
         denominator = float(control.mean())
+        point_for_gate = effect / denominator if denominator > 0.0 else float("-inf")
+        bootstrap_denominator = control[bootstrap_indexes].mean(axis=1)
+        if denominator > 0.0 and bool((bootstrap_denominator > 0.0).all()):
+            relative_bootstrap = bootstrap / bootstrap_denominator
+            lower_for_gate = float(
+                np.quantile(relative_bootstrap, alpha_cell, method="linear")
+            )
+        else:
+            lower_for_gate = float("-inf")
         result["relative_mse_improvement"] = (
-            effect / denominator if denominator > 0.0 else None
+            point_for_gate if math.isfinite(point_for_gate) else None
         )
+        result["relative_simultaneous_one_sided_lower_bound"] = (
+            lower_for_gate if math.isfinite(lower_for_gate) else None
+        )
+    else:
+        point_for_gate = effect
+        lower_for_gate = lower_bound
     result["pass"] = bool(
-        result["mean_effect"] > 0.0
-        and result["simultaneous_one_sided_lower_bound"] > 0.0
+        effect > 0.0
+        and lower_bound > 0.0
+        and point_for_gate >= minimum_point
+        and lower_for_gate >= minimum_lower_bound
     )
     return result
 
@@ -92,6 +139,13 @@ def _validated_evaluation(
         or payload.get("validation_clips") != 64
         or payload.get("conditions")
         != ["aligned", "episode_disjoint_cyclic_shuffled", "zero", "inverse"]
+        or payload.get("probes") != ["full", "magnitude_only"]
+        or payload.get("phase_comparator")
+        != {
+            "kind": "matched_9216_input_phase_coordinates_zeroed",
+            "same_initialization": True,
+            "same_batches_optimizer_updates_targets_architecture": True,
+        }
         or payload.get("protected_test_clips_read") != 0
     ):
         raise contract.CSIPContractError("sealed evaluation contract differs")
@@ -107,20 +161,25 @@ def _validated_evaluation(
             "clip_id"
         ) == row.get("donor_clip_id"):
             raise contract.CSIPContractError("sealed evaluation donor is not disjoint")
-        values = row.get("metrics")
-        if not isinstance(values, Mapping) or set(values) != {
-            "aligned",
-            *CONTROLS,
-        }:
-            raise contract.CSIPContractError("sealed evaluation conditions differ")
-        for condition in values.values():
-            if not isinstance(condition, Mapping) or any(
-                isinstance(condition.get(metric), bool)
-                or not isinstance(condition.get(metric), (int, float))
-                or not math.isfinite(float(condition[metric]))
-                for metric in METRICS
-            ):
-                raise contract.CSIPContractError("sealed evaluation metric is invalid")
+        probes = row.get("metrics")
+        if not isinstance(probes, Mapping) or set(probes) != set(PROBES):
+            raise contract.CSIPContractError("sealed evaluation probes differ")
+        for values in probes.values():
+            if not isinstance(values, Mapping) or set(values) != {
+                "aligned",
+                *CONTROLS,
+            }:
+                raise contract.CSIPContractError("sealed evaluation conditions differ")
+            for condition in values.values():
+                if not isinstance(condition, Mapping) or any(
+                    isinstance(condition.get(metric), bool)
+                    or not isinstance(condition.get(metric), (int, float))
+                    or not math.isfinite(float(condition[metric]))
+                    for metric in METRICS
+                ):
+                    raise contract.CSIPContractError(
+                        "sealed evaluation metric is invalid"
+                    )
     return payload
 
 
@@ -147,32 +206,55 @@ def command_analyze(args: argparse.Namespace) -> int:
         dtype=np.int64,
     )
     rows = evaluation["clips"]
-    cells: dict[str, Any] = {}
+    control_cells: dict[str, Any] = {}
     for control in CONTROLS:
-        cells[control] = {}
+        control_cells[control] = {}
         for metric in METRICS:
             aligned = np.asarray(
-                [row["metrics"]["aligned"][metric] for row in rows], dtype=np.float64
+                [row["metrics"]["full"]["aligned"][metric] for row in rows],
+                dtype=np.float64,
             )
             reference = np.asarray(
-                [row["metrics"][control][metric] for row in rows], dtype=np.float64
+                [row["metrics"]["full"][control][metric] for row in rows],
+                dtype=np.float64,
             )
-            cells[control][metric] = paired_effect(
+            control_cells[control][metric] = paired_effect(
                 aligned,
                 reference,
                 metric=metric,
                 bootstrap_indexes=bootstrap_indexes,
+                **CONTROL_THRESHOLDS[metric],
             )
-    passed = all(
-        bool(cells[control][metric]["pass"])
+    phase_cells: dict[str, Any] = {}
+    for metric in METRICS:
+        full = np.asarray(
+            [row["metrics"]["full"]["aligned"][metric] for row in rows],
+            dtype=np.float64,
+        )
+        magnitude_only = np.asarray(
+            [row["metrics"]["magnitude_only"]["aligned"][metric] for row in rows],
+            dtype=np.float64,
+        )
+        phase_cells[metric] = paired_effect(
+            full,
+            magnitude_only,
+            metric=metric,
+            bootstrap_indexes=bootstrap_indexes,
+            **PHASE_THRESHOLDS[metric],
+        )
+    controls_pass = all(
+        bool(control_cells[control][metric]["pass"])
         for control in CONTROLS
         for metric in METRICS
     )
-    conclusion = (
-        "advance_to_training_only_generator_regularization_ablation"
-        if passed
-        else "stop_csip_path_no_action_specific_spectral_signal_demonstrated"
-    )
+    phase_pass = all(bool(phase_cells[metric]["pass"]) for metric in METRICS)
+    passed = controls_pass and phase_pass
+    if passed:
+        conclusion = "advance_to_training_only_generator_regularization_ablation"
+    elif not controls_pass:
+        conclusion = "stop_csip_path_no_action_specific_spectral_signal_demonstrated"
+    else:
+        conclusion = "stop_csip_path_no_incremental_phase_contribution_demonstrated"
     analysis = contract.with_identity(
         {
             "schema_version": contract.SCHEMA_VERSION,
@@ -200,7 +282,16 @@ def command_analyze(args: argparse.Namespace) -> int:
                 "cells": FAMILY_CELLS,
                 "correction": "bonferroni_one_sided",
             },
-            "cells": cells,
+            "practical_effect_thresholds": {
+                "full_probe_vs_target_controls": CONTROL_THRESHOLDS,
+                "full_probe_vs_matched_magnitude_only": PHASE_THRESHOLDS,
+            },
+            "cells": {
+                "full_probe_target_controls": control_cells,
+                "phase_contribution_over_magnitude_only": phase_cells,
+            },
+            "target_control_gate_pass": controls_pass,
+            "phase_contribution_gate_pass": phase_pass,
             "gate_pass": passed,
             "decision": conclusion,
             "claim_boundary": (

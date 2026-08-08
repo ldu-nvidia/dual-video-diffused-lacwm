@@ -27,6 +27,7 @@ from robot_wm.modeling.dual_diffusion.causal_spectral_probe import (  # noqa: E4
     causal_spectral_features,
     control_targets,
     episode_disjoint_cyclic_donors,
+    magnitude_only_spectral_features,
 )
 from tools import csip_contract as contract  # noqa: E402
 from tools.csip_workflow import validate_seal  # noqa: E402
@@ -133,7 +134,11 @@ def command_evaluate(args: argparse.Namespace) -> int:
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)
     torch.use_deterministic_algorithms(True)
-    features = _features(full, history, device)
+    full_features = _features(full, history, device)
+    features = {
+        "full": full_features,
+        "magnitude_only": magnitude_only_spectral_features(full_features),
+    }
     checkpoint_path = contract.verify_file_record(
         seal["checkpoint"], "sealed checkpoint"
     )
@@ -148,15 +153,25 @@ def command_evaluate(args: argparse.Namespace) -> int:
         registration=registration,
         train_latent_cache_identity_sha256=train_metadata["identity_sha256"],
     )
-    model = FrozenCausalSpectralProbe(hidden_dim=int(checkpoint["model_hidden_dim"]))
-    model.load_state_dict(checkpoint["model_state"], strict=True)
-    model = model.to(device).eval()
+    models = {}
+    for name in ("full", "magnitude_only"):
+        model = FrozenCausalSpectralProbe(
+            hidden_dim=int(checkpoint["model_hidden_dim"])
+        )
+        model.load_state_dict(checkpoint["model_states"][name], strict=True)
+        models[name] = model.to(device).eval()
     pca = ActionPCATransform.from_state_dict(checkpoint["action_pca"])
     actions = torch.from_numpy(np.array(actions_np, copy=True)).float()
     targets = control_targets(actions, pca, donor_indexes)
     with torch.inference_mode():
-        prediction = model(features.to(device)).cpu()
-    metrics = _metric_rows(prediction, targets)
+        predictions = {
+            name: model(features[name].to(device)).cpu()
+            for name, model in models.items()
+        }
+    metrics = {
+        name: _metric_rows(prediction, targets)
+        for name, prediction in predictions.items()
+    }
 
     clip_records = []
     for index, row in enumerate(rows):
@@ -170,11 +185,14 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 "donor_clip_id": rows[donor]["clip_id"],
                 "donor_episode_dir": rows[donor]["episode_dir"],
                 "metrics": {
-                    condition: {
-                        "mse": metrics[condition]["mse"][index],
-                        "cosine": metrics[condition]["cosine"][index],
+                    probe: {
+                        condition: {
+                            "mse": metrics[probe][condition]["mse"][index],
+                            "cosine": metrics[probe][condition]["cosine"][index],
+                        }
+                        for condition in metrics[probe]
                     }
-                    for condition in metrics
+                    for probe in metrics
                 },
             }
         )
@@ -199,13 +217,22 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 "self_donors": 0,
                 "same_episode_donors": 0,
             },
-            "conditions": list(metrics),
+            "probes": list(metrics),
+            "conditions": list(metrics["full"]),
             "summary": {
-                condition: {
-                    "mean_mse": values["mean_mse"],
-                    "mean_cosine": values["mean_cosine"],
+                probe: {
+                    condition: {
+                        "mean_mse": values["mean_mse"],
+                        "mean_cosine": values["mean_cosine"],
+                    }
+                    for condition, values in probe_values.items()
                 }
-                for condition, values in metrics.items()
+                for probe, probe_values in metrics.items()
+            },
+            "phase_comparator": {
+                "kind": "matched_9216_input_phase_coordinates_zeroed",
+                "same_initialization": True,
+                "same_batches_optimizer_updates_targets_architecture": True,
             },
             "clips": clip_records,
             "validation_used_for_training_or_checkpoint_selection": False,

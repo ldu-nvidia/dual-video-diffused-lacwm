@@ -15,7 +15,8 @@ premise behind action-aware spectral forcing:
 
 > Do clean, real Wan future-motion latents contain phase-sensitive spectral
 > information that identifies the action which produced the motion, beyond an
-> episode-disjoint action shuffle, zero action, and sign-inverted action?
+> episode-disjoint action shuffle, zero action, sign-inverted action, and a
+> capacity-matched magnitude-only probe?
 
 This is a frozen inverse-dynamics probe, not dual diffusion. A pass justifies a
 later training-only generator regularizer in which this probe is frozen and
@@ -84,13 +85,17 @@ as deployment-time features.
 
 ## Per-view coarse spectral representation
 
-The latent width contains three stacked camera views. Split it first:
+The latent width contains three stacked camera views. Split it before every
+FFT:
 
 \[
 D^{(v)}=D[:,:,:,:,40v:40(v+1)],\qquad v\in\{0,1,2\}.
 \]
 
-No FFT crosses a camera seam. For every sample, view, and Wan channel, compute
+No FFT crosses a camera seam. This is explicitly a per-view transform of the
+established width-stacked Wan latent; the Wan VAE encoded the width-stacked
+pixels jointly, so this protocol does **not** claim the VAE itself is
+seam-independent. For every sample, view, and Wan channel, compute
 the orthonormal spatiotemporal transform
 
 \[
@@ -125,7 +130,10 @@ To retain direction without an angle branch cut, also take a 2-D spatial FFT
 \]
 
 masked only where both endpoint energies pass the same relative-energy rule.
-Its real and imaginary components use the same `4 x 6` crop. Concatenating all
+For this endpoint mask, the RMS scale is intentionally shared across the two
+motion tokens for each sample/view/channel (it is not fit separately per
+endpoint). Its real and imaginary components use the same `4 x 6` crop.
+Concatenating all
 views and channels gives exactly
 
 ```text
@@ -155,9 +163,10 @@ positive, and whiten each retained score by its fit448 population standard
 deviation. Persist the mean, components, scales, and fit indexes in the fixed
 checkpoint. Cal64 and val64 contribute zero PCA elements.
 
-## Frozen probe and fit
+## Frozen matched probes and fit
 
-The probe is fixed before metrics:
+Two probes are fixed before metrics. Both have the same 9,216-input shape and
+architecture:
 
 ```text
 LayerNorm(9,216)
@@ -165,7 +174,15 @@ Linear(9,216,256) + SiLU
 Linear(256,16)
 ```
 
-Fit MSE with AdamW, learning rate `3e-4`, weight decay `1e-4`, global-norm
+The `full` probe receives all coordinates. The `magnitude_only` probe receives
+the identical tensor with coordinates `2304:9216` (all volume unit-phase and
+phase-increment real/imaginary channels) deterministically set to zero. Its
+input dimension is not reduced. Both probes start from the exact same initial
+state and see the same batch order, targets, AdamW configuration, update count,
+and checkpoint boundary. Thus the only prospective difference is access to
+phase-bearing inputs.
+
+Fit each probe's MSE with AdamW, learning rate `3e-4`, weight decay `1e-4`, global-norm
 clip 1.0, batch 64, seed 1234, and exactly 400 updates. Batch 64 divides fit448
 into seven batches, with a seeded permutation at each new pass. Calibration
 telemetry cannot change this schedule. Training must create an online run in
@@ -174,7 +191,9 @@ the verified personal private W&B project
 
 ## Sealed val64 controls
 
-For each val clip, compare the same probe prediction with four targets:
+For each val clip, compare each probe prediction with four targets. The three
+target-control gates below use the full probe; both probes are retained for the
+matched phase-contribution gate:
 
 1. `aligned`: its own action descriptor;
 2. `episode_disjoint_cyclic_shuffled`: the first whole-population cyclic shift
@@ -186,20 +205,32 @@ The shuffled control tests action identity rather than dataset-level motion;
 zero tests collapse to an average/no-action target; inverse tests directional
 phase/action sign. Every row records the local and donor clip/episode IDs.
 
-## Fixed statistical gate
+## Fixed statistical and practical-effect gate
 
-For each of three controls, evaluate paired per-clip MSE and cosine:
+For the full probe against each of three target controls, evaluate paired
+per-clip MSE and cosine. Also compare the full and magnitude-only probes on the
+same aligned target:
 
 ```text
 MSE effect:    control MSE - aligned MSE       (positive favors aligned)
 cosine effect: aligned cosine - control cosine (positive favors aligned)
+phase MSE:     magnitude-only MSE - full MSE   (positive favors phase)
+phase cosine:  full cosine - magnitude cosine  (positive favors phase)
 ```
 
 Use exactly 10,000 paired clip bootstrap resamples, seed 20260808. There are
-six preregistered cells, with one-sided Bonferroni cell alpha `0.05/6`. Phase 0
-passes only if every cell has a positive point effect and a strictly positive
-simultaneous lower bound. No subset, metric, threshold, checkpoint, or seed may
-rescue a failure.
+eight preregistered cells, with one-sided Bonferroni cell alpha `0.05/8`.
+Statistical positivity alone is insufficient. Every full-probe target-control
+MSE cell must have at least 5% relative point gain and a 1% relative
+simultaneous lower bound; its cosine cell must have at least `0.05` point gain
+and `0.01` lower bound. Full versus magnitude-only must have at least 3%
+relative MSE point gain and a 1% relative lower bound, plus cosine point gain
+of `0.02` and lower bound of `0.005`. Relative MSE values use the comparator's
+mean MSE as denominator; every bootstrap replicate recomputes both its paired
+effect numerator and comparator-mean denominator before the relative lower
+quantile is taken. Phase 0 passes only if all eight cells meet their
+fixed practical and simultaneous-bound thresholds. No subset, metric,
+threshold, checkpoint, or seed may rescue a failure.
 
 On pass, the next experiment is a matched generator ablation using the frozen
 probe as a training-only action/spectral consistency loss on the denoiser's

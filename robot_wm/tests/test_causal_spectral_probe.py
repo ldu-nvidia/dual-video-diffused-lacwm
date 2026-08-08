@@ -13,14 +13,17 @@ from robot_wm.modeling.dual_diffusion.causal_spectral_probe import (  # noqa: E4
     ACTION_DESCRIPTOR_DIM,
     ACTION_TARGET_DIM,
     SPECTRAL_FEATURE_DIM,
+    VOLUME_MAGNITUDE_FEATURE_DIM,
     ActionPCATransform,
     FrozenCausalSpectralProbe,
+    _energy_mask,
     action_descriptor,
     causal_spectral_features,
     control_targets,
     episode_disjoint_cyclic_donors,
     fit_action_pca,
     future_motion_latents,
+    magnitude_only_spectral_features,
     phase0_partition_indexes,
 )
 from tools import csip_analyze, csip_contract, csip_latent_cache, csip_train  # noqa: E402
@@ -96,6 +99,25 @@ def test_zero_energy_is_fully_masked_and_finite() -> None:
     assert features.shape == (2, SPECTRAL_FEATURE_DIM)
     assert torch.isfinite(features).all()
     assert torch.count_nonzero(features) == 0
+
+
+def test_magnitude_only_comparator_keeps_shape_and_zeros_every_phase_channel() -> None:
+    features = torch.randn(3, SPECTRAL_FEATURE_DIM)
+    magnitude = magnitude_only_spectral_features(features)
+    assert magnitude.shape == features.shape
+    torch.testing.assert_close(
+        magnitude[:, :VOLUME_MAGNITUDE_FEATURE_DIM],
+        features[:, :VOLUME_MAGNITUDE_FEATURE_DIM],
+    )
+    assert torch.count_nonzero(magnitude[:, VOLUME_MAGNITUDE_FEATURE_DIM:]) == 0
+
+
+def test_phase_endpoint_mask_uses_one_rms_shared_across_both_motion_tokens() -> None:
+    values = torch.tensor([1.0, 5.0e-4], dtype=torch.complex64).reshape(
+        1, 1, 1, 2, 1, 1
+    )
+    _magnitude, mask = _energy_mask(values, relative_floor=1.0e-3)
+    assert mask.flatten().tolist() == [True, False]
 
 
 def test_positive_spatial_shift_obeys_negative_fft_phase_sign() -> None:
@@ -195,9 +217,30 @@ def test_bootstrap_gate_uses_fixed_family_and_positive_direction() -> None:
         metric="cosine",
         bootstrap_indexes=bootstrap,
     )
-    assert csip_analyze.FAMILY_CELLS == 6
+    assert csip_analyze.FAMILY_CELLS == 8
     assert mse["pass"] and mse["mean_effect"] == pytest.approx(0.5)
     assert cosine["pass"] and cosine["mean_effect"] == pytest.approx(0.6)
+
+
+def test_bootstrap_gate_enforces_frozen_practical_effect_thresholds() -> None:
+    bootstrap = np.tile(np.arange(64), (10_000, 1))
+    too_small = csip_analyze.paired_effect(
+        np.full(64, 0.96),
+        np.full(64, 1.0),
+        metric="mse",
+        bootstrap_indexes=bootstrap,
+        **csip_analyze.CONTROL_THRESHOLDS["mse"],
+    )
+    large_enough = csip_analyze.paired_effect(
+        np.full(64, 0.90),
+        np.full(64, 1.0),
+        metric="mse",
+        bootstrap_indexes=bootstrap,
+        **csip_analyze.CONTROL_THRESHOLDS["mse"],
+    )
+    assert not too_small["pass"]
+    assert large_enough["pass"]
+    assert large_enough["relative_mse_improvement"] == pytest.approx(0.10)
 
 
 def test_training_and_cache_clis_accept_no_test_split_or_path() -> None:
@@ -267,8 +310,11 @@ def test_train_stage_registration_validation_does_not_open_val_records(
                 "python": {**file_stub, "launcher_path": str(stub)},
                 "wan_config": file_stub,
                 "wan_vae": file_stub,
+                "wan_dir": str(tmp_path),
                 "videox_home": str(tmp_path),
                 "videox_git_commit": csip_contract.EXPECTED_VIDEOX_COMMIT,
+                "videox_git_tree": csip_contract.EXPECTED_VIDEOX_COMMIT,
+                "world_size": csip_contract.EXPECTED_WORLD_SIZE,
             },
             "planned_paths": {},
         }
@@ -289,7 +335,11 @@ def test_train_stage_registration_validation_does_not_open_val_records(
         mock.patch.object(
             csip_contract,
             "git_output",
-            return_value=csip_contract.EXPECTED_VIDEOX_COMMIT,
+            side_effect=lambda _repo, *arguments: (
+                ""
+                if arguments and arguments[0] == "status"
+                else csip_contract.EXPECTED_VIDEOX_COMMIT
+            ),
         ),
     ):
         csip_contract.validate_registration(tmp_path / "reg", open_validation=False)
@@ -314,6 +364,8 @@ def test_fixed_checkpoint_validator_rejects_partition_contamination() -> None:
         "model_hidden_dim": 256,
         "spectral_feature_dim": SPECTRAL_FEATURE_DIM,
         "action_target_dim": ACTION_TARGET_DIM,
+        "feature_variants": ["full", "magnitude_only"],
+        "paired_initialization": "identical_state_before_update_1",
         "wandb_run_id": "fixed-run",
         "validation_clips_read": 0,
         "protected_test_clips_read": 0,
@@ -326,7 +378,17 @@ def test_fixed_checkpoint_validator_rejects_partition_contamination() -> None:
             "components": torch.zeros(ACTION_TARGET_DIM, ACTION_DESCRIPTOR_DIM),
             "score_scale": torch.ones(ACTION_TARGET_DIM),
         },
-        "calibration_metrics": {str(value): {} for value in (0, 100, 200, 300, 400)},
+        "model_states": {
+            "full": {"weight": torch.zeros(1)},
+            "magnitude_only": {"weight": torch.zeros(1)},
+        },
+        "calibration_metrics": {
+            str(value): {
+                probe: {"mse": 1.0, "cosine": 0.0}
+                for probe in ("full", "magnitude_only")
+            }
+            for value in (0, 100, 200, 300, 400)
+        },
     }
     csip_contract.validate_checkpoint_payload(
         payload,
@@ -349,3 +411,40 @@ def test_content_identity_detects_tampering() -> None:
     payload["value"] = 2
     with pytest.raises(RuntimeError, match="identity"):
         csip_contract.verify_identity(payload, "test")
+
+
+def test_pinned_videox_validation_rejects_dirty_checkout(tmp_path) -> None:
+    outputs = iter(
+        (
+            csip_contract.EXPECTED_VIDEOX_COMMIT,
+            " M videox_fun/models/wan_vae.py",
+        )
+    )
+    with (
+        mock.patch.object(csip_contract, "canonical_directory", return_value=tmp_path),
+        mock.patch.object(
+            csip_contract, "git_output", side_effect=lambda *_: next(outputs)
+        ),
+        pytest.raises(RuntimeError, match="dirty"),
+    ):
+        csip_contract.clean_pinned_checkout(
+            tmp_path,
+            label="VideoX",
+            expected_commit=csip_contract.EXPECTED_VIDEOX_COMMIT,
+        )
+
+
+def test_csip_slurm_launch_is_nonrequeueable_dependency_ordered_and_excludes_bad_nodes() -> (
+    None
+):
+    root = csip_contract.REPO_ROOT
+    stage = (root / "tools/slurm/csip_phase0_stage.sbatch").read_text()
+    submit = (root / "tools/slurm/submit_csip_phase0.sh").read_text()
+    assert "#SBATCH --no-requeue" in stage
+    assert "pool0-0081,pool0-0089,pool0-0200,pool0-0343" in stage
+    assert "SLURM_RESTART_COUNT:-0" in stage
+    assert "PYTHONNOUSERSITE=1" in stage
+    assert "status --porcelain --untracked-files=all" in stage
+    assert 'dependency="afterok:$TRAIN_JOB_ID"' in submit
+    assert "--kill-on-invalid-dep=yes" in submit
+    assert "ALLOW_ACTIVE_JOB_IDS" in submit
