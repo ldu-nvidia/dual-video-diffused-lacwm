@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /experiments_0908/action_cycle_stage1_common
+  - _self_
+
+name: action-cycle-stage1-on-seed1234-u000200
+model:
+  action_cycle:
+    mode: "on"
+    loss_weight: 0.05
+wandb:
+  tags: [abc, vpm, action-cycle, AC-ON, inverse-action-cycle, seed-1234]

@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /experiments_0908/action_cycle_stage1_common
+  - _self_
+
+name: action-cycle-stage1-off-seed1234-u000200
+model:
+  action_cycle:
+    mode: "off"
+    loss_weight: 0.0
+wandb:
+  tags: [abc, vpm, action-cycle, AC-OFF, parameter-matched, seed-1234]

@@ -1,0 +1,15 @@
+defaults:
+  - dual_explicit_action_dit_vjepa
+  - _self_
+
+_target_: lam.action_cycle_stage1_model.ActionCycleStage1VPM
+
+# The critic is a plain training-only object. It adds no parameter/buffer and
+# the evaluator overrides this block to deploy mode with all critic fields null.
+action_cycle:
+  mode: "off"
+  loss_weight: 0.0
+  transitions: [1, 2]
+  critic_path: ${oc.env:ACTION_CYCLE_CRITIC_BUNDLE}
+  critic_sha256: ${oc.env:ACTION_CYCLE_CRITIC_SHA256}
+  stage0_registration_identity_sha256: ${oc.env:ACTION_CYCLE_STAGE0_IDENTITY}
