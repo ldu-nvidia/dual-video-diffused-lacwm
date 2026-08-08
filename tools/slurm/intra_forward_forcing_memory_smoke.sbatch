@@ -9,7 +9,7 @@
 #SBATCH --partition=batch
 #SBATCH --account=coreai_chef_posttrain
 #SBATCH --qos=short
-#SBATCH --exclude=pool0-0081,pool0-0089
+#SBATCH --exclude=pool0-0081,pool0-0089,pool0-0200,pool0-0343
 #SBATCH --output=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train/artifacts/dual_video_diffusion/intra_forward_forcing/_slurm_logs/memory-%j.out
 #SBATCH --error=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train/artifacts/dual_video_diffusion/intra_forward_forcing/_slurm_logs/memory-%j.err
 #SBATCH --open-mode=append

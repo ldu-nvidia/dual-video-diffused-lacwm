@@ -9,7 +9,7 @@
 #SBATCH --partition=batch
 #SBATCH --account=coreai_chef_posttrain
 #SBATCH --qos=short
-#SBATCH --exclude=pool0-0081,pool0-0089
+#SBATCH --exclude=pool0-0081,pool0-0089,pool0-0200,pool0-0343
 #SBATCH --array=0-1%2
 #SBATCH --output=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train/artifacts/dual_video_diffusion/intra_forward_forcing/_slurm_logs/eval-%A_%a.out
 #SBATCH --error=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train/artifacts/dual_video_diffusion/intra_forward_forcing/_slurm_logs/eval-%A_%a.err
@@ -70,6 +70,8 @@ OUTPUT_DIR="$STUDY_ROOT/evaluation/$ARM_SLUG"
 [[ ! -e "$OUTPUT_DIR" ]] || die "fresh evaluation output already exists"
 [[ ! -e "$RUN_DIR/evaluation_runtime.json" ]] || \
   die "fresh evaluation runtime receipt already exists"
+[[ ! -e "$RUN_DIR/evaluation_input_preflight.json" ]] || \
+  die "fresh evaluation input preflight already exists"
 
 # The activation guard validates these paths while it is sourced.  They must
 # come from the immutable cluster registration, never its workstation defaults.
@@ -90,11 +92,18 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export MID_EVAL_RUNTIME_RECEIPT="$RUN_DIR/evaluation_runtime.json"
 
-"$PYTHON_BIN" "$HELPER" verify \
-  --registration "$MID_SCREEN_REGISTRATION" >/dev/null
 "$PYTHON_BIN" "$REPO_ROOT/tools/env/verify_b200_runtime.py" \
   --expected-gpus 8 --require-b200 --wan-dir "$WAN_DIR_VALUE" \
   > "$MID_EVAL_RUNTIME_RECEIPT"
+
+# Perform every multi-GB registration, warm-start, and snapshot hash in this
+# single-process phase. The resulting immutable receipt is the only content
+# preflight read after torchrun creates the NCCL process group.
+"$PYTHON_BIN" "$HELPER" bind-evaluation-input \
+  --registration "$MID_SCREEN_REGISTRATION" \
+  --array-task-id "$SLURM_ARRAY_TASK_ID" \
+  --run-dir "$RUN_DIR" \
+  --runtime-receipt "$MID_EVAL_RUNTIME_RECEIPT" >/dev/null
 
 "$PYTHON_BIN" -m torch.distributed.run \
   --standalone --nproc_per_node=8 "$EVALUATOR" \

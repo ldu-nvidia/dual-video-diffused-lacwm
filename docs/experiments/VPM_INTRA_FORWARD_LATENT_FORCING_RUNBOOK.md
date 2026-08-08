@@ -61,6 +61,11 @@ registered study.
 ## 3. Inspect deployable evaluation artifacts
 
 The dependency-created evaluation jobs cover validation-only NFE 1/2/4 cells.
+Before torchrun/NCCL, each job writes a create-once content preflight after
+fully hashing the registration, warm start, final snapshot, and training
+receipts. This prevents nonzero ranks from waiting at the first NCCL collective
+while rank zero alone hashes multi-GB files.
+
 For each two-clip cell they make one batch-2 artifact audit and two batch-1
 synchronized endpoint timings. Every rollout independently proves exactly NFE
 Wan, midpoint-head, and block-14 calls, and each timed output must match its

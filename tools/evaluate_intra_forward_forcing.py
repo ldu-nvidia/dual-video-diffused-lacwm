@@ -266,13 +266,12 @@ def _validate_config(config: Any, arm: contract.Arm) -> None:
         raise EvaluationError("private W&B destination changed")
 
 
-def _load_arm_inputs(args: argparse.Namespace, rank: int) -> dict[str, Any]:
+def _load_arm_inputs(args: argparse.Namespace) -> dict[str, Any]:
     registration_path = _canonical_file(args.registration, "registration")
-    # One rank performs expensive multi-GB hashes; all ranks validate its
-    # success before importing/model allocation continues.
-    registration = contract.load_registration(
-        registration_path, verify_files=(rank == 0)
-    )
+    # All multi-GB registration/warm-start/snapshot hashes were completed by
+    # the single-process Slurm preflight before torchrun created this NCCL
+    # process group.  Only small identity-bound receipts are read here.
+    registration = contract.load_registration(registration_path, verify_files=False)
     arm = contract._arm(args.array_task_id)
     expected_run = Path(registration["study_root"]) / "runs" / arm.slug
     if args.run_dir != expected_run:
@@ -282,7 +281,7 @@ def _load_arm_inputs(args: argparse.Namespace, rank: int) -> dict[str, Any]:
             registration,
             arm,
             args.run_dir,
-            verify_files=(rank == 0),
+            verify_files=False,
         )
     except contract.ContractError as exc:
         raise EvaluationError(str(exc)) from exc
@@ -308,6 +307,16 @@ def _load_arm_inputs(args: argparse.Namespace, rank: int) -> dict[str, Any]:
         != training_content["training_runtime"]["sha256"]
     ):
         raise EvaluationError("training and evaluation B200 runtime receipts differ")
+    try:
+        evaluation_preflight = contract.validate_evaluation_preflight(
+            registration,
+            arm,
+            args.run_dir,
+            training_content=training_content,
+            evaluation_runtime=evaluation_runtime,
+        )
+    except contract.ContractError as exc:
+        raise EvaluationError(str(exc)) from exc
     arm_manifest_path = _canonical_file(
         args.run_dir / "arm_manifest.json", "arm manifest"
     )
@@ -363,6 +372,7 @@ def _load_arm_inputs(args: argparse.Namespace, rank: int) -> dict[str, Any]:
         "initialization_match": initialization_match,
         "training_content": training_content,
         "evaluation_runtime": evaluation_runtime,
+        "evaluation_preflight": evaluation_preflight,
         "snapshot_sha256": training_content["snapshot"]["sha256"],
         "hydra_config_sha256": training_content["hydra_config"]["sha256"],
         "resolved_config_sha256": training_content["resolved_config"]["sha256"],
@@ -837,6 +847,9 @@ def _rows_for_cell(
             "initialization_match_identity_sha256": inputs["initialization_match"][
                 "identity_sha256"
             ],
+            "evaluation_preflight_identity_sha256": inputs[
+                "evaluation_preflight"
+            ]["identity_sha256"],
             "history_encode_latency_ms": float(profile["history_encode_latency_ms"]),
             "wan_latency_ms": float(profile["wan_latency_ms"]),
             "midpoint_overhead_latency_ms": float(
@@ -913,7 +926,7 @@ def evaluate(args: argparse.Namespace) -> int:
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     try:
-        inputs = _load_arm_inputs(args, rank)
+        inputs = _load_arm_inputs(args)
         preflight = [None]
         if rank == 0:
             preflight[0] = {
@@ -1049,6 +1062,9 @@ def evaluate(args: argparse.Namespace) -> int:
                     ],
                     "initialization_match_identity_sha256": inputs[
                         "initialization_match"
+                    ]["identity_sha256"],
+                    "evaluation_preflight_identity_sha256": inputs[
+                        "evaluation_preflight"
                     ]["identity_sha256"],
                     "protected_test_accessed": False,
                 }

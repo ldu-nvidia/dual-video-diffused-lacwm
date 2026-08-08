@@ -54,6 +54,7 @@ def _registration(study_root: Path) -> dict:
                 "teacher_calls": 0,
                 "clean_future_feature_available_to_deployable_sampler": False,
                 "oracle_sources": [],
+                "pre_nccl_content_preflight_required": True,
                 "timing": {
                     "cuda_synchronize_before_and_after": True,
                     "records_end_to_end_and_peak_memory": True,
@@ -285,6 +286,80 @@ def test_training_content_binds_full_config_and_rejects_tamper(
         screen.validate_training_content(registration, arm, run_dir)
 
 
+def test_evaluation_preflight_fully_binds_content_before_torchrun(
+    tmp_path, monkeypatch
+):
+    registration = _registration(tmp_path)
+    registration_path = tmp_path / "protocol_registration.json"
+    registration_path.write_text(json.dumps(registration), encoding="utf-8")
+    arm = screen.ARMS[0]
+    run_dir = tmp_path / "runs" / arm.slug
+    run_dir.mkdir(parents=True)
+    runtime_path = run_dir / "evaluation_runtime.json"
+    runtime_path.write_text("{}\n", encoding="utf-8")
+    runtime_sha256 = screen.sha256_file(runtime_path)
+    content = {
+        "identity_sha256": "3" * 64,
+        "arm_identity_sha256": "4" * 64,
+        "memory_smoke_identity_sha256": "5" * 64,
+        "snapshot": {"sha256": "6" * 64},
+        "hydra_config": {"sha256": "7" * 64},
+        "resolved_config": {"sha256": "8" * 64},
+        "training_runtime": {"sha256": runtime_sha256},
+    }
+    calls = []
+
+    def load_registration(_path, *, verify_files=True):
+        calls.append(("registration", verify_files))
+        return registration
+
+    def validate_training(_registration, _arm, _run_dir, *, verify_files=True):
+        calls.append(("training", verify_files))
+        return content
+
+    monkeypatch.setattr(screen, "load_registration", load_registration)
+    monkeypatch.setattr(screen, "validate_training_content", validate_training)
+    monkeypatch.setattr(
+        screen,
+        "validate_runtime_receipt",
+        lambda _path, _registration, label: {
+            "path": str(runtime_path),
+            "sha256": runtime_sha256,
+        },
+    )
+    args = type(
+        "Args",
+        (),
+        {
+            "registration": registration_path,
+            "array_task_id": 0,
+            "run_dir": run_dir,
+            "runtime_receipt": runtime_path,
+        },
+    )()
+    assert screen.command_bind_evaluation_input(args) == 0
+    assert calls == [("registration", True), ("training", True)]
+    receipt = screen.validate_evaluation_preflight(
+        registration,
+        arm,
+        run_dir,
+        training_content=content,
+        evaluation_runtime={"sha256": runtime_sha256},
+    )
+    assert receipt["verification_phase"] == "single_process_before_torchrun_and_nccl"
+    assert receipt["snapshot_sha256_verified"] is True
+
+    changed = {**content, "snapshot": {"sha256": "9" * 64}}
+    with pytest.raises(screen.ContractError, match="preflight identity or content"):
+        screen.validate_evaluation_preflight(
+            registration,
+            arm,
+            run_dir,
+            training_content=changed,
+            evaluation_runtime={"sha256": runtime_sha256},
+        )
+
+
 def test_resolved_configs_bind_midpoint_seam_and_exact_val64():
     common = OmegaConf.load(screen.COMMON_CONFIG)
     model = OmegaConf.load(screen.MODEL_CONFIG)
@@ -402,6 +477,7 @@ def _write_evaluation_grid(
     content_identity = ("7" if arm.code == "MID-OFF" else "8") * 64
     runtime_sha256 = "9" * 64
     hydra_config_sha256 = "0" * 64
+    preflight_identity = ("3" if arm.code == "MID-OFF" else "4") * 64
     for source in screen.SOURCES:
         for nfe in screen.NFE_GRID:
             for clip in range(screen.EXPECTED_VALIDATION_CLIPS):
@@ -477,6 +553,7 @@ def _write_evaluation_grid(
                     "training_runtime_sha256": runtime_sha256,
                     "evaluation_runtime_sha256": runtime_sha256,
                     "initialization_match_identity_sha256": match_identity,
+                    "evaluation_preflight_identity_sha256": preflight_identity,
                     "history_encode_latency_ms": 1.0,
                     "wan_latency_ms": float(nfe * 10),
                     "midpoint_overhead_latency_ms": float(nfe),
@@ -512,6 +589,7 @@ def _write_evaluation_grid(
             "training_runtime_sha256": runtime_sha256,
             "evaluation_runtime_sha256": runtime_sha256,
             "initialization_match_identity_sha256": match_identity,
+            "evaluation_preflight_identity_sha256": preflight_identity,
             "protected_test_accessed": False,
         }
     )
@@ -594,6 +672,18 @@ def test_analyzer_requires_all_three_nfe1_references_and_passes_clean_grid(
             arm.code
         ],
     )
+    monkeypatch.setattr(
+        screen,
+        "validate_runtime_receipt",
+        lambda _path, _registration, label: {"sha256": "9" * 64},
+    )
+    monkeypatch.setattr(
+        screen,
+        "validate_evaluation_preflight",
+        lambda _registration, arm, _run_dir, **_kwargs: {
+            "identity_sha256": ("3" if arm.code == "MID-OFF" else "4") * 64
+        },
+    )
     output = tmp_path / "analysis.json"
     args = type(
         "Args",
@@ -626,6 +716,19 @@ def test_launchers_use_explicit_dependencies_and_never_reference_test():
     assert "--array=1 --dependency=\"afterok:$off_job\"" in submit
     assert "--array=0-1%2 --dependency=\"afterok:$on_job\"" in submit
     assert "verify_b200_runtime.py" in evaluation
+    assert "bind-evaluation-input" in evaluation
+    assert evaluation.index("bind-evaluation-input") < evaluation.index(
+        "torch.distributed.run"
+    )
     assert "smoke_intra_forward_memory.py" in memory
+    for source in (training, evaluation, memory):
+        assert (
+            "#SBATCH --exclude=pool0-0081,pool0-0089,pool0-0200,pool0-0343"
+            in source
+        )
+    evaluator = screen.EVALUATOR.read_text(encoding="utf-8")
+    assert "verify_files=(rank == 0)" not in evaluator
+    helper = Path(screen.__file__).read_text(encoding="utf-8")
+    assert "single_process_before_torchrun_and_nccl" in helper
     for source in (training, evaluation, submit, memory):
         assert "TEST_" not in source

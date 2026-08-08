@@ -194,6 +194,10 @@ Each training arm uses its content-derived arm identity as the W&B run ID. The
 successful-process receipt binds that ID/status, the full resolved Hydra
 configuration, final checkpoint, runtime-verifier output, warm-start digest,
 source commit, and initialization match. Evaluation reruns the B200 verifier,
-requires memory-canary, training, and evaluation runtime receipts to match
-byte-for-byte, and propagates all of those digests into every result row and
-completion receipt.
+then fully hashes the registration, warm start, final checkpoint, and bound
+training content in a single-process preflight **before** torchrun creates an
+NCCL group. Distributed evaluation accepts only that immutable preflight
+receipt, requires memory-canary, training, and evaluation runtime receipts to
+match byte-for-byte, and propagates all of those identities into every result
+row and completion receipt. All GPU stages exclude the four study-known bad or
+flaky nodes `pool0-0081`, `pool0-0089`, `pool0-0200`, and `pool0-0343`.

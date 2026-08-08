@@ -59,6 +59,7 @@ INITIALIZATION_ANCHOR_SCHEMA = "video-intra-forward-initialization-anchor-v1"
 INITIALIZATION_MATCH_SCHEMA = "video-intra-forward-initialization-match-v1"
 TRAINING_CONTENT_SCHEMA = "video-intra-forward-training-content-v1"
 MEMORY_SMOKE_SCHEMA = "video-intra-forward-memory-smoke-v1"
+EVALUATION_PREFLIGHT_SCHEMA = "video-intra-forward-evaluation-preflight-v1"
 SEED = 1234
 EVALUATION_SEED = 20_260_808
 BOOTSTRAP_SEED = 20_260_808
@@ -713,6 +714,7 @@ def command_register(args: argparse.Namespace) -> int:
                 "teacher_calls": 0,
                 "clean_future_feature_available_to_deployable_sampler": False,
                 "oracle_sources": [],
+                "pre_nccl_content_preflight_required": True,
                 "timing": {
                     "cuda_synchronize_before_and_after": True,
                     "records_end_to_end_and_peak_memory": True,
@@ -802,6 +804,7 @@ def load_registration(path: Path, *, verify_files: bool = True) -> dict[str, Any
         or evaluation.get("clean_future_feature_available_to_deployable_sampler")
         is not False
         or evaluation.get("oracle_sources") != []
+        or evaluation.get("pre_nccl_content_preflight_required") is not True
         or evaluation.get("timing")
         != {
             "cuda_synchronize_before_and_after": True,
@@ -1378,6 +1381,130 @@ def validate_training_content(
     return receipt
 
 
+def validate_evaluation_preflight(
+    registration: Mapping[str, Any],
+    arm: Arm,
+    run_dir: Path,
+    *,
+    training_content: Mapping[str, Any],
+    evaluation_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the immutable content audit produced before torchrun/NCCL.
+
+    The preflight creator performs all multi-GB warm-start and snapshot hashing
+    in the single-process Slurm entrypoint. Distributed evaluation only checks
+    this small, content-bound receipt, avoiding a rank-zero hashing stall before
+    the first NCCL collective.
+    """
+
+    expected_run = Path(str(registration["study_root"])) / "runs" / arm.slug
+    if run_dir != expected_run:
+        raise ContractError(f"run directory must be {expected_run}")
+    path = run_dir / "evaluation_input_preflight.json"
+    if path.is_symlink():
+        raise ContractError("evaluation preflight receipt must not be a symlink")
+    receipt = read_json(path.resolve(strict=True), "evaluation input preflight")
+    expected = {
+        "schema": EVALUATION_PREFLIGHT_SCHEMA,
+        "status": "pass",
+        "registration_identity_sha256": registration["identity_sha256"],
+        "source_commit": registration["source"]["commit"],
+        "arm": arm.code,
+        "arm_identity_sha256": training_content["arm_identity_sha256"],
+        "training_content_identity_sha256": training_content["identity_sha256"],
+        "memory_smoke_identity_sha256": training_content[
+            "memory_smoke_identity_sha256"
+        ],
+        "snapshot_sha256": training_content["snapshot"]["sha256"],
+        "hydra_config_sha256": training_content["hydra_config"]["sha256"],
+        "resolved_config_sha256": training_content["resolved_config"]["sha256"],
+        "training_runtime_sha256": training_content["training_runtime"]["sha256"],
+        "evaluation_runtime_sha256": evaluation_runtime["sha256"],
+        "verification_phase": "single_process_before_torchrun_and_nccl",
+        "registration_files_fully_verified": True,
+        "warm_start_sha256_verified": True,
+        "training_content_files_fully_verified": True,
+        "snapshot_sha256_verified": True,
+        "protected_test_accessed": False,
+    }
+    if (
+        not validate_identity(receipt)
+        or any(receipt.get(key) != value for key, value in expected.items())
+        or receipt.get("evaluation_runtime_sha256")
+        != receipt.get("training_runtime_sha256")
+    ):
+        raise ContractError("evaluation input preflight identity or content differs")
+    return receipt
+
+
+def command_bind_evaluation_input(args: argparse.Namespace) -> int:
+    """Fully hash evaluation inputs before torchrun creates an NCCL group."""
+
+    registration = load_registration(args.registration, verify_files=True)
+    arm = _arm(args.array_task_id)
+    expected_run = Path(registration["study_root"]) / "runs" / arm.slug
+    if args.run_dir != expected_run or not expected_run.is_dir():
+        raise ContractError(f"run directory must be {expected_run}")
+    output = expected_run / "evaluation_input_preflight.json"
+    if output.exists() or output.is_symlink():
+        raise ContractError("fresh evaluation preflight receipt already exists")
+    training_content = validate_training_content(
+        registration,
+        arm,
+        expected_run,
+        verify_files=True,
+    )
+    expected_runtime = expected_run / "evaluation_runtime.json"
+    if args.runtime_receipt != expected_runtime:
+        raise ContractError(f"evaluation runtime receipt must be {expected_runtime}")
+    evaluation_runtime = validate_runtime_receipt(
+        args.runtime_receipt,
+        registration,
+        label="evaluation runtime",
+    )
+    if (
+        evaluation_runtime["sha256"]
+        != training_content["training_runtime"]["sha256"]
+    ):
+        raise ContractError("training and evaluation B200 runtime receipts differ")
+    payload = identity_payload(
+        {
+            "schema": EVALUATION_PREFLIGHT_SCHEMA,
+            "status": "pass",
+            "registration_identity_sha256": registration["identity_sha256"],
+            "source_commit": registration["source"]["commit"],
+            "arm": arm.code,
+            "arm_identity_sha256": training_content["arm_identity_sha256"],
+            "training_content_identity_sha256": training_content["identity_sha256"],
+            "memory_smoke_identity_sha256": training_content[
+                "memory_smoke_identity_sha256"
+            ],
+            "snapshot_sha256": training_content["snapshot"]["sha256"],
+            "hydra_config_sha256": training_content["hydra_config"]["sha256"],
+            "resolved_config_sha256": training_content["resolved_config"]["sha256"],
+            "training_runtime_sha256": training_content["training_runtime"]["sha256"],
+            "evaluation_runtime_sha256": evaluation_runtime["sha256"],
+            "verification_phase": "single_process_before_torchrun_and_nccl",
+            "registration_files_fully_verified": True,
+            "warm_start_sha256_verified": True,
+            "training_content_files_fully_verified": True,
+            "snapshot_sha256_verified": True,
+            "protected_test_accessed": False,
+        }
+    )
+    exclusive_json(output, payload)
+    # Re-read through the same cheap validator used by distributed evaluation.
+    validate_evaluation_preflight(
+        registration,
+        arm,
+        expected_run,
+        training_content=training_content,
+        evaluation_runtime=evaluation_runtime,
+    )
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def _percent_improvement(candidate: float, reference: float) -> float:
     if not math.isfinite(candidate) or not math.isfinite(reference) or reference <= 0:
         raise ContractError("metric means must be finite and reference positive")
@@ -1492,6 +1619,8 @@ def _validate_evaluation_receipt(
         != receipt.get("training_runtime_sha256")
         or not isinstance(receipt.get("initialization_match_identity_sha256"), str)
         or SHA_RE.fullmatch(receipt["initialization_match_identity_sha256"]) is None
+        or not isinstance(receipt.get("evaluation_preflight_identity_sha256"), str)
+        or SHA_RE.fullmatch(receipt["evaluation_preflight_identity_sha256"]) is None
         or receipt.get("protected_test_accessed") is not False
     ):
         raise ContractError(f"invalid evaluation completion receipt: {receipt_path}")
@@ -1544,6 +1673,8 @@ def command_analyze(args: argparse.Namespace) -> int:
                         != receipt["training_runtime_sha256"]
                         or row.get("evaluation_runtime_sha256")
                         != receipt["evaluation_runtime_sha256"]
+                        or row.get("evaluation_preflight_identity_sha256")
+                        != receipt["evaluation_preflight_identity_sha256"]
                     ):
                         raise ContractError(f"invalid result row in {path}")
                     rows.append(row)
@@ -1563,11 +1694,13 @@ def command_analyze(args: argparse.Namespace) -> int:
         raise ContractError("initialization anchor is invalid")
     initialization_matches = {}
     training_contents = {}
+    evaluation_preflights = {}
     for arm in ARMS:
+        run_dir = Path(registration["study_root"]) / "runs" / arm.slug
         training_content = validate_training_content(
             registration,
             arm,
-            Path(registration["study_root"]) / "runs" / arm.slug,
+            run_dir,
             verify_files=True,
         )
         match = read_json(
@@ -1602,8 +1735,26 @@ def command_analyze(args: argparse.Namespace) -> int:
             != training_content["training_runtime"]["sha256"]
         ):
             raise ContractError(f"{arm.code} initialization match is invalid")
+        evaluation_runtime = validate_runtime_receipt(
+            run_dir / "evaluation_runtime.json",
+            registration,
+            label=f"{arm.code} evaluation runtime",
+        )
+        preflight = validate_evaluation_preflight(
+            registration,
+            arm,
+            run_dir,
+            training_content=training_content,
+            evaluation_runtime=evaluation_runtime,
+        )
+        if (
+            receipts[arm.code].get("evaluation_preflight_identity_sha256")
+            != preflight["identity_sha256"]
+        ):
+            raise ContractError(f"{arm.code} evaluation preflight is invalid")
         initialization_matches[arm.code] = match
         training_contents[arm.code] = training_content
+        evaluation_preflights[arm.code] = preflight
     expected = len(ARMS) * len(SOURCES) * len(NFE_GRID) * EXPECTED_VALIDATION_CLIPS
     if len(rows) != expected:
         raise ContractError(f"result grid has {len(rows)} rows, expected {expected}")
@@ -1643,6 +1794,7 @@ def command_analyze(args: argparse.Namespace) -> int:
         "training_runtime_sha256",
         "evaluation_runtime_sha256",
         "initialization_match_identity_sha256",
+        "evaluation_preflight_identity_sha256",
     )
     for row in rows:
         key = (
@@ -1886,6 +2038,9 @@ def command_analyze(args: argparse.Namespace) -> int:
                     "initialization_match_identity_sha256": receipts[arm_code][
                         "initialization_match_identity_sha256"
                     ],
+                    "evaluation_preflight_identity_sha256": receipts[arm_code][
+                        "evaluation_preflight_identity_sha256"
+                    ],
                     "rows": receipts[arm_code]["rows"],
                 }
                 for arm_code in sorted(receipts)
@@ -1897,6 +2052,10 @@ def command_analyze(args: argparse.Namespace) -> int:
             "initialization_match_identities": {
                 arm: match["identity_sha256"]
                 for arm, match in sorted(initialization_matches.items())
+            },
+            "evaluation_preflight_identities": {
+                arm: preflight["identity_sha256"]
+                for arm, preflight in sorted(evaluation_preflights.items())
             },
             "decision": decision,
             "conclusion": (
@@ -1966,6 +2125,13 @@ def build_parser() -> argparse.ArgumentParser:
     bind_training.add_argument("--array-task-id", type=int, required=True)
     bind_training.add_argument("--run-dir", type=Path, required=True)
     bind_training.set_defaults(func=command_bind_training_output)
+
+    bind_evaluation = sub.add_parser("bind-evaluation-input")
+    bind_evaluation.add_argument("--registration", type=Path, required=True)
+    bind_evaluation.add_argument("--array-task-id", type=int, required=True)
+    bind_evaluation.add_argument("--run-dir", type=Path, required=True)
+    bind_evaluation.add_argument("--runtime-receipt", type=Path, required=True)
+    bind_evaluation.set_defaults(func=command_bind_evaluation_input)
 
     analyze = sub.add_parser("analyze")
     analyze.add_argument("--registration", type=Path, required=True)

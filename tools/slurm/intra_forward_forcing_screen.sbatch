@@ -9,7 +9,7 @@
 #SBATCH --partition=batch
 #SBATCH --account=coreai_chef_posttrain
 #SBATCH --qos=short
-#SBATCH --exclude=pool0-0081,pool0-0089
+#SBATCH --exclude=pool0-0081,pool0-0089,pool0-0200,pool0-0343
 # Submit this entrypoint only through submit_intra_forward_forcing_screen.sh.
 # That wrapper creates separate task-0/task-1 jobs with an afterok dependency;
 # Slurm array throttling does not guarantee task-index execution order.
