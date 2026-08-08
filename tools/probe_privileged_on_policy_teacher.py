@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train-only eligibility probe for privileged on-policy video distillation.
+"""Train-only eligibility probes for privileged on-policy video distillation.
 
 This tool does *not* train a student.  It asks a narrower prerequisite
 question on a frozen dual-video checkpoint:
@@ -9,7 +9,12 @@ question on a frozen dual-video checkpoint:
   with no future feature, the aligned clean V-JEPA feature, and an
   episode-disjoint shuffled clean V-JEPA feature;
 * compare all three video velocities with the ordinary rectified-flow target;
-* separately compare complete NFE-4 ``off``/aligned/shuffled rollouts.
+* separately compare complete ``off``/aligned/shuffled rollouts.
+
+The original profile is frozen at NFE=4.  A second, explicit profile is a
+post-NFE=4 mechanistic follow-up that uses NFE=2, hence exactly one
+auxiliary-only call and one video-active call at video sigma=1.  That follow-up
+does not reinterpret the original NFE=4 STOP and must use disjoint train clips.
 
 Only the immutable ABC *training* cache is accepted.  Clean future V-JEPA is
 teacher-only evidence, never a deployable result.  The output is an
@@ -42,6 +47,14 @@ ANALYSIS_SCHEMA = "privileged-on-policy-teacher-analysis-v1"
 COMPLETE_SCHEMA = "privileged-on-policy-teacher-complete-v1"
 FAILURE_SCHEMA = "privileged-on-policy-teacher-failure-v1"
 
+ORIGINAL_PROFILE = "nfe4-frozen-original-v1"
+HIGH_NOISE_NFE2_PROFILE = "nfe2-high-noise-followup-v1"
+PARENT_NFE4_RESULT_COMMIT = "7546e33ebf8cb5400aebc596637efbda42409ec2"
+PARENT_NFE4_ANALYSIS_IDENTITY = (
+    "160012e5777ffaa4f52d2c95cbf3d1b33f6d04d8c84a93086b7cf40496990fbe"
+)
+PARENT_NFE4_DECISION = "STOP_NO_ELIGIBLE_TEACHER"
+
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SOURCES = ("off", "oracle_matched", "oracle_shuffled")
@@ -59,6 +72,58 @@ METRICS = (
 
 class ProbeError(RuntimeError):
     """Raised when the probe contract would be violated."""
+
+
+def probe_profile_contract(profile: str, nfe: int, start_index: int) -> dict[str, Any]:
+    """Fail closed on the two preregistered probe profiles."""
+    if profile == ORIGINAL_PROFILE:
+        if nfe != 4 or start_index != 0:
+            raise ProbeError("the original profile is frozen to NFE=4 and indices 0--63")
+        return {
+            "profile": profile,
+            "expected_video_active_steps": 2,
+            "expected_active_video_sigmas": None,
+            "adaptive_parent_result": False,
+        }
+    if profile == HIGH_NOISE_NFE2_PROFILE:
+        if nfe != 2 or start_index != 64:
+            raise ProbeError(
+                "the high-noise follow-up is frozen to NFE=2 and indices 64--127"
+            )
+        return {
+            "profile": profile,
+            "expected_video_active_steps": 1,
+            "expected_active_video_sigmas": [1.0],
+            "adaptive_parent_result": True,
+        }
+    raise ProbeError(f"unsupported probe profile: {profile}")
+
+
+def validate_recorded_profile(
+    frozen: Mapping[str, Any], complete: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate new profiles while retaining audit support for a375870 artifacts."""
+    legacy = "probe_profile" not in frozen and "start_index" not in frozen
+    profile = probe_profile_contract(
+        ORIGINAL_PROFILE if legacy else str(frozen["probe_profile"]),
+        int(frozen["nfe"]),
+        0 if legacy else int(frozen["start_index"]),
+    )
+    if int(complete["observed_video_active_steps"]) != int(
+        profile["expected_video_active_steps"]
+    ):
+        raise ProbeError("completion video-active count differs from its profile")
+    if legacy:
+        return {**profile, "legacy_a375870_artifact": True}
+    expected_sigmas = profile["expected_active_video_sigmas"]
+    if (
+        expected_sigmas is not None
+        and complete.get("observed_active_video_sigmas") != expected_sigmas
+    ):
+        raise ProbeError("completion active sigmas differ from its profile")
+    if complete.get("parent_nfe4_stop_preserved") is not True:
+        raise ProbeError("completion does not preserve the parent NFE4 STOP")
+    return {**profile, "legacy_a375870_artifact": False}
 
 
 def _now() -> str:
@@ -305,17 +370,26 @@ def analyze_rows(
     steps = sorted({key[1] for key in unit_by_key})
     if len(steps) != active_steps:
         raise ProbeError("visited-state step inventory differs")
+    clip_indexes = sorted({key[0] for key in unit_by_key})
+    if len(clip_indexes) != num_clips:
+        raise ProbeError("visited-state clip inventory differs")
     student = np.empty((num_clips, active_steps), dtype=np.float64)
     aligned = np.empty_like(student)
     shuffled = np.empty_like(student)
-    for clip in range(num_clips):
+    for clip_position, clip in enumerate(clip_indexes):
         for position, step in enumerate(steps):
             row = unit_by_key.get((clip, step))
             if row is None:
                 raise ProbeError(f"missing unit row {(clip, step)}")
-            student[clip, position] = float(row["velocity_mse"]["student_off"])
-            aligned[clip, position] = float(row["velocity_mse"]["teacher_aligned"])
-            shuffled[clip, position] = float(row["velocity_mse"]["teacher_shuffled"])
+            student[clip_position, position] = float(
+                row["velocity_mse"]["student_off"]
+            )
+            aligned[clip_position, position] = float(
+                row["velocity_mse"]["teacher_aligned"]
+            )
+            shuffled[clip_position, position] = float(
+                row["velocity_mse"]["teacher_shuffled"]
+            )
 
     rollout_by_key: dict[tuple[int, str], Mapping[str, Any]] = {}
     for row in rollout_rows:
@@ -352,7 +426,7 @@ def analyze_rows(
             source_values[source] = np.asarray(
                 [
                     float(rollout_by_key[(clip, source)]["metrics"][metric])
-                    for clip in range(num_clips)
+                    for clip in clip_indexes
                 ],
                 dtype=np.float64,
             )
@@ -423,31 +497,68 @@ def analyze_rows(
     )
 
 
-def _manifest_selection(manifest: Path, num_clips: int) -> list[dict[str, Any]]:
+def _manifest_selection(
+    manifest: Path,
+    num_clips: int,
+    *,
+    start_index: int = 0,
+    disjoint_from_index_range: tuple[int, int] | None = None,
+) -> list[dict[str, Any]]:
     rows = read_jsonl(manifest)
-    if len(rows) < num_clips:
-        raise ProbeError(f"train manifest has only {len(rows)} < {num_clips} rows")
+    if start_index < 0:
+        raise ProbeError("start-index must be non-negative")
+    stop_index = start_index + num_clips
+    if len(rows) < stop_index:
+        raise ProbeError(
+            f"train manifest has only {len(rows)} < required stop index {stop_index}"
+        )
     for index, row in enumerate(rows):
         if row.get("split") != "train":
             raise ProbeError(f"manifest row {index} is not train-scoped")
         if int(row.get("auxiliary_index", -1)) != index:
             raise ProbeError(f"manifest row {index} has a noncanonical auxiliary index")
-    selected = rows[:num_clips]
+    selected = rows[start_index:stop_index]
     episodes: set[str] = set()
     clip_ids: set[str] = set()
-    for index, row in enumerate(selected):
-        if row.get("split") != "train" or int(row.get("auxiliary_index", -1)) != index:
-            raise ProbeError(f"selected row {index} is not the pinned train item")
+    for local_index, row in enumerate(selected):
+        manifest_index = start_index + local_index
+        if (
+            row.get("split") != "train"
+            or int(row.get("auxiliary_index", -1)) != manifest_index
+        ):
+            raise ProbeError(
+                f"selected row {manifest_index} is not the pinned train item"
+            )
         episode = row.get("episode_dir")
         clip_id = row.get("clip_id")
         if not isinstance(episode, str) or not episode or not isinstance(clip_id, str):
-            raise ProbeError(f"selected row {index} lacks episode/clip identity")
+            raise ProbeError(
+                f"selected row {manifest_index} lacks episode/clip identity"
+            )
         if episode in episodes or clip_id in clip_ids:
             raise ProbeError(
                 "selected calibration clips must be episode- and clip-disjoint"
             )
         episodes.add(episode)
         clip_ids.add(clip_id)
+    if disjoint_from_index_range is not None:
+        forbidden_start, forbidden_stop = disjoint_from_index_range
+        if (
+            forbidden_start < 0
+            or forbidden_stop <= forbidden_start
+            or forbidden_stop > len(rows)
+        ):
+            raise ProbeError("disjoint comparison range is invalid")
+        forbidden_episodes = {
+            str(row.get("episode_dir"))
+            for row in rows[forbidden_start:forbidden_stop]
+        }
+        overlap = episodes & forbidden_episodes
+        if overlap:
+            raise ProbeError(
+                "selected clips overlap parent calibration episodes: "
+                + ", ".join(sorted(overlap))
+            )
     return selected
 
 
@@ -598,8 +709,9 @@ def _prepare_registration(
         raise ProbeError("num-clips must be >=8 and divisible by batch-size")
     if args.batch_size < 2:
         raise ProbeError("batch-size must be >=2 for episode-shuffled controls")
-    if args.nfe != 4:
-        raise ProbeError("the v1 probe is frozen to NFE=4")
+    profile = probe_profile_contract(args.probe_profile, args.nfe, args.start_index)
+    if args.num_clips != 64:
+        raise ProbeError("both frozen profiles require exactly 64 train clips")
     if args.bootstrap_replicates < 1000:
         raise ProbeError("bootstrap-replicates must be at least 1000")
 
@@ -624,7 +736,14 @@ def _prepare_registration(
     stage_outcome = canonical_file(args.stage_outcome, "stage outcome")
     _assert_train_only_path(train_manifest, "train manifest")
     _assert_train_only_path(cache_metadata, "train cache metadata")
-    selected = _manifest_selection(train_manifest, args.num_clips)
+    selected = _manifest_selection(
+        train_manifest,
+        args.num_clips,
+        start_index=args.start_index,
+        disjoint_from_index_range=(0, 64)
+        if profile["adaptive_parent_result"]
+        else None,
+    )
 
     output = Path(args.output_dir).expanduser()
     if output.exists() or output.is_symlink():
@@ -660,6 +779,22 @@ def _prepare_registration(
             "repo_root": str(repo),
             "source_commit": actual_commit,
             "training_source_commit": args.training_source_commit,
+            "experiment_lineage": {
+                "probe_profile": args.probe_profile,
+                "parent_nfe4_result_commit": PARENT_NFE4_RESULT_COMMIT,
+                "parent_nfe4_analysis_identity_sha256": (
+                    PARENT_NFE4_ANALYSIS_IDENTITY
+                ),
+                "parent_nfe4_frozen_decision": PARENT_NFE4_DECISION,
+                "parent_stop_remains_final": True,
+                "followup_role": (
+                    "post-NFE4 mechanistic test of the adaptively observed "
+                    "high-noise-only teacher effect; never a reinterpretation "
+                    "or overwrite of the NFE4 STOP"
+                    if profile["adaptive_parent_result"]
+                    else "original frozen NFE4 eligibility probe"
+                ),
+            },
             "teacher_student_contract": {
                 "student_rollin": (
                     "same checkpoint and production off semantics: causal generated-feature "
@@ -669,21 +804,42 @@ def _prepare_registration(
                 "teacher_shuffled": "same checkpoint, scheduled next-item V-JEPA from a different episode",
                 "query_state": "identical causal-student-visited video and auxiliary state",
                 "flow_target": "fixed initial video noise minus clean video latent",
-                "scored_states": "NFE-4 video-active states only; pure auxiliary-prefix calls excluded",
+                "scored_states": (
+                    f"NFE-{args.nfe} video-active states only; pure "
+                    "auxiliary-prefix calls excluded"
+                ),
             },
             "data_contract": {
                 "split": "train",
                 "clip_count": args.num_clips,
-                "clip_indices": list(range(args.num_clips)),
+                "clip_indices": list(
+                    range(args.start_index, args.start_index + args.num_clips)
+                ),
+                "disjoint_from_parent_nfe4_indices_0_through_63": (
+                    True
+                    if profile["adaptive_parent_result"]
+                    else None
+                ),
+                "episode_overlap_with_parent_nfe4_indices_0_through_63": (
+                    0 if profile["adaptive_parent_result"] else None
+                ),
                 "all_selected_episodes_unique": True,
                 "protected_test_opened": False,
                 "validation_opened": False,
             },
             "frozen_parameters": {
+                "probe_profile": args.probe_profile,
                 "nfe": args.nfe,
+                "start_index": args.start_index,
                 "batch_size": args.batch_size,
                 "seed": args.seed,
                 "bootstrap_replicates": args.bootstrap_replicates,
+                "expected_video_active_steps": profile[
+                    "expected_video_active_steps"
+                ],
+                "expected_active_video_sigmas": profile[
+                    "expected_active_video_sigmas"
+                ],
                 "eligibility": {
                     "teacher_better_unit_fraction_min": 0.60,
                     "aligned_vs_student_velocity_gain_min_percent": 5.0,
@@ -694,18 +850,20 @@ def _prepare_registration(
             },
             "selected_clips": [
                 {
-                    "clip_index": index,
+                    "clip_index": args.start_index + local_index,
                     "clip_id": row["clip_id"],
                     "episode_dir": row["episode_dir"],
                 }
-                for index, row in enumerate(selected)
+                for local_index, row in enumerate(selected)
             ],
             "inputs": records,
             "verified_provenance_links": provenance_links,
             "output_dir": str(output),
             "claim_boundary": (
                 "teacher-eligibility probe only; teacher uses clean future V-JEPA, "
-                "no student optimization or deployable improvement is claimed"
+                "no student optimization or deployable improvement is claimed; "
+                "the NFE2 profile is a post-NFE4 mechanistic follow-up and cannot "
+                "change the frozen NFE4 STOP"
             ),
         }
     )
@@ -842,6 +1000,8 @@ def _run_batch(
     selected: Sequence[Mapping[str, Any]],
     *,
     nfe: int,
+    expected_active_steps: int,
+    expected_active_video_sigmas: Sequence[float] | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
     import torch
     from robot_wm.modeling.dual_diffusion.conditioning import (
@@ -918,6 +1078,27 @@ def _run_batch(
                 "faithful cascade did not expose auxiliary and video phases"
             )
         active_steps = nfe - int(tf_only_steps)
+        if active_steps != expected_active_steps:
+            raise ProbeError(
+                "video-active step count differs from the profile: "
+                f"{active_steps} != {expected_active_steps}"
+            )
+        active_video_sigmas = [
+            float(schedule.video[step]) for step in range(tf_only_steps, nfe)
+        ]
+        if expected_active_video_sigmas is not None and (
+            len(active_video_sigmas) != len(expected_active_video_sigmas)
+            or any(
+                not math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-8)
+                for observed, expected in zip(
+                    active_video_sigmas, expected_active_video_sigmas, strict=True
+                )
+            )
+        ):
+            raise ProbeError(
+                "video-active sigma nodes differ from the frozen profile: "
+                f"{active_video_sigmas} != {list(expected_active_video_sigmas)}"
+            )
         unit_rows: list[dict[str, Any]] = []
         wan_calls = 0
 
@@ -1209,18 +1390,24 @@ def command_run(args: argparse.Namespace) -> int:
     rollout_rows: list[dict[str, Any]] = []
     wan_calls = 0
     observed_active_steps: int | None = None
+    frozen = registration["frozen_parameters"]
     for start in range(0, args.num_clips, args.batch_size):
+        batch_rows = selected_rows[start : start + args.batch_size]
         descriptors = [
-            {"clip_index": index, **selected_rows[index]}
-            for index in range(start, start + args.batch_size)
+            {**row, "clip_index": int(row["auxiliary_index"])}
+            for row in batch_rows
         ]
-        samples = [dataset[index] for index in range(start, start + args.batch_size)]
+        samples = [dataset[int(row["auxiliary_index"])] for row in batch_rows]
         batch = _move_samples(samples, device)
         batch_units, batch_rollouts, batch_calls, batch_active_steps = _run_batch(
             model,
             batch,
             descriptors,
             nfe=args.nfe,
+            expected_active_steps=int(frozen["expected_video_active_steps"]),
+            expected_active_video_sigmas=frozen[
+                "expected_active_video_sigmas"
+            ],
         )
         if observed_active_steps is None:
             observed_active_steps = batch_active_steps
@@ -1258,10 +1445,15 @@ def command_run(args: argparse.Namespace) -> int:
             "registration_identity_sha256": registration["identity_sha256"],
             "analysis_identity_sha256": analysis["identity_sha256"],
             "decision": analysis["decision"],
+            "probe_profile": args.probe_profile,
             "unit_row_count": len(unit_rows),
             "rollout_row_count": len(rollout_rows),
             "observed_tf_only_steps": args.nfe - active_steps,
             "observed_video_active_steps": active_steps,
+            "observed_active_video_sigmas": sorted(
+                {float(row["video_sigma"]) for row in unit_rows}, reverse=True
+            ),
+            "parent_nfe4_stop_preserved": True,
             "observed_wan_forward_calls": wan_calls,
             "expected_wan_forward_calls": (args.num_clips // args.batch_size)
             * ((args.nfe + 2 * active_steps) + len(SOURCES) * args.nfe),
@@ -1306,6 +1498,7 @@ def command_audit(args: argparse.Namespace) -> int:
         if not identity_valid(payload) or payload.get("schema") != schema:
             raise ProbeError(f"{label} identity/schema is invalid")
     frozen = registration["frozen_parameters"]
+    profile = validate_recorded_profile(frozen, complete)
     recomputed = analyze_rows(
         unit_rows,
         rollout_rows,
@@ -1359,6 +1552,8 @@ def command_audit(args: argparse.Namespace) -> int:
             "input_hashes_valid": True,
             "observed_tf_only_steps": complete["observed_tf_only_steps"],
             "observed_video_active_steps": complete["observed_video_active_steps"],
+            "probe_profile": profile["profile"],
+            "legacy_a375870_artifact": profile["legacy_a375870_artifact"],
             "protected_test_opened": False,
             "student_training_launched": False,
         }
@@ -1392,9 +1587,11 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--stage-outcome", required=True)
     run.add_argument("--output-dir", required=True)
     run.add_argument("--num-clips", type=int, default=64)
+    run.add_argument("--start-index", type=int, default=0)
     run.add_argument("--batch-size", type=int, default=2)
     run.add_argument("--nfe", type=int, default=4)
     run.add_argument("--seed", type=int, default=20260808)
+    run.add_argument("--probe-profile", default=ORIGINAL_PROFILE)
     run.add_argument("--bootstrap-replicates", type=int, default=10_000)
 
     audit = subparsers.add_parser("audit")

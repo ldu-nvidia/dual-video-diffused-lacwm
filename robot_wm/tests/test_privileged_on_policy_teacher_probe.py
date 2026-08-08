@@ -53,6 +53,28 @@ def _rollout_row(clip: int, source: str, value: float):
 
 
 class ProbeAnalysisTest(unittest.TestCase):
+    def test_high_noise_profile_is_frozen_to_disjoint_nfe2_slice(self):
+        contract = probe.probe_profile_contract(
+            probe.HIGH_NOISE_NFE2_PROFILE, 2, 64
+        )
+        self.assertEqual(contract["expected_video_active_steps"], 1)
+        self.assertEqual(contract["expected_active_video_sigmas"], [1.0])
+        with self.assertRaisesRegex(probe.ProbeError, "indices 64--127"):
+            probe.probe_profile_contract(probe.HIGH_NOISE_NFE2_PROFILE, 2, 0)
+        with self.assertRaisesRegex(probe.ProbeError, "NFE=2"):
+            probe.probe_profile_contract(probe.HIGH_NOISE_NFE2_PROFILE, 4, 64)
+
+    def test_legacy_nfe4_artifact_remains_auditable(self):
+        profile = probe.validate_recorded_profile(
+            {"nfe": 4}, {"observed_video_active_steps": 2}
+        )
+        self.assertEqual(profile["profile"], probe.ORIGINAL_PROFILE)
+        self.assertTrue(profile["legacy_a375870_artifact"])
+        with self.assertRaisesRegex(probe.ProbeError, "video-active count"):
+            probe.validate_recorded_profile(
+                {"nfe": 4}, {"observed_video_active_steps": 1}
+            )
+
     def test_identity_detects_mutation(self):
         payload = probe.identity_payload({"value": 1})
         self.assertTrue(probe.identity_valid(payload))
@@ -62,11 +84,11 @@ class ProbeAnalysisTest(unittest.TestCase):
     def test_known_favorable_teacher_passes_all_gates(self):
         units = [
             _unit_row(clip, step, student=10.0, aligned=8.0, shuffled=9.0)
-            for clip in range(8)
+            for clip in range(64, 72)
             for step in (2, 3)
         ]
         rollouts = []
-        for clip in range(8):
+        for clip in range(64, 72):
             rollouts.extend(
                 (
                     _rollout_row(clip, "off", 10.0),
@@ -121,7 +143,7 @@ class ProbeAnalysisTest(unittest.TestCase):
 class ManifestContractTest(unittest.TestCase):
     def _write_manifest(self, path: Path, split: str = "train") -> None:
         with path.open("w", encoding="utf-8") as handle:
-            for index in range(8):
+            for index in range(128):
                 handle.write(
                     json.dumps(
                         {
@@ -142,6 +164,37 @@ class ManifestContractTest(unittest.TestCase):
             self.assertEqual(
                 [row["auxiliary_index"] for row in selected], list(range(8))
             )
+
+    def test_disjoint_followup_slice_uses_indices_64_through_127(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "train.jsonl"
+            self._write_manifest(manifest)
+            selected = probe._manifest_selection(
+                manifest,
+                64,
+                start_index=64,
+                disjoint_from_index_range=(0, 64),
+            )
+            self.assertEqual(
+                [row["auxiliary_index"] for row in selected], list(range(64, 128))
+            )
+
+    def test_followup_rejects_episode_overlap_with_parent_slice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "train.jsonl"
+            self._write_manifest(manifest)
+            rows = [json.loads(line) for line in manifest.read_text().splitlines()]
+            rows[64]["episode_dir"] = rows[0]["episode_dir"]
+            manifest.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(probe.ProbeError, "overlap parent"):
+                probe._manifest_selection(
+                    manifest,
+                    64,
+                    start_index=64,
+                    disjoint_from_index_range=(0, 64),
+                )
 
     def test_nontrain_row_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
