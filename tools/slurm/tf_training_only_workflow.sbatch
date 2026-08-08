@@ -81,10 +81,28 @@ if [[ "$MODE" == train || "$MODE" == evaluate ]]; then
 fi
 if [[ "$MODE" == canary ]]; then ARM="TFREG-ON"; fi
 
-if [[ "$MODE" == seal ]]; then
-  exec "$PYTHON_BIN" "$HELPER" seal --registration "$REGISTRATION"
-fi
-if [[ "$MODE" == analyze ]]; then
+# Sealing and analysis resolve the saved Hydra configs, whose registered path
+# fields are environment interpolations.  Restore those common values before
+# either helper runs; the original workflow exited too early and left the
+# completed snapshots unevaluated even though training itself succeeded.
+if [[ "$MODE" == seal || "$MODE" == analyze ]]; then
+  IFS=$'\t' read -r \
+    _ARM_CODE _CONFIG_NAME _RUN_NAME _RUN_IDENTITY _RUN_DIR _SNAPSHOT _PLAN \
+    _EVAL_DIR _PYTHON_REGISTERED _VIDEOX_HOME_VALUE _WAN_DIR_VALUE \
+    _PARENT_SNAPSHOT _TRAIN_MANIFEST _TRAIN_METADATA _VAL_MANIFEST _VAL_METADATA \
+    < <("$PYTHON_BIN" "$HELPER" values --registration "$REGISTRATION" \
+        --arm TFREG-OFF --format tsv)
+  [[ "$_PYTHON_REGISTERED" == "$PYTHON_BIN" ]] || \
+    die "registered Python changed"
+  export TFREG_PARENT_SNAPSHOT="$_PARENT_SNAPSHOT"
+  export TFREG_TRAIN_MANIFEST="$_TRAIN_MANIFEST"
+  export TFREG_TRAIN_METADATA="$_TRAIN_METADATA"
+  export TFREG_VAL_MANIFEST="$_VAL_MANIFEST"
+  export TFREG_VAL_METADATA="$_VAL_METADATA"
+  export TFREG_RUN_ROOT="$STUDY_ROOT/training"
+  if [[ "$MODE" == seal ]]; then
+    exec "$PYTHON_BIN" "$HELPER" seal --registration "$REGISTRATION"
+  fi
   exec "$PYTHON_BIN" "$HELPER" analyze --registration "$REGISTRATION"
 fi
 [[ "$ARM" == TFREG-OFF || "$ARM" == TFREG-ON ]] || die "invalid arm"

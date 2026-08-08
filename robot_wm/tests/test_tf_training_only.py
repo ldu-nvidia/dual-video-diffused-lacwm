@@ -152,3 +152,22 @@ def test_protocol_has_one_parameter_matched_intervention():
     assert contract.TRAIN_UPDATES == 200
     assert contract.TRAIN_CLIPS == 512
     assert contract.VALIDATION_CLIPS == 64
+
+
+def test_seal_and_analysis_restore_registered_hydra_environment_before_exit():
+    workflow = (
+        ROOT / "tools/slurm/tf_training_only_workflow.sbatch"
+    ).read_text(encoding="utf-8")
+    branch = workflow.index('if [[ "$MODE" == seal || "$MODE" == analyze ]]')
+    restore = workflow.index('export TFREG_PARENT_SNAPSHOT="$_PARENT_SNAPSHOT"')
+    seal = workflow.index('exec "$PYTHON_BIN" "$HELPER" seal', branch)
+    analyze = workflow.index('exec "$PYTHON_BIN" "$HELPER" analyze', branch)
+    assert branch < restore < seal < analyze
+    for name in (
+        "TFREG_TRAIN_MANIFEST",
+        "TFREG_TRAIN_METADATA",
+        "TFREG_VAL_MANIFEST",
+        "TFREG_VAL_METADATA",
+        "TFREG_RUN_ROOT",
+    ):
+        assert f"export {name}=" in workflow[branch:seal]
