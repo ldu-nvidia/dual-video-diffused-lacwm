@@ -62,10 +62,11 @@ REGISTRATION=$STUDY_ROOT/registration.json
 
 ENCODE_JOB=$(sbatch --parsable --output="$STUDY_ROOT/logs/encode-%j.out" --error="$STUDY_ROOT/logs/encode-%j.err" \
   "$REPO/tools/slurm/action_cycle_recoverability_encode.sbatch" \
-  "$REGISTRATION" "$PYTHON_BIN" "$VIDEOX_HOME" "$WAN_DIR")
+  "$REGISTRATION" "$PYTHON_BIN" "$VIDEOX_HOME" "$WAN_DIR" "$REPO")
 ANALYSIS_JOB=$(sbatch --parsable --dependency="afterok:$ENCODE_JOB" --kill-on-invalid-dep=yes \
   --output="$STUDY_ROOT/logs/analyze-%j.out" --error="$STUDY_ROOT/logs/analyze-%j.err" \
-  "$REPO/tools/slurm/action_cycle_recoverability_analyze.sbatch" "$REGISTRATION" "$PYTHON_BIN")
+  "$REPO/tools/slurm/action_cycle_recoverability_analyze.sbatch" \
+  "$REGISTRATION" "$PYTHON_BIN" "$REPO")
 "$PYTHON_BIN" "$TOOL" record-submission --registration "$REGISTRATION" \
   --encode-job-id "$ENCODE_JOB" --analysis-job-id "$ANALYSIS_JOB" >/dev/null
 echo "encode_job=$ENCODE_JOB analysis_job=$ANALYSIS_JOB registration=$REGISTRATION"

@@ -13,12 +13,17 @@
 
 set -euo pipefail
 
-[[ $# -eq 4 ]] || { echo "usage: $0 REGISTRATION PYTHON VIDEOX_HOME WAN_DIR" >&2; exit 2; }
+[[ $# -eq 5 ]] || { echo "usage: $0 REGISTRATION PYTHON VIDEOX_HOME WAN_DIR REPO" >&2; exit 2; }
 REGISTRATION=$1
 PYTHON_BIN=$2
 VIDEOX_HOME=$3
 WAN_DIR=$4
-REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
+REPO=$5
+[[ $REPO == /* && -d $REPO && ! -L $REPO ]] || {
+  echo "repository must be an explicit absolute directory" >&2
+  exit 2
+}
+REPO=$(realpath -e -- "$REPO")
 TOOL=$REPO/tools/action_cycle_recoverability.py
 LUSTRE_BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
 

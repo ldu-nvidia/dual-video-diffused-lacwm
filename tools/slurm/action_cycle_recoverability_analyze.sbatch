@@ -13,10 +13,15 @@
 
 set -euo pipefail
 
-[[ $# -eq 2 ]] || { echo "usage: $0 REGISTRATION PYTHON" >&2; exit 2; }
+[[ $# -eq 3 ]] || { echo "usage: $0 REGISTRATION PYTHON REPO" >&2; exit 2; }
 REGISTRATION=$1
 PYTHON_BIN=$2
-REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
+REPO=$3
+[[ $REPO == /* && -d $REPO && ! -L $REPO ]] || {
+  echo "repository must be an explicit absolute directory" >&2
+  exit 2
+}
+REPO=$(realpath -e -- "$REPO")
 TOOL=$REPO/tools/action_cycle_recoverability.py
 LUSTRE_BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
 [[ -f $REGISTRATION && -x $PYTHON_BIN ]] || { echo "registered runtime input is missing" >&2; exit 2; }

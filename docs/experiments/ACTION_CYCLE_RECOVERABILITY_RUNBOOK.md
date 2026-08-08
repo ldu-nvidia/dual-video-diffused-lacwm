@@ -8,6 +8,10 @@ The `batch` partition rejects zero-GPU submissions. Consequently the analysis
 job requests one GPU only as scheduler bookkeeping; fitting and bootstrap
 remain explicitly CPU-only.
 
+The submission wrapper passes the canonical repository path explicitly to both
+Slurm entrypoints. Slurm executes a copied spool script, so an entrypoint must
+not infer the repository from `BASH_SOURCE` at runtime.
+
 ```bash
 BASE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
 REPO=$BASE/src/action-cycle-recoverability/dual-video-diffused-lacwm

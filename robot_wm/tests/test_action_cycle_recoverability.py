@@ -292,6 +292,10 @@ def test_slurm_contract_is_one_gpu_encode_then_cpu_analysis() -> None:
     assert probe.fixed_protocol()["analysis_scheduler_bookkeeping_gpus"] == 1
     assert probe.fixed_protocol()["analysis_cuda_usage_allowed"] is False
     assert "analyze --registration" in analyze
+    assert "REPO=$5" in encode and "REPO=$3" in analyze
+    assert "BASH_SOURCE" not in encode and "BASH_SOURCE" not in analyze
+    assert '"$WAN_DIR" "$REPO"' in submit
+    assert '"$REGISTRATION" "$PYTHON_BIN" "$REPO"' in submit
     assert '--dependency="afterok:$ENCODE_JOB"' in submit
     assert "--kill-on-invalid-dep=yes" in submit
     assert "wandb-check" in encode and "wandb-check" in analyze
