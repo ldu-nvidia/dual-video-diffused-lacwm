@@ -143,6 +143,17 @@ source "$ACTIVATE"
 PROJECT_ROOT="$REPO_ROOT/projects/latent_action_models"
 export PYTHONPATH="$REPO_ROOT:$PROJECT_ROOT:$REPO_ROOT/tools/env/videox_shim:$VIDEOX_HOME"
 
+# The sealed Hydra config intentionally keeps these paths as environment
+# interpolations.  Restore every registered training-side value before any
+# mode-specific consumer (including evaluation) loads that config.
+export TRD_VPM_SNAPSHOT="$WARMSTART"
+export TRD_TRAIN_CLIP_MANIFEST="$TRAIN_MANIFEST"
+export TRD_TRAIN_CACHE_METADATA="$TRAIN_METADATA"
+export TRD_RUN_ROOT="$STUDY_ROOT/training"
+unset TRD_VALIDATION_CLIP_MANIFEST TRD_VALIDATION_CACHE_METADATA \
+  VJEPA_VAL_CLIP_MANIFEST VJEPA_VAL_CACHE_METADATA VJEPA_TEST_CLIP_MANIFEST \
+  VJEPA_TEST_CACHE_METADATA
+
 RUNTIME_LABEL="${MODE}-${ARM_CODE,,}"
 RUNTIME_JSON="$RUNTIME_DIR/$RUNTIME_LABEL.json"
 [[ ! -e "$RUNTIME_JSON" && ! -L "$RUNTIME_JSON" ]] || \
@@ -161,13 +172,6 @@ if [[ "$MODE" == evaluate ]]; then
     "$EVALUATOR" evaluate --registration "$REGISTRATION" \
     --arm "$ARM_CODE" --output-dir "$EVAL_DIR"
 fi
-
-export TRD_VPM_SNAPSHOT="$WARMSTART"
-export TRD_TRAIN_CLIP_MANIFEST="$TRAIN_MANIFEST"
-export TRD_TRAIN_CACHE_METADATA="$TRAIN_METADATA"
-unset TRD_VALIDATION_CLIP_MANIFEST TRD_VALIDATION_CACHE_METADATA \
-  VJEPA_VAL_CLIP_MANIFEST VJEPA_VAL_CACHE_METADATA VJEPA_TEST_CLIP_MANIFEST \
-  VJEPA_TEST_CACHE_METADATA
 
 if [[ "$MODE" == canary ]]; then
   CANARY_DIR="$STUDY_ROOT/memory_canary"
@@ -219,7 +223,6 @@ WANDB_RECEIPT="$RUNTIME_DIR/wandb-${ARM_CODE,,}.json"
   die "W&B privacy receipt already exists"
 "$PYTHON_BIN" "$HELPER" wandb-check > "$WANDB_RECEIPT"
 "$PYTHON_BIN" "$HELPER" write-plan --registration "$REGISTRATION" --arm "$ARM_CODE" >/dev/null
-export TRD_RUN_ROOT="$STUDY_ROOT/training"
 export TRD_TRAIN_TRACE="$TRACE"
 export LACWM_RUN_IDENTITY_SHA256="$RUN_IDENTITY"
 export WANDB_ENTITY=zijiandu

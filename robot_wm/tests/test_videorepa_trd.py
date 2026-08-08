@@ -432,6 +432,15 @@ def test_slurm_workflow_is_nonrequeueable_and_excludes_all_bad_nodes():
         'torch.distributed.run --standalone --nproc_per_node=8 "$TRAINER"'
     )
     assert '"$DEPLOYMENT_CANARY" verify' in sbatch
+    evaluate_branch = sbatch.index('if [[ "$MODE" == evaluate ]]')
+    for required_export in (
+        'export TRD_VPM_SNAPSHOT="$WARMSTART"',
+        'export TRD_TRAIN_CLIP_MANIFEST="$TRAIN_MANIFEST"',
+        'export TRD_TRAIN_CACHE_METADATA="$TRAIN_METADATA"',
+        'export TRD_RUN_ROOT="$STUDY_ROOT/training"',
+    ):
+        assert sbatch.count(required_export) == 1
+        assert sbatch.index(required_export) < evaluate_branch
 
 
 @pytest.mark.parametrize(
