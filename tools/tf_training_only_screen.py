@@ -798,6 +798,10 @@ def command_seal(args) -> int:
         config_record = file_record(
             Path(paths["run_dir"]) / ".hydra/config.yaml", f"{arm.code} resolved config"
         )
+        # ``wandb.id`` remains an oc.env interpolation in the saved Hydra
+        # config.  Resolve it against the immutable identity of the arm being
+        # sealed, rather than inheriting whichever arm happened to run last.
+        os.environ["TFREG_RUN_IDENTITY"] = expected_identity
         validate_resolved_config(
             OmegaConf.load(config_record["path"]), registration, arm
         )

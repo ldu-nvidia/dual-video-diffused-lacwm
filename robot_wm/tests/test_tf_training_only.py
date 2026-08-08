@@ -171,3 +171,15 @@ def test_seal_and_analysis_restore_registered_hydra_environment_before_exit():
         "TFREG_RUN_ROOT",
     ):
         assert f"export {name}=" in workflow[branch:seal]
+
+
+def test_seal_sets_each_registered_arm_identity_before_hydra_resolution():
+    source = (ROOT / "tools/tf_training_only_screen.py").read_text(
+        encoding="utf-8"
+    )
+    seal = source.index("def command_seal")
+    set_identity = source.index(
+        'os.environ["TFREG_RUN_IDENTITY"] = expected_identity', seal
+    )
+    validate = source.index("validate_resolved_config(", set_identity)
+    assert seal < set_identity < validate
