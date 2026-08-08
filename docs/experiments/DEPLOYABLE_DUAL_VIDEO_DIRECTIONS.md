@@ -700,8 +700,10 @@ ordinary forward-noised state; no on-policy advantage is identifiable here.
 capacity-matched `BASE`, aligned and shuffled PFD residual adapters, and only
 then a gated variant. The oracle rollout gains are not deployable, and mean
 teacher/student velocity distance 1.23269 leaves reachability open. Exact
-records are in `PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md` and the disjoint
-NFE-2 result document.
+records are in
+[`PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`](PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md)
+and
+[`PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md`](PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md).
 
 ## Direction 11c: action-conditioned JEPA predictor, not a future encoder
 

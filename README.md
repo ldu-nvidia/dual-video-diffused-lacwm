@@ -50,6 +50,12 @@ harmful at the final low-noise update, leaving only 50% favorable units versus
 the registered 60% requirement. The exact timestep split and immutable evidence
 are in
 [`PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`](docs/experiments/PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md).
+A preregistered replication on 64 disjoint train episodes then confirmed that
+the clean-feature teacher is uniformly strong at the sole NFE-2 pure-noise
+video update (89.95% velocity-MSE gain over off; 64/64 favorable). This passes
+only the prerequisite for a feature-free `PFD-VIDEO` student screen; no student
+or deployable gain exists yet. See
+[`PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md`](docs/experiments/PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md).
 The read-only confidence-gating audit and its fail-closed result are documented
 in [`CONFIDENCE_GATED_AUXILIARY_AUDIT_RESULT.md`](docs/experiments/CONFIDENCE_GATED_AUXILIARY_AUDIT_RESULT.md).
 

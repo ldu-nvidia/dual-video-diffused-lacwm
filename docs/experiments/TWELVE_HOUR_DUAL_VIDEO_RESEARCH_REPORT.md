@@ -397,7 +397,7 @@ it remains target-leaking. No student was trained. A schedule-masked,
 early-update-only residual teacher was selected post hoc and therefore was
 required to pass on a disjoint train calibration subset before optimization.
 Exact NFE-4 evidence is in
-`PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`.
+[`PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md`](PRIVILEGED_ON_POLICY_TEACHER_ELIGIBILITY.md).
 
 That follow-up has now passed without opening validation. On train indices
 64--127, disjoint by episode from the first 64 clips, the sole NFE-2 video
@@ -415,6 +415,8 @@ residual baseline, aligned and shuffled variants, and a capacity-matched base.
 Only a feature-free student's held-out improvement can establish deployable
 transfer. The teacher/student velocity distance is still large (mean 1.23269),
 so reachability is unresolved.
+The immutable replication record is
+[`PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md`](PRIVILEGED_TEACHER_HIGH_NOISE_NFE2_RESULT.md).
 
 A second inference-causal semantic route remains untested and should not be
 conflated with the failed encoder-feature branch. The official V-JEPA 2 release
