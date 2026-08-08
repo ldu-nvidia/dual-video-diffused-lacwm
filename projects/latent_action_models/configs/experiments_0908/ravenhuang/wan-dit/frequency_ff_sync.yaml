@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - /experiments_0908/frequency_forcing_common
+  - _self_
+
+name: frequency-fsync-joint-aligned
+model:
+  dual_diffusion:
+    condition_mode: matched
+    condition_on_tf: true
+    condition_on_tf_clock: true
+    schedule_mode: aligned
+    tf_lead_logit: 0.0
+    tf_loss_weight: 1.0
+    state_gate_init: 0.02
+    clock_gate_init: 0.02
+    parameter_matched_control: false
+wandb:
+  tags: [abc, frequency-forcing, FSYNC, aligned, seed-1234]

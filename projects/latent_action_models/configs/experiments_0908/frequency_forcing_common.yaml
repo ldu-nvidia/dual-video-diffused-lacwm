@@ -1,0 +1,130 @@
+# @package _global_
+defaults:
+  - override /datasets@dataset: transformed_fixed_abc_rgb_action
+  - override /datasets@val_dataset: transformed_fixed_abc_rgb_action
+  - override /datasets@viz_dataset: transformed_fixed_abc_rgb_action
+  - override /models@model: dual_explicit_action_dit_frequency
+  - override /tokenizers/rgb@model.rgb_tokenizer: wan_vae
+  - override /optimizers@optimizer_factory: adamw
+  - override /lr_schedulers@lr_scheduler_factory: linear_warmup_cosine_decay
+
+name: frequency-forcing-common
+seed: 1234
+
+dataset: &training_dataset
+  padding_dim: 157
+  seed: ${seed}
+  infinite: true
+  img_augment: false
+  emit_crop_rgb: false
+  transform: {sample_size: 13, chunk_size: 5}
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:FREQ_TRAIN_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:FREQ_TRAIN_CACHE_METADATA}
+val_dataset:
+  <<: *training_dataset
+  infinite: false
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:FREQ_VAL_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:FREQ_VAL_CACHE_METADATA}
+viz_dataset:
+  <<: *training_dataset
+  infinite: false
+  datasets:
+    ABC:
+      clip_manifest: ${oc.env:FREQ_VAL_CLIP_MANIFEST}
+      cache_metadata: ${oc.env:FREQ_VAL_CACHE_METADATA}
+
+data_loader:
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+val_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${val_dataset}
+    batch_size: 2
+    num_workers: 2
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: false
+viz_data_loader:
+  - _target_: torchdata.stateful_dataloader.StatefulDataLoader
+    dataset: ${viz_dataset}
+    batch_size: 1
+    num_workers: 1
+    pin_memory: true
+    prefetch_factor: 1
+    persistent_workers: false
+
+model:
+  rgb_tokenizer:
+    output_dim: 16
+    input_mean: [0.5, 0.5, 0.5]
+    input_std: [0.5, 0.5, 0.5]
+  forward_model:
+    lora_rank: 64
+    lora_alpha: 128
+    lora_dropout: 0.05
+    gradient_checkpointing: true
+  num_history_frames: 5
+  num_future_frames: 8
+  viz_num_steps: 1
+  action_encoder:
+    action_dim: ${dataset.padding_dim}
+    chunk_size: ${dataset.transform.chunk_size}
+  morphology_tokens:
+    _target_: robot_wm.modeling.modules.learnable_embeddings.LearnableEmbeddings
+    num_embeddings: 10
+    embedding_dim: 64
+
+optimizer_factory: {lr: 1e-4, betas: [0.9, 0.95]}
+lr_scheduler_factory:
+  lr_lambda:
+    warmup_steps: 20
+    total_steps: ${trainer.config.max_iter}
+    final_learning_rate: 1e-6
+
+wandb:
+  enabled: true
+  mode: online
+  entity: zijiandu
+  project: dual-video-diffusion-private
+  group: null
+  name: ${name}
+  tags: [abc, frequency-forcing, haar-lowpass, controlled-screen, seed-1234]
+  # Preserve unsent files for `wandb sync`, but never let a transient upload
+  # failure pin the distributed workers after the durable checkpoint/receipt.
+  settings:
+    start_method: thread
+    save_code: false
+    finish_timeout: 120.0
+    finish_timeout_raises: false
+
+trainer:
+  config:
+    max_iter: 200
+    gradient_accumulation_steps: 1
+    throughput_warmup_steps: 20
+    load_path: ${oc.env:FREQ_WARM_START}
+    # The historical VPM checkpoint used a 64-channel semantic auxiliary
+    # schema. Keep every trained video/action weight, but initialize the new
+    # six-channel scratchpad identically in all arms.
+    exclude_keys:
+      - forward_model.tf_token_adapter
+      - forward_model.tf_clock_embedding
+      - forward_model.tf_velocity_head
+    logging: {log_every: 5}
+    saving: {save_every: 200}
+    validation: {val_every: 50, n_val_samples: 8, save_best: false}
+    visualization: {viz_every: 200, require_success: true}
+    gradient_clipping: {max_norm: 1.0}
+
+hydra:
+  run:
+    dir: ${oc.env:FREQ_RUN_ROOT}/${name}
+  sweep:
+    dir: ${oc.env:FREQ_RUN_ROOT}/${name}
