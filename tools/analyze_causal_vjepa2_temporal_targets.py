@@ -200,11 +200,19 @@ class EvaluationData:
     cells: Mapping[tuple[int, str], CellData]
 
 
-def _verified_file_record(value: Any, *, label: str) -> Path:
+def _verified_file_record(
+    value: Any, *, label: str, allow_augmented: bool = False
+) -> Path:
     if not isinstance(value, Mapping) or not isinstance(value.get("path"), str):
         raise TemporalAnalysisError(f"{label} lacks a file record")
     path = Path(value["path"]).expanduser().resolve()
-    if path.is_symlink() or vlf.file_record(path) != dict(value):
+    observed = vlf.file_record(path)
+    record_matches = (
+        all(value.get(key) == expected for key, expected in observed.items())
+        if allow_augmented
+        else observed == dict(value)
+    )
+    if path.is_symlink() or not record_matches:
         raise TemporalAnalysisError(f"{label} changed or is not a regular immutable file")
     return path
 
@@ -646,7 +654,9 @@ def load_evaluation(
     if not isinstance(manifest_binding, Mapping):
         raise TemporalAnalysisError("summary lacks development manifest binding")
     manifest_path = _verified_file_record(
-        manifest_binding, label="development manifest"
+        manifest_binding,
+        label="development manifest",
+        allow_augmented=True,
     )
     _, manifest_rows, recomputed_manifest = screen._manifest_record(  # noqa: SLF001
         manifest_path, split="val", expected_clips=expected_clips

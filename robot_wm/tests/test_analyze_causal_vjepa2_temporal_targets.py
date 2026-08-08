@@ -5,6 +5,7 @@ import pytest
 
 from tools import analyze_causal_vjepa2_temporal_targets as analyzer
 from tools import evaluate_causal_vjepa2_temporal_targets as evaluator
+from tools import video_latent_forcing_poc as vlf
 
 
 def _metric_vectors(clips: int, ordinary: float, temporal: float, cosine: float):
@@ -68,6 +69,29 @@ def _evaluations(clips: int = 8):
             cells=cells,
         )
     return evaluations
+
+
+def test_augmented_manifest_file_record_is_verified_without_weakening_bare_records(
+    tmp_path,
+):
+    manifest = tmp_path / "val.jsonl"
+    manifest.write_text('{"clip_id":"clip-0"}\n', encoding="utf-8")
+    bare = vlf.file_record(manifest)
+    augmented = {**bare, "split": "val", "clips": 1}
+    assert analyzer._verified_file_record(  # noqa: SLF001
+        augmented,
+        label="manifest",
+        allow_augmented=True,
+    ) == manifest.resolve()
+    with pytest.raises(analyzer.TemporalAnalysisError):
+        analyzer._verified_file_record(augmented, label="ordinary file")  # noqa: SLF001
+    changed = {**augmented, "sha256": "0" * 64}
+    with pytest.raises(analyzer.TemporalAnalysisError):
+        analyzer._verified_file_record(  # noqa: SLF001
+            changed,
+            label="manifest",
+            allow_augmented=True,
+        )
 
 
 def test_paired_relative_effect_is_ratio_of_means_not_mean_of_ratios():
