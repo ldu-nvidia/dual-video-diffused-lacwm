@@ -795,7 +795,15 @@ def _distributed_action_bank(
     rows: Sequence[Mapping[str, Any]],
     context: vlf.DistributedContext,
 ) -> Tensor:
-    """Read the small action bank once, sharded across ranks."""
+    """Read the small action bank once, sharded across ranks.
+
+    Object collectives on an NCCL process group serialize their payload through
+    CUDA tensors.  That is unnecessary for this CPU-only metadata and can fail
+    before evaluation when the NCCL object buffer requests device memory.  Use
+    a temporary Gloo subgroup so the action-bank exchange remains entirely on
+    CPU; the model process group and all numerical evaluation collectives stay
+    unchanged.
+    """
     local: list[tuple[int, str, np.ndarray]] = []
     for index in range(context.rank, len(dataset), context.world_size):
         sample = dataset[index]
@@ -809,7 +817,23 @@ def _distributed_action_bank(
         ):
             raise TemporalEvaluationError("global action-bank sample is malformed")
         local.append((index, str(sample["clip_id"]), actions.numpy().copy()))
-    gathered = context.gather_objects(local)
+    if context.world_size == 1:
+        gathered: list[Any] = [local]
+    else:
+        if not torch.distributed.is_gloo_available():
+            raise TemporalEvaluationError(
+                "distributed action-bank exchange requires the CPU Gloo backend"
+            )
+        cpu_group = torch.distributed.new_group(backend="gloo")
+        try:
+            gathered = [None] * context.world_size
+            torch.distributed.all_gather_object(
+                gathered,
+                local,
+                group=cpu_group,
+            )
+        finally:
+            torch.distributed.destroy_process_group(cpu_group)
     merged: dict[int, Tensor] = {}
     for shard in gathered:
         for index, clip_id, value in shard:

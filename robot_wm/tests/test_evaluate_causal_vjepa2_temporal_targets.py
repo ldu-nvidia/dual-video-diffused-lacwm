@@ -4,6 +4,7 @@ import inspect
 import copy
 import subprocess
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
@@ -127,6 +128,48 @@ def test_registered_action_permutations_are_bijective_fixed_point_free_and_episo
         assert len(set(permutation)) == len(rows)
         assert all(index != source for index, source in enumerate(permutation))
         assert records[evaluator.action_control(offset)]["episode_disjoint"] is True
+
+
+def test_distributed_action_bank_uses_cpu_gloo_group_not_nccl_object_collective():
+    rows = [
+        {"clip_id": "clip-0"},
+        {"clip_id": "clip-1"},
+    ]
+    dataset = [
+        {
+            "clip_id": row["clip_id"],
+            "actions": torch.full((16, 7), float(index), dtype=torch.float32),
+        }
+        for index, row in enumerate(rows)
+    ]
+    context = SimpleNamespace(rank=0, world_size=2)
+    cpu_group = object()
+
+    def gather(output, local, *, group):
+        assert group is cpu_group
+        output[0] = local
+        output[1] = [
+            (1, "clip-1", dataset[1]["actions"].numpy().copy()),
+        ]
+
+    with (
+        mock.patch.object(torch.distributed, "is_gloo_available", return_value=True),
+        mock.patch.object(
+            torch.distributed, "new_group", return_value=cpu_group
+        ) as new_group,
+        mock.patch.object(
+            torch.distributed, "all_gather_object", side_effect=gather
+        ) as all_gather,
+        mock.patch.object(torch.distributed, "destroy_process_group") as destroy,
+    ):
+        bank = evaluator._distributed_action_bank(dataset, rows, context)  # noqa: SLF001
+
+    new_group.assert_called_once_with(backend="gloo")
+    all_gather.assert_called_once()
+    destroy.assert_called_once_with(cpu_group)
+    assert bank.shape == (2, 16, 7)
+    torch.testing.assert_close(bank[0], dataset[0]["actions"])
+    torch.testing.assert_close(bank[1], dataset[1]["actions"])
 
 
 @pytest.mark.parametrize("arm", evaluator.DOE_ARMS)
