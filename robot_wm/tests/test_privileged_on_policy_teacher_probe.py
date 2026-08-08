@@ -53,6 +53,33 @@ def _rollout_row(clip: int, source: str, value: float):
 
 
 class ProbeAnalysisTest(unittest.TestCase):
+    def test_completion_links_fail_closed(self):
+        registration = {"identity_sha256": "registration-id"}
+        analysis = {
+            "identity_sha256": "analysis-id",
+            "decision": "STOP_NO_ELIGIBLE_TEACHER",
+        }
+        complete = {
+            "registration_identity_sha256": "registration-id",
+            "analysis_identity_sha256": "analysis-id",
+            "decision": "STOP_NO_ELIGIBLE_TEACHER",
+            "unit_row_count": 2,
+            "rollout_row_count": 3,
+            "observed_wan_forward_calls": 10,
+            "expected_wan_forward_calls": 10,
+            "protected_test_opened": False,
+            "validation_opened": False,
+            "student_training_launched": False,
+        }
+        probe.validate_completion_links(
+            registration, complete, analysis, [{}, {}], [{}, {}, {}]
+        )
+        mismatched = {**complete, "observed_wan_forward_calls": 9}
+        with self.assertRaisesRegex(probe.ProbeError, "call accounting"):
+            probe.validate_completion_links(
+                registration, mismatched, analysis, [{}, {}], [{}, {}, {}]
+            )
+
     def test_high_noise_profile_is_frozen_to_disjoint_nfe2_slice(self):
         contract = probe.probe_profile_contract(
             probe.HIGH_NOISE_NFE2_PROFILE, 2, 64

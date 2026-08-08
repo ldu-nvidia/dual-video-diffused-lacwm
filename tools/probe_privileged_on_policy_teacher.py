@@ -126,6 +126,38 @@ def validate_recorded_profile(
     return {**profile, "legacy_a375870_artifact": False}
 
 
+def validate_completion_links(
+    registration: Mapping[str, Any],
+    complete: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    unit_rows: Sequence[Mapping[str, Any]],
+    rollout_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Bind the completion record to its exact inputs, analysis, and call budget."""
+    expected_links = {
+        "registration_identity_sha256": registration.get("identity_sha256"),
+        "analysis_identity_sha256": analysis.get("identity_sha256"),
+        "decision": analysis.get("decision"),
+    }
+    for key, expected in expected_links.items():
+        if complete.get(key) != expected:
+            raise ProbeError(f"completion {key} does not match its linked artifact")
+    if int(complete.get("unit_row_count", -1)) != len(unit_rows):
+        raise ProbeError("completion unit-row count differs from raw rows")
+    if int(complete.get("rollout_row_count", -1)) != len(rollout_rows):
+        raise ProbeError("completion rollout-row count differs from raw rows")
+    if int(complete.get("observed_wan_forward_calls", -1)) != int(
+        complete.get("expected_wan_forward_calls", -2)
+    ):
+        raise ProbeError("completion Wan forward-call accounting differs")
+    if (
+        complete.get("protected_test_opened") is not False
+        or complete.get("validation_opened") is not False
+        or complete.get("student_training_launched") is not False
+    ):
+        raise ProbeError("completion violates the train-only/no-student contract")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1497,6 +1529,9 @@ def command_audit(args: argparse.Namespace) -> int:
     ):
         if not identity_valid(payload) or payload.get("schema") != schema:
             raise ProbeError(f"{label} identity/schema is invalid")
+    validate_completion_links(
+        registration, complete, analysis, unit_rows, rollout_rows
+    )
     frozen = registration["frozen_parameters"]
     profile = validate_recorded_profile(frozen, complete)
     recomputed = analyze_rows(
