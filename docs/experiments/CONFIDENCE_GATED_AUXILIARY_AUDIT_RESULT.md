@@ -36,6 +36,14 @@ lacwm_train/artifacts/dual_video_diffusion/intra_forward_forcing/
 intra-forward-seed1234-20260808-d93d5ee-v3
 ```
 
+The deterministic CPU audit artifact is preserved at:
+
+```text
+/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/
+lacwm_train/artifacts/dual_video_diffusion/confidence_gate_audit/
+confidence-gate-intra-forward-val64-20260808-01264db-v1/analysis.json
+```
+
 Only NFE-1 `MID-ON` validation rows were used for the primary comparisons:
 
 - `autonomous`: this clip's generated midpoint state is injected;
