@@ -102,6 +102,12 @@ def test_sbatch_is_short_eight_b200_non_requeueable_and_does_not_submit():
     assert "#SBATCH --no-requeue" in script
     assert "#SBATCH --exclude=pool0-0081,pool0-0089" in script
     assert "sbatch " not in script
+    assert script.index('export WAN_DIR="$WAN_DIR_VALUE"') < script.index(
+        'source "$ACTIVATE"'
+    )
+    assert script.index('export VIDEOX_HOME="$VIDEOX_HOME_VALUE"') < script.index(
+        'source "$ACTIVATE"'
+    )
     assert "targets.fp16.npy" not in script
     assert '[[ "$REGISTERED_PYTHON" == "$PYTHON_BIN" ]]' in script
 

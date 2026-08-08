@@ -72,7 +72,6 @@ for path in "$WORKFLOW" "$EVALUATOR" "$TRAINER" "$ACTIVATE" "$VERIFY_RUNTIME"; d
 done
 
 unset PYTHONPATH
-source "$ACTIVATE"
 export LACWM_PYTHON="$PYTHON_BIN"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -109,6 +108,11 @@ IFS=$'\t' read -r \
 
 export WAN_DIR="$WAN_DIR_VALUE"
 export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
+# The activation guard validates these directories while it is sourced.  Bind
+# them from the immutable registration before activation instead of allowing
+# the workstation-only /mnt/data2 defaults to take effect on the cluster.
+source "$ACTIVATE"
+
 export LAMO_VPM_SNAPSHOT="$PARENT_SNAPSHOT"
 export LAMO_VPM_SNAPSHOT_SHA256="f67c7bae50c4c279bf6372e098833be32699aca24232d7d489a1f7a45b5a8e21"
 export LAMO_TRAIN_CLIP_MANIFEST="$TRAIN_MANIFEST"
