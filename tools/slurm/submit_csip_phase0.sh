@@ -69,7 +69,7 @@ export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 export PYTHONPATH="$REPO_ROOT"
 "$PYTHON_BIN" "$REPO_ROOT/tools/csip_workflow.py" render \
-  --registration "$REGISTRATION" >/dev/null
+  --registration "$REGISTRATION" --stage train >/dev/null
 
 mapfile -t FIELDS < <(
   "$PYTHON_BIN" - "$REGISTRATION" <<'PY'

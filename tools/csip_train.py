@@ -25,9 +25,9 @@ if str(REPO_ROOT) not in sys.path:
 from robot_wm.modeling.dual_diffusion.causal_spectral_probe import (  # noqa: E402
     FrozenCausalSpectralProbe,
     action_descriptor,
+    angle_neutral_spectral_features,
     causal_spectral_features,
     fit_action_pca,
-    magnitude_only_spectral_features,
     phase0_partition_indexes,
 )
 from tools import csip_contract as contract  # noqa: E402
@@ -135,9 +135,9 @@ def _initialize_wandb(registration: dict[str, Any]) -> tuple[Any, Any]:
             "learning_rate": 3e-4,
             "weight_decay": 1e-4,
             "seed": contract.EXPECTED_SEED,
-            "feature_variants": ["full", "magnitude_only"],
+            "feature_variants": ["full", "angle_neutral"],
             "paired_initialization": "identical_state_before_update_1",
-            "phase_coordinates_zeroed_for_magnitude_only": True,
+            "angle_neutral_preserves_support_as_mask_zero": True,
             "validation_clips_read": 0,
             "protected_test_clips_read": 0,
         },
@@ -203,7 +203,7 @@ def command_train(args: argparse.Namespace) -> int:
     full_features = _extract_features(full, history, device)
     if tuple(full_features.shape) != (512, 9216):
         raise contract.CSIPContractError("training spectral feature geometry differs")
-    magnitude_features = magnitude_only_spectral_features(full_features)
+    angle_neutral_features = angle_neutral_spectral_features(full_features)
     actions = torch.from_numpy(np.array(actions_np, copy=True)).float()
     fit_indexes = torch.tensor(phase0_partition_indexes(512, "fit"), dtype=torch.long)
     calibration_indexes = torch.tensor(
@@ -213,23 +213,23 @@ def command_train(args: argparse.Namespace) -> int:
     targets = pca.transform_actions(actions)
     fit_features = {
         "full": full_features[fit_indexes].to(device),
-        "magnitude_only": magnitude_features[fit_indexes].to(device),
+        "angle_neutral": angle_neutral_features[fit_indexes].to(device),
     }
     fit_targets = targets[fit_indexes].to(device)
     calibration_features = {
         "full": full_features[calibration_indexes].to(device),
-        "magnitude_only": magnitude_features[calibration_indexes].to(device),
+        "angle_neutral": angle_neutral_features[calibration_indexes].to(device),
     }
     calibration_targets = targets[calibration_indexes].to(device)
 
     models = {
         "full": FrozenCausalSpectralProbe().to(device),
-        "magnitude_only": FrozenCausalSpectralProbe().to(device),
+        "angle_neutral": FrozenCausalSpectralProbe().to(device),
     }
     # Freeze a genuinely matched comparison: identical initialization, batch
     # order, optimizer, update count, target, and architecture.  Only the
-    # phase-bearing input coordinates differ.
-    models["magnitude_only"].load_state_dict(models["full"].state_dict(), strict=True)
+    # spectral angle carried by otherwise support-matched phasors differs.
+    models["angle_neutral"].load_state_dict(models["full"].state_dict(), strict=True)
     optimizers = {
         name: torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
         for name, model in models.items()
@@ -330,7 +330,7 @@ def command_train(args: argparse.Namespace) -> int:
             "optimizer_states": {
                 name: optimizer.state_dict() for name, optimizer in optimizers.items()
             },
-            "feature_variants": ["full", "magnitude_only"],
+            "feature_variants": ["full", "angle_neutral"],
             "paired_initialization": "identical_state_before_update_1",
             "model_hidden_dim": 256,
             "spectral_feature_dim": 9216,
@@ -367,7 +367,7 @@ def command_train(args: argparse.Namespace) -> int:
                 "calibration_metrics": calibration,
                 "parameter_count_per_probe": parameter_count_per_probe,
                 "total_trainable_parameter_count": 2 * parameter_count_per_probe,
-                "feature_variants": ["full", "magnitude_only"],
+                "feature_variants": ["full", "angle_neutral"],
                 "paired_initialization": "identical_state_before_update_1",
                 "wandb": {
                     "entity": contract.EXPECTED_ENTITY,

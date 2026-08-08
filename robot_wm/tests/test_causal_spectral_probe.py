@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest import mock
 
@@ -12,21 +13,29 @@ torch = pytest.importorskip("torch")
 from robot_wm.modeling.dual_diffusion.causal_spectral_probe import (  # noqa: E402
     ACTION_DESCRIPTOR_DIM,
     ACTION_TARGET_DIM,
+    PHASE_INCREMENT_COMPONENT_DIM,
     SPECTRAL_FEATURE_DIM,
     VOLUME_MAGNITUDE_FEATURE_DIM,
+    VOLUME_PHASE_COMPONENT_DIM,
     ActionPCATransform,
     FrozenCausalSpectralProbe,
     _energy_mask,
     action_descriptor,
+    angle_neutral_spectral_features,
     causal_spectral_features,
     control_targets,
-    episode_disjoint_cyclic_donors,
+    episode_disjoint_pair_donors,
     fit_action_pca,
     future_motion_latents,
-    magnitude_only_spectral_features,
     phase0_partition_indexes,
 )
-from tools import csip_analyze, csip_contract, csip_latent_cache, csip_train  # noqa: E402
+from tools import (  # noqa: E402
+    csip_analyze,
+    csip_contract,
+    csip_latent_cache,
+    csip_train,
+    csip_workflow,
+)
 
 
 def _latents_from_motion(motion: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -101,15 +110,42 @@ def test_zero_energy_is_fully_masked_and_finite() -> None:
     assert torch.count_nonzero(features) == 0
 
 
-def test_magnitude_only_comparator_keeps_shape_and_zeros_every_phase_channel() -> None:
-    features = torch.randn(3, SPECTRAL_FEATURE_DIM)
-    magnitude = magnitude_only_spectral_features(features)
-    assert magnitude.shape == features.shape
+def test_angle_neutral_comparator_keeps_shape_magnitude_and_phase_support() -> None:
+    features = torch.zeros(3, SPECTRAL_FEATURE_DIM)
+    features[:, :VOLUME_MAGNITUDE_FEATURE_DIM] = torch.randn(
+        3, VOLUME_MAGNITUDE_FEATURE_DIM
+    )
+    volume_real_start = VOLUME_MAGNITUDE_FEATURE_DIM
+    volume_imag_start = volume_real_start + VOLUME_PHASE_COMPONENT_DIM
+    increment_real_start = volume_imag_start + VOLUME_PHASE_COMPONENT_DIM
+    increment_imag_start = increment_real_start + PHASE_INCREMENT_COMPONENT_DIM
+    features[0, volume_real_start] = -0.6
+    features[0, volume_imag_start + 1] = 0.8
+    features[1, increment_real_start + 2] = -1.0
+    features[2, increment_imag_start + 3] = 1.0
+
+    neutral = angle_neutral_spectral_features(features)
+    assert neutral.shape == features.shape
     torch.testing.assert_close(
-        magnitude[:, :VOLUME_MAGNITUDE_FEATURE_DIM],
+        neutral[:, :VOLUME_MAGNITUDE_FEATURE_DIM],
         features[:, :VOLUME_MAGNITUDE_FEATURE_DIM],
     )
-    assert torch.count_nonzero(magnitude[:, VOLUME_MAGNITUDE_FEATURE_DIM:]) == 0
+    volume_support = (
+        (features[:, volume_real_start:volume_imag_start] != 0)
+        | (features[:, volume_imag_start:increment_real_start] != 0)
+    ).float()
+    increment_support = (
+        (features[:, increment_real_start:increment_imag_start] != 0)
+        | (features[:, increment_imag_start:] != 0)
+    ).float()
+    torch.testing.assert_close(
+        neutral[:, volume_real_start:volume_imag_start], volume_support
+    )
+    assert torch.count_nonzero(neutral[:, volume_imag_start:increment_real_start]) == 0
+    torch.testing.assert_close(
+        neutral[:, increment_real_start:increment_imag_start], increment_support
+    )
+    assert torch.count_nonzero(neutral[:, increment_imag_start:]) == 0
 
 
 def test_phase_endpoint_mask_uses_one_rms_shared_across_both_motion_tokens() -> None:
@@ -180,7 +216,26 @@ def test_action_descriptor_and_controls_preserve_sign_semantics() -> None:
     donors = torch.tensor([1, 2, 3, 0], dtype=torch.long)
     targets = control_targets(actions, pca, donors)
     torch.testing.assert_close(targets["inverse"], -targets["aligned"])
-    assert torch.count_nonzero(targets["zero"]) == 0
+    assert torch.count_nonzero(targets["raw_no_action"]) == 0
+
+
+def test_raw_no_action_is_raw_descriptor_zero_not_pca_coordinate_zero() -> None:
+    actions = torch.zeros(2, 13, 5, 23)
+    components = torch.zeros(ACTION_TARGET_DIM, ACTION_DESCRIPTOR_DIM)
+    components[:, :ACTION_TARGET_DIM] = torch.eye(ACTION_TARGET_DIM)
+    pca = ActionPCATransform(
+        mean=torch.ones(ACTION_DESCRIPTOR_DIM),
+        components=components,
+        score_scale=torch.ones(ACTION_TARGET_DIM),
+    )
+    targets = control_targets(
+        actions,
+        pca,
+        torch.tensor([1, 0], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        targets["raw_no_action"], -torch.ones(2, ACTION_TARGET_DIM)
+    )
 
 
 def test_action_pca_rejects_any_population_other_than_fit448() -> None:
@@ -188,12 +243,17 @@ def test_action_pca_rejects_any_population_other_than_fit448() -> None:
         fit_action_pca(torch.zeros(447, ACTION_DESCRIPTOR_DIM))
 
 
-def test_cyclic_control_is_self_and_episode_disjoint() -> None:
-    donors, shift = episode_disjoint_cyclic_donors(["a", "b", "c", "d"])
-    assert shift == 1
-    assert donors.tolist() == [1, 2, 3, 0]
-    with pytest.raises(RuntimeError, match="no episode-disjoint"):
-        episode_disjoint_cyclic_donors(["same", "same"])
+def test_pair_control_is_symmetric_self_disjoint_and_episode_disjoint() -> None:
+    donors, pairs = episode_disjoint_pair_donors(["a", "b", "c", "d"])
+    assert pairs == ((0, 1), (2, 3))
+    assert donors.tolist() == [1, 0, 3, 2]
+    for index, donor in enumerate(donors.tolist()):
+        assert donor != index
+        assert int(donors[donor]) == index
+    with pytest.raises(RuntimeError, match="one clip per episode"):
+        episode_disjoint_pair_donors(["same", "same"])
+    with pytest.raises(ValueError, match="even number"):
+        episode_disjoint_pair_donors(["a", "b", "c"])
 
 
 def test_probe_capacity_and_output_geometry_are_frozen() -> None:
@@ -203,19 +263,32 @@ def test_probe_capacity_and_output_geometry_are_frozen() -> None:
     assert output.shape == (3, ACTION_TARGET_DIM)
 
 
+def _fixed_pair_bootstrap() -> tuple[np.ndarray, np.ndarray]:
+    pair_blocks = np.repeat(
+        np.arange(csip_contract.EXPECTED_VALIDATION_PAIR_BLOCKS, dtype=np.int64), 2
+    )
+    bootstrap = np.tile(
+        np.arange(csip_contract.EXPECTED_VALIDATION_PAIR_BLOCKS, dtype=np.int64),
+        (csip_contract.BOOTSTRAP_REPLICATES, 1),
+    )
+    return pair_blocks, bootstrap
+
+
 def test_bootstrap_gate_uses_fixed_family_and_positive_direction() -> None:
-    bootstrap = np.tile(np.arange(64), (10_000, 1))
+    pair_blocks, bootstrap = _fixed_pair_bootstrap()
     mse = csip_analyze.paired_effect(
         np.full(64, 0.5),
         np.full(64, 1.0),
         metric="mse",
-        bootstrap_indexes=bootstrap,
+        bootstrap_pair_indexes=bootstrap,
+        pair_block_ids=pair_blocks,
     )
     cosine = csip_analyze.paired_effect(
         np.full(64, 0.8),
         np.full(64, 0.2),
         metric="cosine",
-        bootstrap_indexes=bootstrap,
+        bootstrap_pair_indexes=bootstrap,
+        pair_block_ids=pair_blocks,
     )
     assert csip_analyze.FAMILY_CELLS == 8
     assert mse["pass"] and mse["mean_effect"] == pytest.approx(0.5)
@@ -223,24 +296,47 @@ def test_bootstrap_gate_uses_fixed_family_and_positive_direction() -> None:
 
 
 def test_bootstrap_gate_enforces_frozen_practical_effect_thresholds() -> None:
-    bootstrap = np.tile(np.arange(64), (10_000, 1))
+    pair_blocks, bootstrap = _fixed_pair_bootstrap()
     too_small = csip_analyze.paired_effect(
         np.full(64, 0.96),
         np.full(64, 1.0),
         metric="mse",
-        bootstrap_indexes=bootstrap,
+        bootstrap_pair_indexes=bootstrap,
+        pair_block_ids=pair_blocks,
         **csip_analyze.CONTROL_THRESHOLDS["mse"],
     )
     large_enough = csip_analyze.paired_effect(
         np.full(64, 0.90),
         np.full(64, 1.0),
         metric="mse",
-        bootstrap_indexes=bootstrap,
+        bootstrap_pair_indexes=bootstrap,
+        pair_block_ids=pair_blocks,
         **csip_analyze.CONTROL_THRESHOLDS["mse"],
     )
     assert not too_small["pass"]
     assert large_enough["pass"]
     assert large_enough["relative_mse_improvement"] == pytest.approx(0.10)
+
+
+def test_bootstrap_gate_rejects_overlapping_or_singleton_pair_blocks() -> None:
+    _pair_blocks, bootstrap = _fixed_pair_bootstrap()
+    invalid_blocks = np.arange(64, dtype=np.int64) % 31
+    with pytest.raises(RuntimeError, match="block-bootstrap"):
+        csip_analyze.paired_effect(
+            np.zeros(64),
+            np.ones(64),
+            metric="mse",
+            bootstrap_pair_indexes=bootstrap,
+            pair_block_ids=invalid_blocks,
+        )
+    with pytest.raises(RuntimeError, match="effect inputs"):
+        csip_analyze.paired_effect(
+            np.zeros(64),
+            np.ones(64),
+            metric="mse",
+            bootstrap_pair_indexes=bootstrap.astype(np.float64),
+            pair_block_ids=_pair_blocks,
+        )
 
 
 def test_training_and_cache_clis_accept_no_test_split_or_path() -> None:
@@ -274,11 +370,84 @@ def test_validation_latent_extraction_requires_checkpoint_seal(tmp_path) -> None
         seal=None,
     )
     with mock.patch.object(
-        csip_latent_cache.contract, "validate_registration", return_value={}
-    ):
+        csip_latent_cache.contract, "validate_registration"
+    ) as validate_registration:
         with pytest.raises(RuntimeError, match="requires --seal"):
             csip_latent_cache._rank_zero_prepare(args)
+    validate_registration.assert_not_called()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_validation_latent_extraction_verifies_seal_before_opening_source(
+    tmp_path,
+) -> None:
+    registration_path = tmp_path / "registration.json"
+    seal_path = tmp_path / "checkpoint-seal.json"
+    output = tmp_path / "latents" / "validation"
+    registration = {
+        "identity_sha256": "a" * 64,
+        "planned_paths": {
+            "validation_latent_root": str(output),
+            "validation_latent_metadata": str(output / "metadata.json"),
+        },
+    }
+    registration_record = {
+        "path": str(registration_path),
+        "bytes": 1,
+        "sha256": "b" * 64,
+        "identity_sha256": registration["identity_sha256"],
+    }
+    seal = {
+        "identity_sha256": "c" * 64,
+        "registration": registration_record,
+    }
+    events: list[tuple[str, bool | str]] = []
+
+    def validate_seal(path):
+        events.append(("seal", str(path)))
+        return seal, registration
+
+    def validate_registration(_path, **kwargs):
+        events.append(("registration", bool(kwargs.get("open_validation"))))
+        return registration
+
+    with (
+        mock.patch.object(
+            csip_workflow, "validate_seal", side_effect=validate_seal
+        ),
+        mock.patch.object(
+            csip_latent_cache.contract,
+            "validate_registration",
+            side_effect=validate_registration,
+        ),
+        mock.patch.object(
+            csip_latent_cache.contract,
+            "registration_file_record",
+            return_value=registration_record,
+        ),
+        mock.patch.object(
+            csip_latent_cache.contract,
+            "file_record",
+            return_value={"path": str(seal_path), "bytes": 1, "sha256": "d" * 64},
+        ),
+    ):
+        observed_registration, observed_output, observed_seal = (
+            csip_latent_cache._rank_zero_prepare(
+                SimpleNamespace(
+                    registration=registration_path,
+                    split="validation",
+                    seal=seal_path,
+                )
+            )
+        )
+
+    assert events == [
+        ("seal", str(seal_path)),
+        ("registration", True),
+    ]
+    assert observed_registration is registration
+    assert observed_output == output
+    assert observed_seal["identity_sha256"] == seal["identity_sha256"]
 
 
 def test_train_stage_registration_validation_does_not_open_val_records(
@@ -364,7 +533,7 @@ def test_fixed_checkpoint_validator_rejects_partition_contamination() -> None:
         "model_hidden_dim": 256,
         "spectral_feature_dim": SPECTRAL_FEATURE_DIM,
         "action_target_dim": ACTION_TARGET_DIM,
-        "feature_variants": ["full", "magnitude_only"],
+        "feature_variants": ["full", "angle_neutral"],
         "paired_initialization": "identical_state_before_update_1",
         "wandb_run_id": "fixed-run",
         "validation_clips_read": 0,
@@ -380,12 +549,12 @@ def test_fixed_checkpoint_validator_rejects_partition_contamination() -> None:
         },
         "model_states": {
             "full": {"weight": torch.zeros(1)},
-            "magnitude_only": {"weight": torch.zeros(1)},
+            "angle_neutral": {"weight": torch.zeros(1)},
         },
         "calibration_metrics": {
             str(value): {
                 probe: {"mse": 1.0, "cosine": 0.0}
-                for probe in ("full", "magnitude_only")
+                for probe in ("full", "angle_neutral")
             }
             for value in (0, 100, 200, 300, 400)
         },
@@ -434,6 +603,167 @@ def test_pinned_videox_validation_rejects_dirty_checkout(tmp_path) -> None:
         )
 
 
+def _render_registration(tmp_path) -> dict:
+    return {
+        "identity_sha256": "a" * 64,
+        "study_root": str(tmp_path / "study"),
+        "source": {"path": str(tmp_path / "repo")},
+        "runtime": {"python": {"launcher_path": str(tmp_path / "python")}},
+        "planned_paths": {
+            "checkpoint_seal": str(tmp_path / "study" / "checkpoint-seal.json"),
+            "checkpoint": str(tmp_path / "study" / "checkpoint.pt"),
+            "training_report": str(tmp_path / "study" / "training-report.json"),
+            "evaluation": str(tmp_path / "study" / "evaluation.json"),
+        },
+    }
+
+
+def test_train_render_never_opens_validation_or_requires_seal(
+    tmp_path, capsys
+) -> None:
+    registration_path = tmp_path / "registration.json"
+    registration = _render_registration(tmp_path)
+    events: list[tuple[str, bool]] = []
+
+    def validate_registration(_path, **kwargs):
+        events.append(("registration", bool(kwargs.get("open_validation"))))
+        return registration
+
+    with (
+        mock.patch.object(
+            csip_workflow.contract,
+            "regular_file",
+            return_value=registration_path,
+        ),
+        mock.patch.object(
+            csip_workflow.contract,
+            "validate_registration",
+            side_effect=validate_registration,
+        ),
+        mock.patch.object(csip_workflow, "validate_seal") as validate_seal,
+    ):
+        csip_workflow.command_render(
+            SimpleNamespace(registration=registration_path, stage="train")
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert events == [("registration", False)]
+    validate_seal.assert_not_called()
+    assert payload["boundary_receipt"] == {
+        "stage": "train",
+        "validation_source_records_opened": False,
+        "checkpoint_seal_required": False,
+        "checkpoint_seal_validated": False,
+    }
+
+
+def test_validation_render_verifies_seal_before_opening_validation(
+    tmp_path, capsys
+) -> None:
+    registration_path = tmp_path / "registration.json"
+    registration = _render_registration(tmp_path)
+    registration_record = {
+        "path": str(registration_path),
+        "bytes": 1,
+        "sha256": "b" * 64,
+        "identity_sha256": registration["identity_sha256"],
+    }
+    seal = {
+        "identity_sha256": "c" * 64,
+        "registration": registration_record,
+    }
+    events: list[tuple[str, bool | str]] = []
+
+    def validate_registration(_path, **kwargs):
+        events.append(("registration", bool(kwargs.get("open_validation"))))
+        return registration
+
+    def validate_seal(path):
+        events.append(("seal", str(path)))
+        return seal, registration
+
+    with (
+        mock.patch.object(
+            csip_workflow.contract,
+            "regular_file",
+            return_value=registration_path,
+        ),
+        mock.patch.object(
+            csip_workflow.contract,
+            "validate_registration",
+            side_effect=validate_registration,
+        ),
+        mock.patch.object(csip_workflow, "validate_seal", side_effect=validate_seal),
+        mock.patch.object(
+            csip_workflow.contract,
+            "registration_file_record",
+            return_value=registration_record,
+        ),
+    ):
+        csip_workflow.command_render(
+            SimpleNamespace(registration=registration_path, stage="validation")
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert events == [
+        ("registration", False),
+        ("seal", registration["planned_paths"]["checkpoint_seal"]),
+        ("registration", True),
+    ]
+    assert payload["boundary_receipt"] == {
+        "stage": "validation",
+        "validation_source_records_opened": True,
+        "checkpoint_seal_required": True,
+        "checkpoint_seal_validated": True,
+        "checkpoint_seal_identity_sha256": seal["identity_sha256"],
+    }
+
+
+def test_validation_render_rejects_registration_identity_change(tmp_path) -> None:
+    registration_path = tmp_path / "registration.json"
+    registration = _render_registration(tmp_path)
+    changed_registration = {
+        **registration,
+        "identity_sha256": "d" * 64,
+    }
+    registration_record = {
+        "path": str(registration_path),
+        "bytes": 1,
+        "sha256": "b" * 64,
+        "identity_sha256": registration["identity_sha256"],
+    }
+    seal = {
+        "identity_sha256": "c" * 64,
+        "registration": registration_record,
+    }
+    with (
+        mock.patch.object(
+            csip_workflow.contract,
+            "regular_file",
+            return_value=registration_path,
+        ),
+        mock.patch.object(
+            csip_workflow.contract,
+            "validate_registration",
+            side_effect=(registration, changed_registration),
+        ),
+        mock.patch.object(
+            csip_workflow,
+            "validate_seal",
+            return_value=(seal, registration),
+        ),
+        mock.patch.object(
+            csip_workflow.contract,
+            "registration_file_record",
+            return_value=registration_record,
+        ),
+        pytest.raises(RuntimeError, match="changed while validation"),
+    ):
+        csip_workflow.command_render(
+            SimpleNamespace(registration=registration_path, stage="validation")
+        )
+
+
 def test_csip_slurm_launch_is_nonrequeueable_dependency_ordered_and_excludes_bad_nodes() -> (
     None
 ):
@@ -448,3 +778,6 @@ def test_csip_slurm_launch_is_nonrequeueable_dependency_ordered_and_excludes_bad
     assert 'dependency="afterok:$TRAIN_JOB_ID"' in submit
     assert "--kill-on-invalid-dep=yes" in submit
     assert "ALLOW_ACTIVE_JOB_IDS" in submit
+    assert '--registration "$REGISTRATION" --stage "$STAGE"' in stage
+    assert 'stage-boundary-receipt.json' in stage
+    assert '--registration "$REGISTRATION" --stage train' in submit

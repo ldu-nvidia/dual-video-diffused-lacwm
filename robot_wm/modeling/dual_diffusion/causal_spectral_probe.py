@@ -61,10 +61,19 @@ SPECTRAL_FEATURE_DIM = (
 )
 # The flattened representation is ordered as volume log magnitude, volume
 # unit-phase real/imaginary, and phase-increment real/imaginary.  The matched
-# magnitude-only comparator deliberately keeps the full 9,216-input model
-# geometry while zeroing every phase-bearing coordinate.
+# angle-neutral comparator deliberately keeps the full 9,216-input model
+# geometry and every reliability-support mask while replacing each valid unit
+# phasor by the fixed neutral direction ``(1, 0)``.
 VOLUME_MAGNITUDE_FEATURE_DIM = (
     NUM_VIEWS * WAN_CHANNELS * FUTURE_TOKENS * SPECTRAL_HEIGHT * SPECTRAL_WIDTH
+)
+VOLUME_PHASE_COMPONENT_DIM = VOLUME_MAGNITUDE_FEATURE_DIM
+PHASE_INCREMENT_COMPONENT_DIM = (
+    NUM_VIEWS
+    * WAN_CHANNELS
+    * (FUTURE_TOKENS - 1)
+    * SPECTRAL_HEIGHT
+    * SPECTRAL_WIDTH
 )
 
 
@@ -238,14 +247,41 @@ def causal_spectral_features(
     return flat
 
 
-def magnitude_only_spectral_features(features: Tensor) -> Tensor:
-    """Zero phase coordinates while preserving the fixed ``[B,9216]`` shape."""
+def angle_neutral_spectral_features(features: Tensor) -> Tensor:
+    """Remove spectral angle while preserving magnitude and support.
+
+    Each masked unit phasor ``(real, imag)`` becomes ``(mask, 0)``.  This keeps
+    the exact 9,216-input geometry and the reliability/energy-support signal in
+    both the 3-D volume phase and the per-token phase-increment channels.  A
+    comparison with the full representation can therefore be attributed to
+    angular information rather than to an omitted binary support mask.
+    """
 
     if features.ndim != 2 or features.shape[1] != SPECTRAL_FEATURE_DIM:
         raise ValueError(f"features must have shape [B,{SPECTRAL_FEATURE_DIM}]")
     _finite_float(features, "features")
     result = features.clone()
-    result[:, VOLUME_MAGNITUDE_FEATURE_DIM:] = 0
+    volume_real_start = VOLUME_MAGNITUDE_FEATURE_DIM
+    volume_imag_start = volume_real_start + VOLUME_PHASE_COMPONENT_DIM
+    increment_real_start = volume_imag_start + VOLUME_PHASE_COMPONENT_DIM
+    increment_imag_start = increment_real_start + PHASE_INCREMENT_COMPONENT_DIM
+    increment_imag_stop = increment_imag_start + PHASE_INCREMENT_COMPONENT_DIM
+    if increment_imag_stop != SPECTRAL_FEATURE_DIM:
+        raise AssertionError("internal CSIP phase-coordinate geometry differs")
+
+    volume_real = features[:, volume_real_start:volume_imag_start]
+    volume_imag = features[:, volume_imag_start:increment_real_start]
+    volume_support = ((volume_real != 0) | (volume_imag != 0)).to(features.dtype)
+    result[:, volume_real_start:volume_imag_start] = volume_support
+    result[:, volume_imag_start:increment_real_start] = 0
+
+    increment_real = features[:, increment_real_start:increment_imag_start]
+    increment_imag = features[:, increment_imag_start:increment_imag_stop]
+    increment_support = ((increment_real != 0) | (increment_imag != 0)).to(
+        features.dtype
+    )
+    result[:, increment_real_start:increment_imag_start] = increment_support
+    result[:, increment_imag_start:increment_imag_stop] = 0
     return result
 
 
@@ -354,7 +390,7 @@ def control_targets(
     transform: ActionPCATransform,
     donor_indexes: Tensor,
 ) -> dict[str, Tensor]:
-    """Build aligned, episode-shuffled, zero, and inverse action targets."""
+    """Build aligned, paired-shuffled, raw-no-action, and inverse targets."""
 
     descriptor = action_descriptor(actions)
     if donor_indexes.shape != (actions.shape[0],) or donor_indexes.dtype != torch.long:
@@ -367,31 +403,45 @@ def control_targets(
     donor = donor_indexes.to(descriptor.device)
     return {
         "aligned": transform.transform_descriptor(descriptor),
-        "episode_disjoint_cyclic_shuffled": transform.transform_descriptor(
+        "episode_disjoint_paired_shuffled": transform.transform_descriptor(
             descriptor[donor]
         ),
-        "zero": transform.transform_descriptor(torch.zeros_like(descriptor)),
+        "raw_no_action": transform.transform_descriptor(torch.zeros_like(descriptor)),
         "inverse": transform.transform_descriptor(-descriptor),
     }
 
 
-def episode_disjoint_cyclic_donors(episode_ids: Sequence[str]) -> tuple[Tensor, int]:
-    """Find the first whole-list cyclic shift with no same-episode donor."""
+def episode_disjoint_pair_donors(
+    episode_ids: Sequence[str],
+) -> tuple[Tensor, tuple[tuple[int, int], ...]]:
+    """Pair adjacent unique episodes and swap the target inside every pair.
 
-    if len(episode_ids) < 2 or any(
+    The fixed manifest order determines the pairing: ``(0,1), (2,3), ...``.
+    Returning disjoint symmetric pairs makes the episode pair, rather than an
+    overlapping cyclic edge, a valid independent bootstrap unit.
+    """
+
+    if len(episode_ids) < 2 or len(episode_ids) % 2 or any(
         not isinstance(value, str) or not value for value in episode_ids
     ):
-        raise ValueError("at least two nonempty episode IDs are required")
+        raise ValueError(
+            "an even number of at least two nonempty episode IDs is required"
+        )
     count = len(episode_ids)
-    indexes = torch.arange(count, dtype=torch.long)
-    for shift in range(1, count):
-        donors = (indexes + shift) % count
-        if all(
-            episode_ids[index] != episode_ids[int(donors[index])]
-            for index in range(count)
-        ):
-            return donors, shift
-    raise CSIPContractError("no episode-disjoint cyclic donor assignment exists")
+    if len(set(episode_ids)) != count:
+        raise CSIPContractError("paired donor assignment requires one clip per episode")
+    donors = torch.empty(count, dtype=torch.long)
+    pairs: list[tuple[int, int]] = []
+    for left in range(0, count, 2):
+        right = left + 1
+        if episode_ids[left] == episode_ids[right]:
+            raise CSIPContractError(
+                "paired donor assignment contains one episode twice"
+            )
+        donors[left] = right
+        donors[right] = left
+        pairs.append((left, right))
+    return donors, tuple(pairs)
 
 
 class FrozenCausalSpectralProbe(nn.Module):

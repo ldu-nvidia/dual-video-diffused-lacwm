@@ -69,9 +69,6 @@ def _atomic_npy(path: Path, value: "Any") -> None:
 def _rank_zero_prepare(
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], Path, dict[str, Any] | None]:
-    registration = contract.validate_registration(
-        args.registration, open_validation=args.split == "validation"
-    )
     seal_record = None
     if args.split == "validation":
         if args.seal is None:
@@ -80,15 +77,30 @@ def _rank_zero_prepare(
             )
         from tools.csip_workflow import validate_seal
 
+        # The seal validator reads only registered train records.  Validation
+        # source records may be opened only after this fixed endpoint passes.
         seal, sealed_registration = validate_seal(args.seal)
+        registration = contract.validate_registration(
+            args.registration, open_validation=True
+        )
         if sealed_registration["identity_sha256"] != registration["identity_sha256"]:
             raise contract.CSIPContractError("validation seal belongs to another study")
+        if seal["registration"] != contract.registration_file_record(
+            args.registration
+        ):
+            raise contract.CSIPContractError(
+                "validation seal belongs to another registration file"
+            )
         seal_record = {
             **contract.file_record(args.seal, "checkpoint seal"),
             "identity_sha256": seal["identity_sha256"],
         }
-    elif args.seal is not None:
-        raise contract.CSIPContractError("train extraction must not accept a seal")
+    else:
+        if args.seal is not None:
+            raise contract.CSIPContractError("train extraction must not accept a seal")
+        registration = contract.validate_registration(
+            args.registration, open_validation=False
+        )
     output = Path(registration["planned_paths"][f"{args.split}_latent_root"])
     expected_metadata = Path(
         registration["planned_paths"][f"{args.split}_latent_metadata"]

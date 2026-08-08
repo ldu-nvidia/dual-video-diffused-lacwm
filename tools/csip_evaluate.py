@@ -3,8 +3,8 @@
 
 The fixed update-400 checkpoint is sealed before this tool may open validation
 latents or actions.  Predictions from each clean real-video spectral feature
-are scored against its aligned action target, an episode-disjoint cyclic donor,
-the zero-action target, and the sign-inverted action target.
+are scored against its aligned action target, a donor from its deterministic
+disjoint episode pair, the raw-no-action target, and the sign-inverted target.
 """
 
 from __future__ import annotations
@@ -24,10 +24,10 @@ if str(REPO_ROOT) not in sys.path:
 from robot_wm.modeling.dual_diffusion.causal_spectral_probe import (  # noqa: E402
     ActionPCATransform,
     FrozenCausalSpectralProbe,
+    angle_neutral_spectral_features,
     causal_spectral_features,
     control_targets,
-    episode_disjoint_cyclic_donors,
-    magnitude_only_spectral_features,
+    episode_disjoint_pair_donors,
 )
 from tools import csip_contract as contract  # noqa: E402
 from tools.csip_workflow import validate_seal  # noqa: E402
@@ -122,12 +122,26 @@ def command_evaluate(args: argparse.Namespace) -> int:
     manifest_path = registration["datasets"]["validation"]["manifest"]["path"]
     rows = contract.manifest_rows(manifest_path, split="val", count=64)
     episode_ids = [str(row["episode_dir"]) for row in rows]
-    donor_indexes, donor_shift = episode_disjoint_cyclic_donors(episode_ids)
+    donor_indexes, donor_pairs = episode_disjoint_pair_donors(episode_ids)
     if any(
         episode_ids[index] == episode_ids[int(donor_indexes[index])]
-        for index in range(64)
+        for index in range(contract.EXPECTED_VALIDATION_CLIPS)
     ):
         raise contract.CSIPContractError("validation donor is not episode-disjoint")
+    if len(donor_pairs) != contract.EXPECTED_VALIDATION_PAIR_BLOCKS or any(
+        int(donor_indexes[left]) != right or int(donor_indexes[right]) != left
+        for left, right in donor_pairs
+    ):
+        raise contract.CSIPContractError(
+            "validation donor pairs are not disjoint swaps"
+        )
+    pair_blocks = {
+        member: block
+        for block, pair in enumerate(donor_pairs)
+        for member in pair
+    }
+    if set(pair_blocks) != set(range(contract.EXPECTED_VALIDATION_CLIPS)):
+        raise contract.CSIPContractError("validation donor pairs do not cover val64")
 
     if not torch.cuda.is_available():
         raise contract.CSIPContractError("CSIP sealed evaluation requires CUDA")
@@ -137,7 +151,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
     full_features = _features(full, history, device)
     features = {
         "full": full_features,
-        "magnitude_only": magnitude_only_spectral_features(full_features),
+        "angle_neutral": angle_neutral_spectral_features(full_features),
     }
     checkpoint_path = contract.verify_file_record(
         seal["checkpoint"], "sealed checkpoint"
@@ -154,7 +168,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
         train_latent_cache_identity_sha256=train_metadata["identity_sha256"],
     )
     models = {}
-    for name in ("full", "magnitude_only"):
+    for name in ("full", "angle_neutral"):
         model = FrozenCausalSpectralProbe(
             hidden_dim=int(checkpoint["model_hidden_dim"])
         )
@@ -182,6 +196,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 "clip_id": row["clip_id"],
                 "episode_dir": row["episode_dir"],
                 "donor_index": donor,
+                "donor_pair_block": pair_blocks[index],
                 "donor_clip_id": rows[donor]["clip_id"],
                 "donor_episode_dir": rows[donor]["episode_dir"],
                 "metrics": {
@@ -210,12 +225,22 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 validation_metadata_path, "validation latent metadata"
             ),
             "validation_latent_cache_identity_sha256": metadata["identity_sha256"],
-            "validation_clips": 64,
+            "validation_clips": contract.EXPECTED_VALIDATION_CLIPS,
             "donor_control": {
-                "kind": "episode_disjoint_whole_population_cyclic_shift",
-                "shift": donor_shift,
+                "kind": "episode_disjoint_two_episode_pairs",
+                "pairing_rule": "adjacent_immutable_manifest_indexes_swap_targets",
+                "pair_count": contract.EXPECTED_VALIDATION_PAIR_BLOCKS,
+                "pairs": [
+                    {
+                        "pair_block": block,
+                        "left_index": left,
+                        "right_index": right,
+                    }
+                    for block, (left, right) in enumerate(donor_pairs)
+                ],
                 "self_donors": 0,
                 "same_episode_donors": 0,
+                "overlapping_pair_blocks": 0,
             },
             "probes": list(metrics),
             "conditions": list(metrics["full"]),
@@ -229,8 +254,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 }
                 for probe, probe_values in metrics.items()
             },
-            "phase_comparator": {
-                "kind": "matched_9216_input_phase_coordinates_zeroed",
+            "angle_comparator": {
+                "kind": "matched_9216_input_phasors_replaced_by_support_zero",
+                "support_encoding": "each_masked_unit_phasor_becomes_mask_zero",
                 "same_initialization": True,
                 "same_batches_optimizer_updates_targets_architecture": True,
             },

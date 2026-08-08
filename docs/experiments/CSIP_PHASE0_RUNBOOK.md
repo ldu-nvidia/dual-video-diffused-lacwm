@@ -87,19 +87,24 @@ mkdir -p "$PARENT"
 There is deliberately no test argument. Preserve the registration stdout and
 file hash in the launch-review record.
 
-## 4. Render and review the train-only and sealed-validation stages
+## 4. Render and review the train stage
 
 ```bash
 "$PY" "$REPO/tools/csip_workflow.py" render --registration "$REG" \
+  --stage train \
   > "$STUDY/rendered-commands.review.json"
 ```
 
 Because study files are immutable outputs, writing the review capture inside
 the study is optional operational evidence and is not consumed by any tool.
-Review both the rendered commands and
+The train render validates train records only and records that validation
+sources were not opened. A validation render intentionally fails before the
+checkpoint seal exists. Review the rendered commands and
 `tools/slurm/csip_phase0_stage.sbatch`. The stage entrypoint revalidates the
 exact clean registered source and VideoX checkouts, registered Python, complete
 B200 environment, output freshness, and non-requeue state before reading data.
+It writes the stage-specific boundary receipt to
+`$STUDY/runtime/<stage>-job-<job-id>/stage-boundary-receipt.json`.
 
 Dry-run the dependency-safe submitter first. It changes no directory or job:
 
@@ -120,8 +125,10 @@ passes `--dependency=afterok:<train-job-id>` plus
 Train extraction writes 512 full and independent-history Wan latents in eight
 content-hashed shards. Training opens only those train shards and raw train
 actions. It refuses to run if a validation latent cache exists. Both the full
-and matched magnitude-only probes use the same initialization, batches,
-targets, optimizers, and 400-update endpoint.
+and matched angle-neutral probes use the same initialization, batches, targets,
+optimizers, and 400-update endpoint. The comparator retains every
+magnitude/support signal and maps each masked unit phasor to `(mask, 0)`, so
+only spectral angle is removed.
 
 Expected durable training outputs are:
 
@@ -131,7 +138,7 @@ $STUDY/training/report.json
 $STUDY/wandb/
 ```
 
-The checkpoint contains `full` and `magnitude_only` model states. Do not select
+The checkpoint contains `full` and `angle_neutral` model states. Do not select
 an earlier update from cal64. Preserve W&B local state even if upload
 finalization is incomplete.
 
@@ -151,20 +158,22 @@ Do not create or substitute a checkpoint after this point.
 ## 6. Extract sealed validation latents and evaluate
 
 Only after the seal exists and the train allocation exits successfully does
-Slurm release the dependent validation stage. It executes the rendered
-validation extraction under the same exact eight-B200 runtime. The command
-includes `--seal`; without it the tool fails before opening validation RGB.
-It then executes the rendered `evaluate` command and writes exactly one val64
-result:
+Slurm release the dependent validation stage. Its `render --stage validation`
+receipt first proves the registered seal using train-only records and only then
+reopens and hashes validation sources. It executes validation extraction under
+the same exact eight-B200 runtime. The extraction command includes `--seal`;
+without it the tool fails before opening validation RGB. It then executes the
+rendered `evaluate` command and writes exactly one val64 result:
 
 ```text
 $STUDY/evaluation/val64.json
 ```
 
-Check that the donor audit reports zero self donors and zero same-episode
+Check that the donor audit reports 32 adjacent-index, non-overlapping,
+episode-disjoint symmetric pairs, zero self donors, and zero same-episode
 donors. The sealed result contains both matched probe predictions and all four
-targets. Do not inspect or iterate on condition metrics before running the
-preregistered analysis.
+targets: aligned, paired-shuffled, raw-no-action, and inverse. Do not inspect or
+iterate on condition metrics before running the preregistered analysis.
 
 ## 7. Apply the one-shot gate
 
@@ -176,10 +185,12 @@ $STUDY/analysis/bootstrap-gate.json
 ```
 
 Report all eight point effects, simultaneous lower bounds, and fixed practical
-thresholds, not only passing cells. A pass is probe feasibility only. A fail
-ends the CSIP generator path for this representation and seed; no post-hoc
-checkpoint, crop, phase mask, target dimension, control, threshold, or
-bootstrap change is permitted.
+thresholds, not only passing cells. The analysis averages within each of the 32
+donor pairs and bootstraps those pair blocks; exactly the same 10,000 resamples
+are used for all eight cells. A pass is probe feasibility only. A fail ends the
+CSIP generator path for this representation and seed; no post-hoc checkpoint,
+crop, phase mask, target dimension, control, threshold, or bootstrap change is
+permitted.
 
 No command in this runbook pushes a branch, registers a model artifact in an
 external registry, or edits a generator. The submit helper is read-only by

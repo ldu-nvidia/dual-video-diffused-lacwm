@@ -33,6 +33,7 @@ EXPECTED_PROJECT = "dual-video-diffusion-private"
 EXPECTED_WORLD_SIZE = 8
 EXPECTED_TRAIN_CLIPS = 512
 EXPECTED_VALIDATION_CLIPS = 64
+EXPECTED_VALIDATION_PAIR_BLOCKS = EXPECTED_VALIDATION_CLIPS // 2
 EXPECTED_UPDATES = 400
 EXPECTED_BATCH_SIZE = 64
 EXPECTED_SEED = 1234
@@ -690,7 +691,7 @@ def validate_checkpoint_payload(
         or payload.get("model_hidden_dim") != 256
         or payload.get("spectral_feature_dim") != SPECTRAL_FEATURE_DIM
         or payload.get("action_target_dim") != ACTION_TARGET_DIM
-        or payload.get("feature_variants") != ["full", "magnitude_only"]
+        or payload.get("feature_variants") != ["full", "angle_neutral"]
         or payload.get("paired_initialization") != "identical_state_before_update_1"
         or payload.get("wandb_run_id") != registration.get("wandb", {}).get("run_id")
         or payload.get("validation_clips_read") != 0
@@ -711,7 +712,7 @@ def validate_checkpoint_payload(
         or tuple(pca["score_scale"].shape) != (ACTION_TARGET_DIM,)
         or not all(torch.isfinite(value).all().item() for value in pca.values())
         or not isinstance(model_states, Mapping)
-        or set(model_states) != {"full", "magnitude_only"}
+        or set(model_states) != {"full", "angle_neutral"}
         or any(
             not isinstance(state, Mapping)
             or not state
@@ -726,7 +727,7 @@ def validate_checkpoint_payload(
         or set(calibration_metrics) != {"0", "100", "200", "300", "400"}
         or any(
             not isinstance(update_metrics, Mapping)
-            or set(update_metrics) != {"full", "magnitude_only"}
+            or set(update_metrics) != {"full", "angle_neutral"}
             or any(
                 not isinstance(metrics, Mapping)
                 or set(metrics) != {"mse", "cosine"}

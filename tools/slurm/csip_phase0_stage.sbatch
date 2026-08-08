@@ -55,8 +55,10 @@ REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
 export PYTHONPATH="$REPO_ROOT"
-"$PYTHON_BIN" "$REPO_ROOT/tools/csip_workflow.py" render \
-  --registration "$REGISTRATION" >/dev/null
+STAGE_BOUNDARY_RECEIPT="$(
+  "$PYTHON_BIN" "$REPO_ROOT/tools/csip_workflow.py" render \
+    --registration "$REGISTRATION" --stage "$STAGE"
+)"
 
 mapfile -t REGISTERED < <(
   "$PYTHON_BIN" - "$REGISTRATION" <<'PY'
@@ -122,6 +124,8 @@ RUNTIME_ROOT="$STUDY_ROOT/runtime/${STAGE}-job-${SLURM_JOB_ID}"
   die "runtime output must be fresh"
 mkdir -p "$RUNTIME_ROOT/cache" "$RUNTIME_ROOT/wandb-data" \
   "$RUNTIME_ROOT/wandb-cache" "$RUNTIME_ROOT/wandb-config"
+printf '%s\n' "$STAGE_BOUNDARY_RECEIPT" \
+  > "$RUNTIME_ROOT/stage-boundary-receipt.json"
 export WANDB_DATA_DIR="$RUNTIME_ROOT/wandb-data"
 export WANDB_CACHE_DIR="$RUNTIME_ROOT/wandb-cache"
 export WANDB_CONFIG_DIR="$RUNTIME_ROOT/wandb-config"

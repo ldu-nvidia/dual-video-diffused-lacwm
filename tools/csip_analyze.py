@@ -22,9 +22,9 @@ from tools import csip_contract as contract  # noqa: E402
 from tools.csip_workflow import validate_seal  # noqa: E402
 
 
-CONTROLS = ("episode_disjoint_cyclic_shuffled", "zero", "inverse")
+CONTROLS = ("episode_disjoint_paired_shuffled", "raw_no_action", "inverse")
 METRICS = ("mse", "cosine")
-PROBES = ("full", "magnitude_only")
+PROBES = ("full", "angle_neutral")
 FAMILY_CELLS = len(CONTROLS) * len(METRICS) + len(METRICS)
 FAMILYWISE_ALPHA = 0.05
 CONTROL_THRESHOLDS = {
@@ -35,7 +35,7 @@ CONTROL_THRESHOLDS = {
         "relative": False,
     },
 }
-PHASE_THRESHOLDS = {
+ANGLE_THRESHOLDS = {
     "mse": {"minimum_point": 0.03, "minimum_lower_bound": 0.01, "relative": True},
     "cosine": {
         "minimum_point": 0.02,
@@ -50,15 +50,23 @@ def paired_effect(
     control: np.ndarray,
     *,
     metric: str,
-    bootstrap_indexes: np.ndarray,
+    bootstrap_pair_indexes: np.ndarray,
+    pair_block_ids: np.ndarray,
     minimum_point: float = 0.0,
     minimum_lower_bound: float = 0.0,
     relative: bool | None = None,
 ) -> dict[str, Any]:
     if (
-        aligned.shape != (64,)
-        or control.shape != (64,)
-        or bootstrap_indexes.shape != (contract.BOOTSTRAP_REPLICATES, 64)
+        aligned.shape != (contract.EXPECTED_VALIDATION_CLIPS,)
+        or control.shape != (contract.EXPECTED_VALIDATION_CLIPS,)
+        or bootstrap_pair_indexes.shape
+        != (
+            contract.BOOTSTRAP_REPLICATES,
+            contract.EXPECTED_VALIDATION_PAIR_BLOCKS,
+        )
+        or not np.issubdtype(bootstrap_pair_indexes.dtype, np.integer)
+        or pair_block_ids.shape != (contract.EXPECTED_VALIDATION_CLIPS,)
+        or not np.issubdtype(pair_block_ids.dtype, np.integer)
         or not np.isfinite(aligned).all()
         or not np.isfinite(control).all()
         or metric not in METRICS
@@ -70,9 +78,26 @@ def paired_effect(
         raise contract.CSIPContractError(
             "paired CSIP practical-effect contract differs"
         )
-    # Positive is always favorable to aligned.
+    expected_blocks = np.arange(contract.EXPECTED_VALIDATION_PAIR_BLOCKS)
+    if (
+        not np.array_equal(np.unique(pair_block_ids), expected_blocks)
+        or any(
+            np.count_nonzero(pair_block_ids == block) != 2
+            for block in expected_blocks
+        )
+        or bootstrap_pair_indexes.min() < 0
+        or bootstrap_pair_indexes.max() >= contract.EXPECTED_VALIDATION_PAIR_BLOCKS
+    ):
+        raise contract.CSIPContractError("paired CSIP block-bootstrap contract differs")
+
+    # Positive is always favorable to aligned.  Average the two members of each
+    # disjoint donor pair first; only the 32 independent pair blocks are sampled.
     differences = control - aligned if metric == "mse" else aligned - control
-    bootstrap = differences[bootstrap_indexes].mean(axis=1)
+    block_differences = np.asarray(
+        [differences[pair_block_ids == block].mean() for block in expected_blocks],
+        dtype=np.float64,
+    )
+    bootstrap = block_differences[bootstrap_pair_indexes].mean(axis=1)
     alpha_cell = FAMILYWISE_ALPHA / FAMILY_CELLS
     effect = float(differences.mean())
     lower_bound = float(np.quantile(bootstrap, alpha_cell, method="linear"))
@@ -95,7 +120,11 @@ def paired_effect(
     if metric == "mse":
         denominator = float(control.mean())
         point_for_gate = effect / denominator if denominator > 0.0 else float("-inf")
-        bootstrap_denominator = control[bootstrap_indexes].mean(axis=1)
+        control_by_block = np.asarray(
+            [control[pair_block_ids == block].mean() for block in expected_blocks],
+            dtype=np.float64,
+        )
+        bootstrap_denominator = control_by_block[bootstrap_pair_indexes].mean(axis=1)
         if denominator > 0.0 and bool((bootstrap_denominator > 0.0).all()):
             relative_bootstrap = bootstrap / bootstrap_denominator
             lower_for_gate = float(
@@ -136,13 +165,14 @@ def _validated_evaluation(
         or payload.get("registration_identity_sha256")
         != registration["identity_sha256"]
         or payload.get("checkpoint") != seal["checkpoint"]
-        or payload.get("validation_clips") != 64
+        or payload.get("validation_clips") != contract.EXPECTED_VALIDATION_CLIPS
         or payload.get("conditions")
-        != ["aligned", "episode_disjoint_cyclic_shuffled", "zero", "inverse"]
-        or payload.get("probes") != ["full", "magnitude_only"]
-        or payload.get("phase_comparator")
+        != ["aligned", "episode_disjoint_paired_shuffled", "raw_no_action", "inverse"]
+        or payload.get("probes") != ["full", "angle_neutral"]
+        or payload.get("angle_comparator")
         != {
-            "kind": "matched_9216_input_phase_coordinates_zeroed",
+            "kind": "matched_9216_input_phasors_replaced_by_support_zero",
+            "support_encoding": "each_masked_unit_phasor_becomes_mask_zero",
             "same_initialization": True,
             "same_batches_optimizer_updates_targets_architecture": True,
         }
@@ -150,13 +180,52 @@ def _validated_evaluation(
     ):
         raise contract.CSIPContractError("sealed evaluation contract differs")
     rows = payload.get("clips")
-    if not isinstance(rows, list) or len(rows) != 64:
+    if (
+        not isinstance(rows, list)
+        or len(rows) != contract.EXPECTED_VALIDATION_CLIPS
+    ):
         raise contract.CSIPContractError("sealed evaluation must contain 64 rows")
-    if [row.get("auxiliary_index") for row in rows] != list(range(64)):
+    if [row.get("auxiliary_index") for row in rows] != list(
+        range(contract.EXPECTED_VALIDATION_CLIPS)
+    ):
         raise contract.CSIPContractError("sealed evaluation row order differs")
-    if len({str(row.get("clip_id", "")) for row in rows}) != 64:
+    if (
+        len({str(row.get("clip_id", "")) for row in rows})
+        != contract.EXPECTED_VALIDATION_CLIPS
+    ):
         raise contract.CSIPContractError("sealed evaluation clip identities differ")
-    for row in rows:
+    expected_pairs = [
+        {
+            "pair_block": block,
+            "left_index": 2 * block,
+            "right_index": 2 * block + 1,
+        }
+        for block in range(contract.EXPECTED_VALIDATION_PAIR_BLOCKS)
+    ]
+    if payload.get("donor_control") != {
+        "kind": "episode_disjoint_two_episode_pairs",
+        "pairing_rule": "adjacent_immutable_manifest_indexes_swap_targets",
+        "pair_count": contract.EXPECTED_VALIDATION_PAIR_BLOCKS,
+        "pairs": expected_pairs,
+        "self_donors": 0,
+        "same_episode_donors": 0,
+        "overlapping_pair_blocks": 0,
+    }:
+        raise contract.CSIPContractError("sealed evaluation donor-pair audit differs")
+    for index, row in enumerate(rows):
+        expected_donor = index + 1 if index % 2 == 0 else index - 1
+        if (
+            row.get("donor_index") != expected_donor
+            or row.get("donor_pair_block") != index // 2
+            or rows[expected_donor].get("donor_index") != index
+            or row.get("donor_clip_id")
+            != rows[expected_donor].get("clip_id")
+            or row.get("donor_episode_dir")
+            != rows[expected_donor].get("episode_dir")
+        ):
+            raise contract.CSIPContractError(
+                "sealed donor pair is not a symmetric block"
+            )
         if row.get("episode_dir") == row.get("donor_episode_dir") or row.get(
             "clip_id"
         ) == row.get("donor_clip_id"):
@@ -198,14 +267,20 @@ def command_analyze(args: argparse.Namespace) -> int:
     if output.exists() or output.is_symlink():
         raise contract.CSIPContractError("CSIP analysis output must be fresh")
     rng = np.random.default_rng(contract.BOOTSTRAP_SEED)
-    bootstrap_indexes = rng.integers(
+    bootstrap_pair_indexes = rng.integers(
         0,
-        64,
-        size=(contract.BOOTSTRAP_REPLICATES, 64),
+        contract.EXPECTED_VALIDATION_PAIR_BLOCKS,
+        size=(
+            contract.BOOTSTRAP_REPLICATES,
+            contract.EXPECTED_VALIDATION_PAIR_BLOCKS,
+        ),
         endpoint=False,
         dtype=np.int64,
     )
     rows = evaluation["clips"]
+    pair_block_ids = np.asarray(
+        [row["donor_pair_block"] for row in rows], dtype=np.int64
+    )
     control_cells: dict[str, Any] = {}
     for control in CONTROLS:
         control_cells[control] = {}
@@ -222,39 +297,41 @@ def command_analyze(args: argparse.Namespace) -> int:
                 aligned,
                 reference,
                 metric=metric,
-                bootstrap_indexes=bootstrap_indexes,
+                bootstrap_pair_indexes=bootstrap_pair_indexes,
+                pair_block_ids=pair_block_ids,
                 **CONTROL_THRESHOLDS[metric],
             )
-    phase_cells: dict[str, Any] = {}
+    angle_cells: dict[str, Any] = {}
     for metric in METRICS:
         full = np.asarray(
             [row["metrics"]["full"]["aligned"][metric] for row in rows],
             dtype=np.float64,
         )
-        magnitude_only = np.asarray(
-            [row["metrics"]["magnitude_only"]["aligned"][metric] for row in rows],
+        angle_neutral = np.asarray(
+            [row["metrics"]["angle_neutral"]["aligned"][metric] for row in rows],
             dtype=np.float64,
         )
-        phase_cells[metric] = paired_effect(
+        angle_cells[metric] = paired_effect(
             full,
-            magnitude_only,
+            angle_neutral,
             metric=metric,
-            bootstrap_indexes=bootstrap_indexes,
-            **PHASE_THRESHOLDS[metric],
+            bootstrap_pair_indexes=bootstrap_pair_indexes,
+            pair_block_ids=pair_block_ids,
+            **ANGLE_THRESHOLDS[metric],
         )
     controls_pass = all(
         bool(control_cells[control][metric]["pass"])
         for control in CONTROLS
         for metric in METRICS
     )
-    phase_pass = all(bool(phase_cells[metric]["pass"]) for metric in METRICS)
-    passed = controls_pass and phase_pass
+    angle_pass = all(bool(angle_cells[metric]["pass"]) for metric in METRICS)
+    passed = controls_pass and angle_pass
     if passed:
         conclusion = "advance_to_training_only_generator_regularization_ablation"
     elif not controls_pass:
         conclusion = "stop_csip_path_no_action_specific_spectral_signal_demonstrated"
     else:
-        conclusion = "stop_csip_path_no_incremental_phase_contribution_demonstrated"
+        conclusion = "stop_csip_path_no_incremental_spectral_angle_contribution"
     analysis = contract.with_identity(
         {
             "schema_version": contract.SCHEMA_VERSION,
@@ -274,24 +351,27 @@ def command_analyze(args: argparse.Namespace) -> int:
                 "identity_sha256": evaluation["identity_sha256"],
             },
             "bootstrap": {
-                "unit": "paired_validation_clip",
-                "clips": 64,
+                "unit": "disjoint_two_episode_validation_pair_block",
+                "clips": contract.EXPECTED_VALIDATION_CLIPS,
+                "pair_blocks": contract.EXPECTED_VALIDATION_PAIR_BLOCKS,
+                "clips_per_block": 2,
                 "replicates": contract.BOOTSTRAP_REPLICATES,
                 "seed": contract.BOOTSTRAP_SEED,
                 "familywise_alpha": FAMILYWISE_ALPHA,
                 "cells": FAMILY_CELLS,
                 "correction": "bonferroni_one_sided",
+                "shared_resample_index_matrix_across_all_cells": True,
             },
             "practical_effect_thresholds": {
                 "full_probe_vs_target_controls": CONTROL_THRESHOLDS,
-                "full_probe_vs_matched_magnitude_only": PHASE_THRESHOLDS,
+                "full_probe_vs_matched_angle_neutral": ANGLE_THRESHOLDS,
             },
             "cells": {
                 "full_probe_target_controls": control_cells,
-                "phase_contribution_over_magnitude_only": phase_cells,
+                "spectral_angle_contribution_over_angle_neutral": angle_cells,
             },
             "target_control_gate_pass": controls_pass,
-            "phase_contribution_gate_pass": phase_pass,
+            "spectral_angle_contribution_gate_pass": angle_pass,
             "gate_pass": passed,
             "decision": conclusion,
             "claim_boundary": (

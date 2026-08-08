@@ -15,8 +15,8 @@ premise behind action-aware spectral forcing:
 
 > Do clean, real Wan future-motion latents contain phase-sensitive spectral
 > information that identifies the action which produced the motion, beyond an
-> episode-disjoint action shuffle, zero action, sign-inverted action, and a
-> capacity-matched magnitude-only probe?
+> episode-disjoint paired action shuffle, raw-no-action descriptor,
+> sign-inverted action, and a capacity-matched angle-neutral probe?
 
 This is a frozen inverse-dynamics probe, not dual diffusion. A pass justifies a
 later training-only generator regularizer in which this probe is frozen and
@@ -46,15 +46,17 @@ Only fit448 fits the action PCA and probe weights. Cal64 is monitored at fixed
 updates 0, 100, 200, 300, and 400; it cannot select a checkpoint, stop fitting,
 or tune a threshold. The only checkpoint is the final update 400.
 
-Registration performs full SHA-256 verification of train and validation RGB
-and action arrays and binds the exact source commit, Python executable,
-Python package versions, VideoX-Fun commit
+Registration is the one permitted pre-seal read and full SHA-256 verification
+of train and validation RGB/action source records. It binds the exact source
+commit, Python executable, Python package versions, VideoX-Fun commit
 `1d6d9c3e1540968466937129fef4b288041e06de`, Wan configuration, and Wan VAE
-weights. After registration,
-train latent extraction and fitting validate train records only. Validation
-latent extraction is rejected until the update-400 checkpoint and training
-report have been sealed. Thus fitting never opens validation RGB, actions, or
-latents. Protected test is absent from every CLI.
+weights. After registration, every train-stage render, train latent extraction,
+fit, and seal operation validates train records only; it does not reopen or
+rehash a validation file. A validation-stage render first validates the
+update-400 checkpoint seal using train-only records, and only then reopens the
+registered validation records. Validation latent extraction is rejected until
+that checkpoint and training report are sealed. Thus fitting never opens
+validation RGB, actions, or latents. Protected test is absent from every CLI.
 
 ## Clean real-video motion latent
 
@@ -174,13 +176,16 @@ Linear(9,216,256) + SiLU
 Linear(256,16)
 ```
 
-The `full` probe receives all coordinates. The `magnitude_only` probe receives
-the identical tensor with coordinates `2304:9216` (all volume unit-phase and
-phase-increment real/imaginary channels) deterministically set to zero. Its
-input dimension is not reduced. Both probes start from the exact same initial
-state and see the same batch order, targets, AdamW configuration, update count,
-and checkpoint boundary. Thus the only prospective difference is access to
-phase-bearing inputs.
+The `full` probe receives all coordinates. The `angle_neutral` probe receives
+the identical tensor, except every masked unit phasor `(Re, Im)` in both the
+volume-phase and phase-increment blocks is replaced by `(M, 0)`. Invalid
+phasors therefore remain `(0, 0)`, valid phasors become `(1, 0)`, and all 2,304
+log-magnitude coordinates are unchanged. This preserves the reliability/energy
+support carried implicitly by a nonzero phasor while removing its spectral
+angle. Its input dimension is not reduced. Both probes start from the exact
+same initial state and see the same batch order, targets, AdamW configuration,
+update count, and checkpoint boundary. Thus the prospective difference is
+access to spectral angle, not access to magnitude, support, or capacity.
 
 Fit each probe's MSE with AdamW, learning rate `3e-4`, weight decay `1e-4`, global-norm
 clip 1.0, batch 64, seed 1234, and exactly 400 updates. Batch 64 divides fit448
@@ -193,44 +198,51 @@ the verified personal private W&B project
 
 For each val clip, compare each probe prediction with four targets. The three
 target-control gates below use the full probe; both probes are retained for the
-matched phase-contribution gate:
+matched spectral-angle-contribution gate:
 
 1. `aligned`: its own action descriptor;
-2. `episode_disjoint_cyclic_shuffled`: the first whole-population cyclic shift
-   for which no clip receives an action from its own source episode;
-3. `zero`: the PCA transform of the all-zero raw delta descriptor;
+2. `episode_disjoint_paired_shuffled`: pair adjacent immutable manifest indexes
+   `(0,1), (2,3), ..., (62,63)` and swap the two targets inside each pair; all
+   32 pairs contain distinct source episodes and no row is its own donor;
+3. `raw_no_action`: the PCA transform of the all-zero raw 736-D delta
+   descriptor. Because the train-fit PCA subtracts its mean, this is generally
+   not the zero vector in PCA coordinates and is not described as an average
+   target;
 4. `inverse`: the PCA transform of the sign-negated local raw delta descriptor.
 
-The shuffled control tests action identity rather than dataset-level motion;
-zero tests collapse to an average/no-action target; inverse tests directional
-phase/action sign. Every row records the local and donor clip/episode IDs.
+The paired shuffle tests action identity rather than dataset-level motion;
+raw-no-action tests a stationary raw descriptor; inverse tests directional
+phase/action sign. Every row records the local and donor clip/episode IDs and
+its pair-block ID.
 
 ## Fixed statistical and practical-effect gate
 
 For the full probe against each of three target controls, evaluate paired
-per-clip MSE and cosine. Also compare the full and magnitude-only probes on the
+per-clip MSE and cosine. Also compare the full and angle-neutral probes on the
 same aligned target:
 
 ```text
-MSE effect:    control MSE - aligned MSE       (positive favors aligned)
-cosine effect: aligned cosine - control cosine (positive favors aligned)
-phase MSE:     magnitude-only MSE - full MSE   (positive favors phase)
-phase cosine:  full cosine - magnitude cosine  (positive favors phase)
+MSE effect:      control MSE - aligned MSE       (positive favors aligned)
+cosine effect:   aligned cosine - control cosine (positive favors aligned)
+angle MSE:       angle-neutral MSE - full MSE    (positive favors angle)
+angle cosine:    full cosine - neutral cosine    (positive favors angle)
 ```
 
-Use exactly 10,000 paired clip bootstrap resamples, seed 20260808. There are
-eight preregistered cells, with one-sided Bonferroni cell alpha `0.05/8`.
-Statistical positivity alone is insufficient. Every full-probe target-control
-MSE cell must have at least 5% relative point gain and a 1% relative
-simultaneous lower bound; its cosine cell must have at least `0.05` point gain
-and `0.01` lower bound. Full versus magnitude-only must have at least 3%
-relative MSE point gain and a 1% relative lower bound, plus cosine point gain
-of `0.02` and lower bound of `0.005`. Relative MSE values use the comparator's
-mean MSE as denominator; every bootstrap replicate recomputes both its paired
-effect numerator and comparator-mean denominator before the relative lower
-quantile is taken. Phase 0 passes only if all eight cells meet their
-fixed practical and simultaneous-bound thresholds. No subset, metric,
-threshold, checkpoint, or seed may rescue a failure.
+First average the two paired clip effects within each of the 32 disjoint donor
+pairs. Use exactly 10,000 bootstrap resamples of those 32 pair blocks, seed
+20260808. The same sampled pair-index matrix is reused for all eight
+preregistered cells, with one-sided Bonferroni cell alpha `0.05/8`. Statistical
+positivity alone is insufficient. Every full-probe target-control MSE cell must
+have at least 5% relative point gain and a 1% relative simultaneous lower
+bound; its cosine cell must have at least `0.05` point gain and `0.01` lower
+bound. Full versus angle-neutral must have at least 3% relative MSE point gain
+and a 1% relative lower bound, plus cosine point gain of `0.02` and lower bound
+of `0.005`. Relative MSE values use the comparator's mean MSE as denominator;
+every bootstrap replicate recomputes both its paired effect numerator and
+comparator-mean denominator before the relative lower quantile is taken. Phase
+0 passes only if all eight cells meet their fixed practical and
+simultaneous-bound thresholds. No subset, metric, threshold, checkpoint, or
+seed may rescue a failure.
 
 On pass, the next experiment is a matched generator ablation using the frozen
 probe as a training-only action/spectral consistency loss on the denoiser's

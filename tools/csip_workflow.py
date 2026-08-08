@@ -139,8 +139,9 @@ def command_register(args: argparse.Namespace) -> int:
                 ],
                 "relative_energy_floor": 1e-3,
                 "feature_dim": 9216,
-                "phase_comparator": (
-                    "matched_9216_input_with_all_phase_coordinates_zeroed"
+                "angle_comparator": (
+                    "matched_9216_input_with_each_masked_unit_phasor_replaced_"
+                    "by_its_support_mask_and_zero_imaginary_coordinate"
                 ),
                 "vae_view_boundary": (
                     "fft_is_per_view_after_established_width_stacked_wan_encoding;"
@@ -169,24 +170,32 @@ def command_register(args: argparse.Namespace) -> int:
                 "weight_decay": 1e-4,
                 "seed": contract.EXPECTED_SEED,
                 "checkpoint_selection": "fixed_final_update_not_metric_selected",
-                "feature_variants": ["full", "magnitude_only"],
+                "feature_variants": ["full", "angle_neutral"],
                 "paired_initialization": "identical_state_before_update_1",
             },
             "evaluation": {
                 "sealed_validation_clips": 64,
                 "controls": [
                     "aligned",
-                    "episode_disjoint_cyclic_shuffled",
-                    "zero",
+                    "episode_disjoint_paired_shuffled",
+                    "raw_no_action",
                     "inverse",
                 ],
+                "donor_pairing": (
+                    "32_disjoint_adjacent_manifest_episode_pairs_with_target_swap"
+                ),
+                "raw_no_action_definition": (
+                    "pca_transform_of_raw_zero_736d_delta_descriptor_not_pca_zero"
+                ),
+                "bootstrap_unit": "disjoint_two_episode_validation_pair_block",
+                "bootstrap_resamples": "one_shared_pair_index_matrix_for_all_8_cells",
                 "bootstrap_replicates": contract.BOOTSTRAP_REPLICATES,
                 "bootstrap_seed": contract.BOOTSTRAP_SEED,
                 "familywise_alpha": 0.05,
                 "family_cells": 8,
                 "gate": (
                     "full_probe_beats_three_target_controls_and_matched_"
-                    "magnitude_only_under_fixed_practical_effect_thresholds"
+                    "angle_neutral_under_fixed_practical_effect_thresholds"
                 ),
                 "control_thresholds": {
                     "relative_mse_point": 0.05,
@@ -194,7 +203,7 @@ def command_register(args: argparse.Namespace) -> int:
                     "cosine_point": 0.05,
                     "cosine_lower_bound": 0.01,
                 },
-                "phase_contribution_thresholds": {
+                "spectral_angle_contribution_thresholds": {
                     "relative_mse_point": 0.03,
                     "relative_mse_lower_bound": 0.01,
                     "cosine_point": 0.02,
@@ -288,7 +297,7 @@ def command_seal(args: argparse.Namespace) -> int:
         or report.get("checkpoint_sha256") != checkpoint_record["sha256"]
         or report.get("completed_updates") != contract.EXPECTED_UPDATES
         or report.get("selection_rule") != "fixed_final_update_not_metric_selected"
-        or report.get("feature_variants") != ["full", "magnitude_only"]
+        or report.get("feature_variants") != ["full", "angle_neutral"]
         or report.get("paired_initialization") != "identical_state_before_update_1"
         or report.get("wandb", {}).get("run_id") != registration["wandb"]["run_id"]
         or report.get("wandb", {}).get("group") is not None
@@ -352,13 +361,59 @@ def validate_seal(path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def command_render(args: argparse.Namespace) -> int:
-    registration = contract.validate_registration(args.registration)
+    # Rendering is also the stage-specific source receipt.  Before the fixed
+    # checkpoint seal exists, neither a dry run nor the train allocation may
+    # reopen/hash validation records.  The validation stage must first prove
+    # that its registered update-400 seal is intact, then and only then may it
+    # revalidate validation source content.
+    registration_path = contract.regular_file(args.registration, "CSIP registration")
+    if args.stage == "train":
+        registration = contract.validate_registration(
+            registration_path, open_validation=False
+        )
+        boundary_receipt: dict[str, Any] = {
+            "stage": "train",
+            "validation_source_records_opened": False,
+            "checkpoint_seal_required": False,
+            "checkpoint_seal_validated": False,
+        }
+    elif args.stage == "validation":
+        train_boundary = contract.validate_registration(
+            registration_path, require_train_cache=True, open_validation=False
+        )
+        planned_seal = Path(train_boundary["planned_paths"]["checkpoint_seal"])
+        seal, sealed_registration = validate_seal(planned_seal)
+        if (
+            sealed_registration["identity_sha256"]
+            != train_boundary["identity_sha256"]
+            or seal["registration"]
+            != contract.registration_file_record(registration_path)
+        ):
+            raise contract.CSIPContractError(
+                "validation-stage seal belongs to another registration"
+            )
+        registration = contract.validate_registration(
+            registration_path,
+            require_train_cache=True,
+            open_validation=True,
+        )
+        if registration["identity_sha256"] != train_boundary["identity_sha256"]:
+            raise contract.CSIPContractError(
+                "registration changed while validation sources were opened"
+            )
+        boundary_receipt = {
+            "stage": "validation",
+            "validation_source_records_opened": True,
+            "checkpoint_seal_required": True,
+            "checkpoint_seal_validated": True,
+            "checkpoint_seal_identity_sha256": seal["identity_sha256"],
+        }
+    else:
+        raise contract.CSIPContractError("render stage must be train or validation")
     root = Path(registration["study_root"])
     python = registration["runtime"]["python"]["launcher_path"]
     repo = registration["source"]["path"]
-    registration_path = str(
-        contract.regular_file(args.registration, "CSIP registration")
-    )
+    registration_path_string = str(registration_path)
 
     def q(parts: list[str]) -> str:
         return " ".join(shlex.quote(value) for value in parts)
@@ -374,7 +429,7 @@ def command_render(args: argparse.Namespace) -> int:
                 str(Path(repo) / "tools" / "csip_latent_cache.py"),
                 "extract",
                 "--registration",
-                registration_path,
+                registration_path_string,
                 "--split",
                 "train",
             ]
@@ -389,7 +444,7 @@ def command_render(args: argparse.Namespace) -> int:
                 str(Path(repo) / "tools" / "csip_latent_cache.py"),
                 "extract",
                 "--registration",
-                registration_path,
+                registration_path_string,
                 "--split",
                 "validation",
                 "--seal",
@@ -401,7 +456,7 @@ def command_render(args: argparse.Namespace) -> int:
                 python,
                 str(Path(repo) / "tools" / "csip_train.py"),
                 "--registration",
-                registration_path,
+                registration_path_string,
             ]
         ),
         "seal": q(
@@ -410,7 +465,7 @@ def command_render(args: argparse.Namespace) -> int:
                 str(Path(repo) / "tools" / "csip_workflow.py"),
                 "seal",
                 "--registration",
-                registration_path,
+                registration_path_string,
                 "--checkpoint",
                 registration["planned_paths"]["checkpoint"],
                 "--training-report",
@@ -438,7 +493,13 @@ def command_render(args: argparse.Namespace) -> int:
     }
     print(
         json.dumps(
-            {"study_root": str(root), "commands": commands}, indent=2, sort_keys=True
+            {
+                "study_root": str(root),
+                "boundary_receipt": boundary_receipt,
+                "commands": commands,
+            },
+            indent=2,
+            sort_keys=True,
         )
     )
     return 0
@@ -478,6 +539,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     render = subparsers.add_parser("render")
     render.add_argument("--registration", type=Path, required=True)
+    render.add_argument("--stage", choices=("train", "validation"), required=True)
     render.set_defaults(func=command_render)
     return parser
 
