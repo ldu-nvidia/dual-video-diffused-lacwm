@@ -9,7 +9,10 @@ shapes and every Wan block API remain unchanged.
 
 Only requested actions, morphology, and fixed token positions are consumed.
 The path is therefore available identically during training and deployment.
-Its scalar gate starts at exact zero, preserving the parent function.
+This adaptive follow-up fixes the candidate's effective scalar gate at 0.1 so
+the projection cannot be starved by the exact-zero cold start used in the
+prospective screen; the paired control instantiates the same frozen scalar but
+hard-masks its context effect.
 """
 
 from __future__ import annotations
@@ -114,6 +117,8 @@ class ActionTokenContextAdapter(nn.Module):
         text_dim: int = 4096,
         clip_value: float = 8.0,
         initialization_seed: int = 20_260_808,
+        gate_init: float = 0.1,
+        gate_trainable: bool = False,
     ) -> None:
         super().__init__()
         if (action_dim, chunk_size, num_transitions, morph_dim) != (157, 5, 8, 64):
@@ -124,6 +129,10 @@ class ActionTokenContextAdapter(nn.Module):
             raise ValueError("prospective screen fixes whitening clip value to eight")
         if initialization_seed != 20_260_808:
             raise ValueError("prospective screen fixes adapter initialization seed")
+        if not math.isfinite(gate_init) or gate_init != 0.1:
+            raise ValueError("fixed-dose follow-up fixes effective gate to 0.1")
+        if gate_trainable is not False:
+            raise ValueError("fixed-dose follow-up freezes the scalar gate")
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be a boolean")
 
@@ -150,7 +159,10 @@ class ActionTokenContextAdapter(nn.Module):
         self.register_buffer("action_std", std, persistent=True)
         self.register_buffer("action_active", active, persistent=True)
 
-        self.raw_gate = nn.Parameter(torch.zeros((), dtype=torch.float32))
+        self.raw_gate = nn.Parameter(
+            torch.tensor(math.atanh(gate_init), dtype=torch.float32),
+            requires_grad=gate_trainable,
+        )
         self.enabled = enabled
         self._runtime_hard_mask = False
         self.action_dim = action_dim
@@ -161,6 +173,8 @@ class ActionTokenContextAdapter(nn.Module):
         self.hidden = hidden
         self.text_dim = text_dim
         self.clip_value = clip_value
+        self.gate_init = gate_init
+        self.gate_trainable = gate_trainable
         self.stats_identity_sha256 = str(payload["identity_sha256"])
         self.stats_file_sha256 = expected_stats_sha256
 

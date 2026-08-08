@@ -5,7 +5,7 @@ defaults:
 _target_: lam.action_token_conditioned_model.ActionTokenConditionedVPM
 
 # Arm files change only `enabled`. Both instantiate and execute the exact same
-# per-substep adapter and begin with its scalar context gate at exact zero.
+# per-substep adapter with the same frozen 0.1 scalar; AT-OFF hard-masks it.
 action_token:
   enabled: false
   stats_path: ${oc.env:ACTION_TOKEN_STATS}
@@ -18,3 +18,5 @@ action_token:
   text_dim: 4096
   clip_value: 8.0
   initialization_seed: 20260808
+  gate_init: 0.1
+  gate_trainable: false

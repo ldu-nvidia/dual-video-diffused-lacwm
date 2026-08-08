@@ -55,13 +55,13 @@ ARMS = (
     Arm(
         "AT-OFF",
         "ravenhuang/wan-dit/action_token_off",
-        "action-token-at-off-seed1234-u000200",
+        "action-token-fixed-at-off-seed1234-u000200",
         False,
     ),
     Arm(
         "AT-ON",
         "ravenhuang/wan-dit/action_token_on",
-        "action-token-at-on-seed1234-u000200",
+        "action-token-fixed-at-on-seed1234-u000200",
         True,
     ),
 )
@@ -224,8 +224,9 @@ def canonical_config_contract(config: Any) -> dict[str, Any]:
 def fixed_protocol() -> dict[str, Any]:
     return {
         "question": (
-            "does retaining all requested future action substeps as native Wan "
-            "cross-attention context improve causal few-step VPM video?"
+            "does forcing a nonzero, fixed-dose route for all requested future "
+            "action substeps improve causal few-step VPM video after the "
+            "zero-start route collapsed?"
         ),
         "arms": [asdict(arm) for arm in ARMS],
         "parent_snapshot_sha256": PARENT_SNAPSHOT_SHA256,
@@ -251,7 +252,7 @@ def fixed_protocol() -> dict[str, Any]:
             "adapter_hidden": 256,
             "raw_context_dim": 4096,
             "initialization_seed": 20_260_808,
-            "gate": "tanh_scalar_initialized_exact_zero",
+            "gate": "frozen_tanh_scalar_effective_0.1_candidate_hard_zero_control",
             "injection": (
                 "add_transition_major_8x5_tokens_to_last_40_null_context_"
                 "positions_before_frozen_wan_text_embedding"
@@ -260,7 +261,7 @@ def fixed_protocol() -> dict[str, Any]:
             "pretrained_parameter_shapes_changed": False,
             "runtime_hard_mask": True,
             "same_schema_and_forward_compute": True,
-            "current_code_parent_path_no_op_at_initialization": True,
+            "current_code_parent_path_no_op_at_initialization": False,
             "historical_forward_bit_identity_claimed": False,
         },
         "training_model_calls_per_update": 1,

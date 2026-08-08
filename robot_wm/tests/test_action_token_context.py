@@ -100,7 +100,7 @@ def test_tokens_are_transition_major_and_each_substep_can_change_independently(t
     assert float(difference[0, 3 * 5 + 2]) > 0.0
 
 
-def test_control_and_candidate_have_identical_state_and_exact_zero_gate(tmp_path):
+def test_control_and_candidate_have_identical_state_and_fixed_candidate_dose(tmp_path):
     control = _module(tmp_path, False)
     candidate = _module(tmp_path, True)
     assert set(control.state_dict()) == set(candidate.state_dict())
@@ -113,20 +113,16 @@ def test_control_and_candidate_have_identical_state_and_exact_zero_gate(tmp_path
     assert torch.equal(tokens_control, tokens_candidate)
     null = torch.randn(2, 40, 4096)
     assert torch.equal(null + control.effective_gate() * tokens_control, null)
-    assert torch.equal(null + candidate.effective_gate() * tokens_candidate, null)
-
-    with torch.no_grad():
-        control.raw_gate.fill_(0.5)
-        candidate.raw_gate.fill_(0.5)
     assert float(control.effective_gate().detach()) == 0.0
-    assert float(candidate.effective_gate().detach()) > 0.0
-    with candidate.runtime_hard_mask():
-        assert float(candidate.effective_gate().detach()) == 0.0
-    assert float(candidate.effective_gate().detach()) > 0.0
+    assert torch.isclose(candidate.effective_gate(), torch.tensor(0.1), atol=1e-7)
+    assert not candidate.raw_gate.requires_grad
     assert not torch.equal(
         null + candidate.effective_gate() * tokens_candidate,
         null,
     )
+    with candidate.runtime_hard_mask():
+        assert float(candidate.effective_gate().detach()) == 0.0
+    assert torch.isclose(candidate.effective_gate(), torch.tensor(0.1), atol=1e-7)
 
 
 def test_statistics_file_digest_and_identity_fail_closed(tmp_path):

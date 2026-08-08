@@ -142,7 +142,8 @@ def test_endpoint_grid_has_aligned_quality_and_zero_global_shuffle_attribution()
     assert screen.fixed_protocol()["protected_test_access_allowed"] is False
     assert screen.fixed_protocol()["future_rgb_or_feature_allowed_at_sampling"] is False
     intervention = screen.fixed_protocol()["action_token_route"]
-    assert intervention["current_code_parent_path_no_op_at_initialization"] is True
+    assert intervention["current_code_parent_path_no_op_at_initialization"] is False
+    assert intervention["gate"].startswith("frozen_tanh_scalar_effective_0.1")
     assert intervention["historical_forward_bit_identity_claimed"] is False
     assert screen.fixed_protocol()["pre_torchrun_input_revalidation"].startswith(
         "full_sha256"

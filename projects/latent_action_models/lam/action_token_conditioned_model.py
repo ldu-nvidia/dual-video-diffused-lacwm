@@ -1,4 +1,4 @@
-"""Initial-function-preserving explicit action-token continuation of the VPM.
+"""Fixed-dose explicit action-token continuation of the VPM.
 
 The native VPM action route is retained byte-for-byte.  A second route emits
 one token for each of the 8 x 5 requested future action samples and adds those
@@ -35,7 +35,7 @@ class ActionTokenContractError(RuntimeError):
 
 
 class ActionTokenConditionedVPM(DualExplicitActionDiTModel):
-    """VPM with a zero-gated, per-substep native cross-attention route."""
+    """VPM with a fixed-dose, per-substep native cross-attention route."""
 
     def __init__(
         self,
@@ -56,6 +56,8 @@ class ActionTokenConditionedVPM(DualExplicitActionDiTModel):
             "text_dim",
             "clip_value",
             "initialization_seed",
+            "gate_init",
+            "gate_trainable",
         }
         if set(config) != required:
             raise ValueError(

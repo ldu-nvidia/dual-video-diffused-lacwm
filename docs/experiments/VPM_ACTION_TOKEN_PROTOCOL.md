@@ -1,12 +1,17 @@
-# VPM per-substep action-token cross-attention screen (prospective)
+# VPM per-substep action-token cross-attention fixed-dose follow-up
 
 ## Question and boundary
 
-This one-seed, 512-train/64-validation ABC continuation asks whether repairing
-the collapsed explicit-action path improves a one-call video generator and
-makes its output causally specific to the requested action. The protocol is
-frozen before either arm is trained or scored. The protected test split is not
-configured, opened, or authorized after this screen.
+This adaptive one-seed, 512-train/64-validation ABC continuation asks whether
+forcing a meaningful optimization dose through the explicit-action token path
+improves a one-call video generator and makes its output causally specific to
+the requested action. The earlier exact-zero-start screen was inspected first:
+its learned effective gate ended at `-3.88e-5`, so its action-context RMS was
+only `5.45e-7` and the adapter projection was effectively starved. The dose
+below was selected after that development result; this follow-up is therefore
+exploratory and cannot independently confirm the route on the reused val64
+split. Its protocol is frozen before either new arm is trained or scored. The
+protected test split is not configured, opened, or authorized.
 
 The motivating train-split audit found that raw future action chunks retained
 sample variation (cyclic-shuffle cosine `0.728`) and within-chunk temporal
@@ -76,22 +81,27 @@ sequence length changes. This is the smallest architecture-faithful explicit
 token route supported by the current Wan API; it does not add a separately
 masked temporal cross-attention operator inside every block.
 
-`g` initializes to exact zero, so the current-code context is the parent null
-context at initialization. This is not a claim that a fresh stochastic forward
-is bit-identical to execution under the historical training commit.
+The effective candidate gate is fixed at `0.1` throughout training and
+evaluation. With the observed raw-token RMS near `0.014`, this gives an
+approximately `0.0014` raw-context dose, comparable to the registered null
+context RMS (`0.00114`) without changing Wan's token width or call count. The
+same raw scalar is frozen in both arms; the control applies an exact hard mask.
+This intentionally gives up parent-function preservation to test whether the
+earlier negative was a cold-start optimization artifact.
 
 | Arm | 40-token adapter computed | Gate parameter/schema | Context effect |
 |---|---:|---:|---:|
-| `AT-OFF` | yes | same trainable scalar | hard-masked to exact zero |
-| `AT-ON` | yes | same trainable scalar | `tanh(g) r[t,k]` |
+| `AT-OFF` | yes | same frozen scalar, native value 0.1 | hard-masked to exact zero |
+| `AT-ON` | yes | same frozen scalar, native value 0.1 | `0.1 r[t,k]` |
 
 Both arms instantiate the same parameters, buffers, action branch, action pool,
 Wan `ActionToControl`, LoRA transformer, and unused parameter-matched auxiliary
 topology. The control computes all tokens but a non-serialized arm flag
 multiplies its effective gate by zero. Both use one Wan call per training
 update and the same Wan calls at evaluation. The small candidate token-route
-gradient is the intended intervention; no claim of bit-exact backward FLOPs is
-made.
+gradient is the intended intervention; the fixed nonzero dose also permits the
+projection itself to receive gradients from the first update. No claim of
+bit-exact backward FLOPs is made.
 
 The inherited parameter-matched auxiliary head receives an all-zero placeholder
 in both arms. Its input and clock gates and loss are exact zero, and the dataset
@@ -122,8 +132,9 @@ revalidated from the saved config. The parent is loaded exactly once: all
 historical tensors must match and the only permitted missing state is
 `action_token_adapter.*`. Base action latents, raw/gated action tokens, native
 action control, and final Wan context are also logged as diagnostics. The
-initial adapter-state hashes, total/trainable parameter counts, and zero gates
-must match exactly.
+initial adapter-state hashes, total/trainable parameter counts, and frozen raw
+gates must match exactly. The control's effective gate is zero only because of
+its hard mask; the candidate's effective gate is 0.1.
 
 Before `torchrun`, a single-process boundary rehashes every registered input,
 including the multi-GB parent, and seals those records in the immutable arm

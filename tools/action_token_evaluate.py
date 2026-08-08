@@ -208,6 +208,7 @@ def _validate_trace(
         raise ActionTokenEvaluationError("training trace is empty")
     header = rows[0]
     expected_arm = "AT-ON" if arm.action_token_enabled else "AT-OFF"
+    expected_effective_gate = 0.1 if arm.action_token_enabled else 0.0
     runtime_verification = screen.validate_runtime_receipt(registration, arm)
     if (
         header.get("kind") != "action_token_training_trace_header"
@@ -216,9 +217,22 @@ def _validate_trace(
         or header.get("parent_snapshot_sha256") != screen.PARENT_SNAPSHOT_SHA256
         or header.get("stats_file_sha256")
         != registration["action_token_stats"]["file"]["sha256"]
-        or header.get("initial_effective_gate") != 0.0
+        or not math.isclose(
+            float(header.get("initial_effective_gate", float("nan"))),
+            expected_effective_gate,
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        )
+        or not math.isclose(
+            float(header.get("initial_native_gate_before_arm_mask", float("nan"))),
+            0.1,
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        )
+        or header.get("gate_trainable") is not False
         or header.get("same_schema_modules_and_forward_calls") is not True
-        or header.get("current_code_parent_path_no_op_at_initialization") is not True
+        or header.get("current_code_parent_path_no_op_at_initialization")
+        != (not arm.action_token_enabled)
         or header.get("raw_context_geometry") != [40, 4096]
         or header.get("injection")
         != "add_to_last_40_null_context_tokens_before_wan_text_embedding"
@@ -433,6 +447,16 @@ def _load_model(
         or not math.isfinite(effective_action_gate)
         or abs(effective_action_gate) >= 1.0
         or (not arm.action_token_enabled and effective_action_gate != 0.0)
+        or not math.isclose(
+            raw_action_gate, math.atanh(0.1), rel_tol=0.0, abs_tol=1e-7
+        )
+        or (
+            arm.action_token_enabled
+            and not math.isclose(
+                effective_action_gate, 0.1, rel_tol=0.0, abs_tol=1e-7
+            )
+        )
+        or model.action_token_adapter.raw_gate.requires_grad
     ):
         raise ActionTokenEvaluationError("trained action-token gate is invalid")
     suspicious = []

@@ -317,6 +317,15 @@ def _validate_arm_artifacts(
         or not math.isfinite(float(effective_gate))
         or abs(float(effective_gate)) >= 1.0
         or (not arm.action_token_enabled and float(effective_gate) != 0.0)
+        or not math.isclose(
+            float(raw_gate), math.atanh(0.1), rel_tol=0.0, abs_tol=1e-7
+        )
+        or (
+            arm.action_token_enabled
+            and not math.isclose(
+                float(effective_gate), 0.1, rel_tol=0.0, abs_tol=1e-7
+            )
+        )
     ):
         raise ActionTokenAnalysisError("learned action-token record differs")
 
@@ -511,8 +520,36 @@ def _assert_training_pair(
         != header_right.get("trainable_parameter_count")
         or header_left.get("action_token_parameter_count")
         != header_right.get("action_token_parameter_count")
-        or header_left.get("initial_effective_gate") != 0.0
-        or header_right.get("initial_effective_gate") != 0.0
+        or not math.isclose(
+            float(header_left.get("initial_effective_gate", float("nan"))),
+            0.0,
+            rel_tol=0.0,
+            abs_tol=0.0,
+        )
+        or not math.isclose(
+            float(header_right.get("initial_effective_gate", float("nan"))),
+            0.1,
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        )
+        or not math.isclose(
+            float(
+                header_left.get("initial_native_gate_before_arm_mask", float("nan"))
+            ),
+            0.1,
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        )
+        or not math.isclose(
+            float(
+                header_right.get("initial_native_gate_before_arm_mask", float("nan"))
+            ),
+            0.1,
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        )
+        or header_left.get("gate_trainable") is not False
+        or header_right.get("gate_trainable") is not False
     ):
         raise ActionTokenAnalysisError("paired initial adapter/state differs")
     input_fields = (

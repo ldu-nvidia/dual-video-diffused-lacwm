@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -171,8 +172,14 @@ class ActionTokenTrainer(Trainer):
             raise RuntimeError("screen fixes a 200-update model-only continuation")
         module = model
         enabled = bool(module.action_token_enabled)
-        if float(module.action_token_adapter.raw_gate.detach()) != 0.0:
-            raise RuntimeError("action-token gate must initialize to exact zero")
+        raw_gate = float(module.action_token_adapter.raw_gate.detach())
+        native_gate = float(torch.tanh(module.action_token_adapter.raw_gate).detach())
+        if (
+            not math.isclose(raw_gate, math.atanh(0.1), rel_tol=0.0, abs_tol=1e-7)
+            or not math.isclose(native_gate, 0.1, rel_tol=0.0, abs_tol=1e-7)
+            or module.action_token_adapter.raw_gate.requires_grad
+        ):
+            raise RuntimeError("action-token gate must be frozen at effective 0.1")
         stats_sha = os.environ.get("ACTION_TOKEN_STATS_SHA256")
         if stats_sha != module.action_token_adapter.stats_file_sha256:
             raise RuntimeError("action statistics environment/model digests differ")
@@ -247,8 +254,10 @@ class ActionTokenTrainer(Trainer):
                 "initial_effective_gate": float(
                     module.action_token_adapter.effective_gate().detach().cpu()
                 ),
+                "initial_native_gate_before_arm_mask": native_gate,
+                "gate_trainable": False,
                 "same_schema_modules_and_forward_calls": True,
-                "current_code_parent_path_no_op_at_initialization": True,
+                "current_code_parent_path_no_op_at_initialization": not enabled,
                 "raw_context_geometry": [40, 4096],
                 "injection": "add_to_last_40_null_context_tokens_before_wan_text_embedding",
                 "wan_pretrained_parameter_shapes_changed": False,

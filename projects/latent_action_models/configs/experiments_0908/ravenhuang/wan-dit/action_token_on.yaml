@@ -3,9 +3,9 @@ defaults:
   - /experiments_0908/action_token_common
   - _self_
 
-name: action-token-at-on-seed1234-u000200
+name: action-token-fixed-at-on-seed1234-u000200
 model:
   action_token:
     enabled: true
 wandb:
-  tags: [abc, vpm, action-token, candidate, seed-1234]
+  tags: [abc, vpm, action-token, fixed-dose, candidate, seed-1234]
