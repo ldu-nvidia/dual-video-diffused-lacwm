@@ -591,6 +591,22 @@ def _write_overlay(
         raise RuntimeError(f"Could not write overlay: {path}")
 
 
+def nonwrapping_shift_pairs(count: int, shift: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return aligned and shifted frame ordinals without cyclic wraparound."""
+
+    if count <= 0:
+        raise ValueError("count must be positive")
+    if shift == 0:
+        raise ValueError("shift must be nonzero")
+    if abs(shift) >= count:
+        raise ValueError("absolute shift must be shorter than the clip")
+    if shift > 0:
+        source = np.arange(0, count - shift, dtype=np.int64)
+    else:
+        source = np.arange(-shift, count, dtype=np.int64)
+    return source, source + shift
+
+
 def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("MUJOCO_GL", args.mujoco_gl)
     try:
@@ -611,8 +627,8 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
         raise FileNotFoundError(f"Incomplete official ABC assets under {official_root}")
 
     bundles = load_bundles(args.bundle_dir.resolve())
-    if args.pose_shift <= 0:
-        raise ValueError("--pose-shift must be positive")
+    if args.pose_shift == 0:
+        raise ValueError("--pose-shift must be nonzero")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     robot_xml = build_robot_only_xml(scene_path, asset_root)
     xml_sha256 = hashlib.sha256(robot_xml.encode("utf-8")).hexdigest()
@@ -642,7 +658,7 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
             joint = arrays["joint_states"]
             gripper = arrays["gripper_states"]
             count, height, width, channels = rgb.shape
-            if channels != 3 or count <= args.pose_shift:
+            if channels != 3 or count <= abs(args.pose_shift):
                 raise ValueError(f"Unexpected RGB shape or too-short clip: {rgb.shape}")
             if renderer is None:
                 renderer = mujoco.Renderer(model, height=height, width=width)
@@ -656,15 +672,20 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
 
             aligned_masks = []
             shifted_masks = []
-            shifted_indices = [int((index + args.pose_shift) % count) for index in range(count)]
-            nonwrap_count = count - args.pose_shift
+            shifted_indices = [
+                int((index + args.pose_shift) % count) for index in range(count)
+            ]
+            nonwrap_source, nonwrap_target = nonwrapping_shift_pairs(
+                count, args.pose_shift
+            )
+            nonwrap_ordinals = set(nonwrap_source.tolist())
             frame_shift = (
-                arrays["frame_indices"][args.pose_shift:]
-                - arrays["frame_indices"][:nonwrap_count]
+                arrays["frame_indices"][nonwrap_target]
+                - arrays["frame_indices"][nonwrap_source]
             )
             timestamp_shift_ns = (
-                arrays["frame_ts"][args.pose_shift:]
-                - arrays["frame_ts"][:nonwrap_count]
+                arrays["frame_ts"][nonwrap_target]
+                - arrays["frame_ts"][nonwrap_source]
             )
             control_timings.append(
                 {
@@ -673,8 +694,8 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
                     "median_timestamp_shift_seconds": float(
                         np.median(timestamp_shift_ns) / 1_000_000_000.0
                     ),
-                    "cyclic_wrap_frame_count": args.pose_shift,
-                    "nonwrap_frame_count": nonwrap_count,
+                    "cyclic_wrap_frame_count": abs(args.pose_shift),
+                    "nonwrap_frame_count": len(nonwrap_source),
                 }
             )
             for index in range(count):
@@ -741,6 +762,7 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
                     "frame_ordinal": index,
                     "frame_index": int(arrays["frame_indices"][index]),
                     "shifted_frame_ordinal": shifted_indices[index],
+                    "control_nonwrap": index in nonwrap_ordinals,
                     "pose_l2": float(frame_pose_distances[index]),
                     "aligned": aligned_metrics,
                     "shifted": shifted_metrics,
@@ -779,15 +801,7 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
     aligned_support = np.asarray([row["aligned"]["edge_support_3px"] for row in rows])
     shifted_support = np.asarray([row["shifted"]["edge_support_3px"] for row in rows])
     delta, lower, upper = paired_bootstrap_mean_ci(shifted_chamfer - aligned_chamfer)
-    clip_counts = {
-        clip_id: sum(1 for row in rows if row["clip_id"] == clip_id)
-        for clip_id in {str(row["clip_id"]) for row in rows}
-    }
-    nonwrap_rows = [
-        row
-        for row in rows
-        if row["frame_ordinal"] + args.pose_shift < clip_counts[str(row["clip_id"])]
-    ]
+    nonwrap_rows = [row for row in rows if row["control_nonwrap"]]
     nonwrap_delta = np.asarray(
         [
             row["shifted"]["chamfer_px"] - row["aligned"]["chamfer_px"]
@@ -946,7 +960,11 @@ def evaluate_bundles(args: argparse.Namespace) -> dict[str, Any]:
             "MuJoCo rendering uses centered principal point and does not apply D405 distortion.",
             "Observed states are used only to validate geometry; deployable scaffolds must replay planned actions.",
             "ABC preprocessing uses next/ceiling timestamp resampling, not true nearest resampling; this probe cannot establish sub-frame temporal calibration.",
-            "The primary four-clip-step control is about 20 source-video frames, not a subtle timing perturbation.",
+            (
+                f"The primary {args.pose_shift:+d}-clip-step control has median "
+                f"absolute shift {np.median([abs(item['median_source_video_frame_shift']) for item in control_timings]):.1f} "
+                "source-video frames, not a sub-frame perturbation."
+            ),
         ],
     }
     analysis["identity_sha256"] = sha256_json(analysis)

@@ -10,6 +10,7 @@ from tools.abc_d405_nominal_geometry_probe import (
     build_robot_only_xml,
     cache14_to_official14,
     edge_alignment_metrics,
+    nonwrapping_shift_pairs,
     paired_bootstrap_mean_ci,
     require_train_row,
     resolve_raw_mcap,
@@ -110,6 +111,18 @@ class ABCD405NominalGeometryProbeTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first[0], 2.5)
         self.assertGreater(first[1], 0.0)
+
+    def test_nonwrapping_shift_pairs_support_both_directions(self):
+        np.testing.assert_array_equal(
+            nonwrapping_shift_pairs(5, 2),
+            (np.asarray([0, 1, 2]), np.asarray([2, 3, 4])),
+        )
+        np.testing.assert_array_equal(
+            nonwrapping_shift_pairs(5, -2),
+            (np.asarray([2, 3, 4]), np.asarray([0, 1, 2])),
+        )
+        with self.assertRaisesRegex(ValueError, "nonzero"):
+            nonwrapping_shift_pairs(5, 0)
 
 
 if __name__ == "__main__":
