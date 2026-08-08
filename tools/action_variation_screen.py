@@ -495,9 +495,15 @@ def command_register(args: argparse.Namespace) -> int:
         "zijiandu", "dual-video-diffusion-private"
     )
     wandb.pop("viewer_email", None)
-    python = args.python.expanduser().resolve(strict=True)
-    if not python.is_file() or not os.access(python, os.X_OK):
+    python = args.python.expanduser()
+    if (
+        not python.is_absolute()
+        or Path(os.path.abspath(python)) != python
+        or not python.is_file()
+        or not os.access(python, os.X_OK)
+    ):
         raise ActionVariationScreenError("runtime Python is not executable")
+    python_file = python.resolve(strict=True)
     payload = identity_payload(
         {
             "schema_version": SCHEMA_VERSION,
@@ -523,8 +529,11 @@ def command_register(args: argparse.Namespace) -> int:
             "action_delta_stats": {"file": stats_record, "payload": stats},
             "runtime": {
                 **validated["runtime"],
+                # Preserve the virtual-environment launcher path.  Invoking the
+                # resolved interpreter directly bypasses pyvenv.cfg and loses
+                # the registered environment's site-packages.
                 "python": str(python),
-                "python_file": base._file_record(python),
+                "python_file": base._file_record(python_file),
             },
             "fixed_protocol": fixed_protocol(),
             "wandb": {**wandb, "group": None, "mode": "online"},
@@ -611,9 +620,14 @@ def revalidate_execution_environment(
     ):
         raise ActionVariationScreenError("Wan runtime directory changed")
     python_record = runtime.get("python_file")
+    python_launcher = Path(runtime.get("python", ""))
     if (
         not isinstance(python_record, Mapping)
         or base._revalidate_record(python_record, "runtime Python") != python_record
+        or not python_launcher.is_absolute()
+        or not python_launcher.is_file()
+        or python_launcher.resolve(strict=True) != Path(python_record["path"])
+        or not os.access(python_launcher, os.X_OK)
         or not os.access(Path(python_record["path"]), os.X_OK)
     ):
         raise ActionVariationScreenError("runtime Python changed")

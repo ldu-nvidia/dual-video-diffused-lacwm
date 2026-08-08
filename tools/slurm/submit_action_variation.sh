@@ -93,6 +93,7 @@ ARM_JOB_ID="$(sbatch "${SBATCH_ARGS[@]}" "$SBATCH_SCRIPT" "${COMMON[@]}")"
 ANALYSIS_ARGS=(--parsable --job-name "$JOB_NAME-analysis"
   --dependency "afterok:$ARM_JOB_ID" --partition "$PARTITION" --time 00:30:00
   --nodes 1 --ntasks 1 --cpus-per-task 8 --mem 64G --chdir "$LOG_DIR"
+  --gpus-per-node 1
   --output "$LOG_DIR/%x-%j.out" --error "$LOG_DIR/%x-%j.err")
 [[ -z "$ACCOUNT" ]] || ANALYSIS_ARGS+=(--account "$ACCOUNT")
 [[ -z "$QOS" ]] || ANALYSIS_ARGS+=(--qos "$QOS")
