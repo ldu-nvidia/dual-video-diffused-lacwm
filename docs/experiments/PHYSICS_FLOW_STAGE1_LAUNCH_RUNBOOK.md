@@ -14,9 +14,9 @@ comparison, the isolated historical 6560866 parity gate, all 21 target-blind
 endpoint materializations, scoring, analysis, and final replay audit in that
 order.
 
-This v6 chain is a full rerun, not a seed-only replay. The sealed v5 artifacts
+This v7 chain is a full rerun, not a seed-only replay. The sealed v5 artifacts
 are admitted only as a numeric repair reference: v5 has zero endpoint rows and
-supports no quality conclusion. Before v6 evaluation can create its output
+supports no quality conclusion. Before v7 evaluation can create its output
 directory, the chain requires all eight cache arrays, every row-level numeric
 and tensor hash, all 400 same-arm deterministic update records, and every model
 tensor to match v5 exactly. Strict-access provenance and run identities must
@@ -74,9 +74,9 @@ DIRECT_FRONTIER=$BASE/artifacts/dual_video_diffusion/vpm_direct_residual_frontie
 
 V5_CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-e632344-v5
 V5_STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-e632344-v5
-CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v6
-STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v6
-LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v6
+CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v7
+STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v7
+LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v7
 REGISTRATION=$STUDY_ROOT/registration.json
 ```
 

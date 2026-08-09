@@ -85,8 +85,8 @@ def test_endpoint_grid_is_equal_call_raw_only() -> None:
     assert stage.STATE_ACCESS_SCHEMA == "raw-physics-flow-selected-npy-bytes-v1"
     assert stage.EVALUATION_NOISE_SEED == 20260729
     assert {arm.run_name for arm in stage.ARMS} == {
-        "physics-flow-off-strict-v6-seed1234-u000200",
-        "physics-flow-raw-strict-v6-seed1234-u000200",
+        "physics-flow-off-strict-v7-seed1234-u000200",
+        "physics-flow-raw-strict-v7-seed1234-u000200",
     }
     dataset_source = (
         ROOT / "robot_wm/datasets/abc/physics_flow_dataset.py"
@@ -166,6 +166,140 @@ def _first_local_crc32(path: Path) -> int:
         value = handle.read(4)
     assert len(value) == 4
     return int(struct.unpack("<L", value)[0])
+
+
+def _rewrite_numpy_force_zip64_as_legacy_redundant_extra(path: Path) -> None:
+    """Emulate the NumPy layout used by the immutable ABC state archives.
+
+    Current NumPy writes ZIP64 sentinels/version 45 in each local header.
+    Older NumPy wrote the same 20-byte ZIP64 size extra redundantly beside
+    ordinary 32-bit sizes/version 20; its central directory also uses version
+    20 and no extra.  Rewriting only metadata preserves every NPY payload byte.
+    """
+
+    content = bytearray(path.read_bytes())
+    local = stage._ZIP_LOCAL_HEADER
+    offset = 0
+    for expected_name in stage.STATE_ARCHIVE_MEMBERS:
+        fields = list(local.unpack_from(content, offset))
+        assert fields[0] == b"PK\x03\x04"
+        assert fields[1] == 45
+        assert fields[7] == fields[8] == 0xFFFFFFFF
+        name_bytes, extra_bytes = fields[9], fields[10]
+        variable_start = offset + local.size
+        variable = content[
+            variable_start : variable_start + name_bytes + extra_bytes
+        ]
+        assert bytes(variable[:name_bytes]).decode("ascii") == expected_name
+        extra = bytes(variable[name_bytes:])
+        payload_bytes, compressed_bytes = stage._parse_zip64_local_sizes(
+            extra, expected_name
+        )
+        assert payload_bytes == compressed_bytes
+        struct.pack_into("<H", content, offset + 4, 20)
+        struct.pack_into("<L", content, offset + 18, compressed_bytes)
+        struct.pack_into("<L", content, offset + 22, payload_bytes)
+        offset = variable_start + name_bytes + extra_bytes + payload_bytes
+
+    eocd_offset = len(content) - stage._ZIP_EOCD.size
+    eocd = stage._ZIP_EOCD.unpack_from(content, eocd_offset)
+    assert eocd[0] == b"PK\x05\x06"
+    central_cursor = int(eocd[6])
+    assert central_cursor == offset
+    for expected_name in stage.STATE_ARCHIVE_MEMBERS:
+        fields = stage._ZIP_CENTRAL_HEADER.unpack_from(content, central_cursor)
+        assert fields[0] == b"PK\x01\x02"
+        name_bytes, extra_bytes, comment_bytes = fields[10:13]
+        name_start = central_cursor + stage._ZIP_CENTRAL_HEADER.size
+        assert bytes(content[name_start : name_start + name_bytes]).decode(
+            "ascii"
+        ) == expected_name
+        assert extra_bytes == comment_bytes == 0
+        struct.pack_into("<H", content, central_cursor + 6, 20)
+        central_cursor += (
+            stage._ZIP_CENTRAL_HEADER.size
+            + name_bytes
+            + extra_bytes
+            + comment_bytes
+        )
+    assert central_cursor == eocd_offset
+    path.write_bytes(content)
+
+
+def test_legacy_numpy_redundant_zip64_local_extra_is_strictly_addressable(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "states.npz"
+    arrays = _state_archive_arrays()
+    _write_state_archive(state_path, arrays)
+    _rewrite_numpy_force_zip64_as_legacy_redundant_extra(state_path)
+
+    physical_reads: list[dict[str, object]] = []
+    observed = stage._read_selected_state_action_bytes(
+        state_path,
+        frame4=20,
+        action_start=0,
+        action_stop=65,
+        read_observer=physical_reads.append,
+    )
+
+    np.testing.assert_array_equal(
+        observed[0],
+        np.concatenate(
+            (arrays["joint_states"][20], arrays["gripper_states"][20])
+        ),
+    )
+    assert observed[1].shape == (65, 14)
+    assert observed[2]["array_byte_access_audit"][
+        "future_measured_state_array_data_bytes_returned"
+    ] == 0
+    assert {
+        member["zip_local_size_encoding"]
+        for member in observed[2]["members"].values()
+    } == {"zip64_redundant_sizes"}
+    assert {
+        member["zip_local_extra_bytes"]
+        for member in observed[2]["members"].values()
+    } == {20}
+    assert sum(
+        int(record["returned_bytes"])
+        for record in physical_reads
+        if str(record["label"]).startswith("selected_array_data")
+    ) == (14 + 65 * 14) * 4
+
+
+def test_redundant_zip64_local_extra_size_mismatch_fails_before_payload(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "states.npz"
+    _write_state_archive(state_path, _state_archive_arrays())
+    _rewrite_numpy_force_zip64_as_legacy_redundant_extra(state_path)
+    content = bytearray(state_path.read_bytes())
+    # First local extra begins after the fixed header and member name. Corrupt
+    # only its redundant uncompressed size; no member payload is touched.
+    name_bytes = stage._ZIP_LOCAL_HEADER.unpack_from(content, 0)[9]
+    extra_payload_offset = stage._ZIP_LOCAL_HEADER.size + name_bytes + 4
+    original = struct.unpack_from("<Q", content, extra_payload_offset)[0]
+    struct.pack_into("<Q", content, extra_payload_offset, original + 1)
+    state_path.write_bytes(content)
+    physical_reads: list[dict[str, object]] = []
+
+    with pytest.raises(
+        stage.PhysicsFlowStage1Error,
+        match="inconsistent redundant ZIP64 sizes",
+    ):
+        stage._read_selected_state_action_bytes(
+            state_path,
+            frame4=20,
+            action_start=0,
+            action_stop=65,
+            read_observer=physical_reads.append,
+        )
+
+    assert physical_reads
+    assert {record["label"] for record in physical_reads} == {
+        "zip_local_header"
+    }
 
 
 def test_state_reader_is_future_byte_invariant_and_frame4_sensitive(
@@ -1451,9 +1585,10 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python" in launch_runbook
     assert "PYTHONNOUSERSITE=1" in launch_runbook
     assert "--cache-python $CACHE_PYTHON_BIN" in launch_runbook
-    assert launch_runbook.count("-20260808-$SHORT-v6") == 3
+    assert launch_runbook.count("-20260808-$SHORT-v7") == 3
     assert "--v5-reference-cache-root $V5_CACHE_ROOT" in launch_runbook
     assert "--v5-reference-study-root $V5_STUDY_ROOT" in launch_runbook
+    assert "-20260808-$SHORT-v6" not in launch_runbook
     assert "-20260808-$SHORT-v4" not in launch_runbook
     assert "-20260808-$SHORT-v3" not in launch_runbook
     assert "-20260808-$SHORT-v2" not in launch_runbook
