@@ -3,8 +3,10 @@
 Date frozen: 2026-08-09
 
 Status: prospective code-and-protocol precommit; post-selection exploratory
-analysis on previously inspected ABC-train development rows only. No fresh
-reserve, validation, or protected-test row may be opened.
+analysis on previously inspected ABC-train development rows only. Rows
+480--510 were already consumed by the completed direct-residual frontier and
+are therefore barred here, not a globally fresh reserve. No barred train,
+validation, or protected-test row may be opened.
 
 ## Question and claim boundary
 
@@ -21,6 +23,9 @@ Frequency-Forcing reproduction. The primary source
 `34ea62bf37e300012a3d5911c27a80048c81d8c58284d92d982c5983de3ce133`)
 jointly optimizes a learnable wavelet/threshold transform and an asynchronous
 auxiliary generator stream, and reports generator training for 400 epochs.
+That digest is literature provenance recorded when this protocol was frozen;
+the source is not bundled with the repository, is not a runtime scientific
+input, and is not rehashed by the qualification job.
 Here the basis is instead prefit only by an unsupervised clean-latent
 sparsity/admissibility objective, frozen, and used to define targets for small
 external causal residual heads. A negative result rejects only this narrow
@@ -35,7 +40,10 @@ The frozen VAE encodes each ordinary clean training video in rows 128--383 to
 `[16,4,24,120]`. Exactly the two clean future latent frames and all 16 channels,
 `[16,2,24,120]`, enter the basis objective; the two history tokens are excluded
 so static observed content cannot dominate a basis intended for the future
-residual marginal. The artificial width is split into three independent
+residual marginal. The ordinary dataset loader reads both RGB and action
+arrays, and this access is audited, but only the encoded RGB tensor is passed
+to the basis optimizer: action values never enter its objective. The
+artificial width is split into three independent
 `[16,2,24,40]` camera views before any transform. The optimizer never receives
 VPM velocities, residuals, hidden states, actions, metrics, or development
 material.
@@ -78,7 +86,13 @@ final update is frozen; neither a best checkpoint nor a hyperparameter is
 selected from residual predictability or held-out outcomes.
 
 Rows 384--415 are used only after freezing to compute clean-latent transform
-receipts. They do not select or alter the basis or residual head. Receipts
+receipts. They do not select or alter the basis or residual head. One
+identity-bearing JSONL record is sealed for every calibration clip, including
+the registered clip and episode identities, clean-future latent hash, access
+flags, and raw per-basis metrics. Analysis and audit validate the exact row
+inventory and replay metric summaries, paired bootstrap evidence,
+filter/admissibility checks, terminal-band means, and every qualification gate
+from those sealed rows plus the sealed filter tensor. Receipts
 include filter taps/angles, cosine distance from Haar, QMF sums and even-shift
 autocorrelations, full analysis-matrix orthogonality, analysis--synthesis
 reconstruction, coefficient/input energy ratio, per-terminal-band energy,
@@ -90,7 +104,8 @@ concentration for learned and Haar. Passing basis qualification requires:
 - maximum reconstruction error at most `3e-6` and relative reconstruction
   energy at most `1e-11`;
 - coefficient/input energy ratio within `1 +/- 1e-5`, 100% gate retention,
-  and every terminal band carrying at least 0.5% of clean-latent energy;
+  and every terminal band's held-out mean carrying at least 0.5% of
+  clean-latent energy;
 - learned-filter absolute cosine with zero-padded Haar below `0.9999`; and
 - at least 5% held-out reduction in normalized L1 versus Haar, with an
   episode-paired 95% bootstrap lower bound above zero. Hoyer and energy-
@@ -125,8 +140,12 @@ rescaled or outcome-matched; exact projection/reconstruction is retained and
 basis-induced energy allocation is part of the hypothesis. Energy fractions,
 target RMS, correction RMS, and scale-normalized R2/cosine are all audited so
 an energy shift cannot masquerade as causal predictability. For numerical
-comparability, all ridge sufficient statistics
-use the same FP32 implementation. Each partition must reconstruct the future
+comparability, the lattice construction, coefficient objective, decomposition,
+projection, sufficient statistics, ridge prediction, Euler integration,
+leakage audit, target differences, and metrics execute in explicit
+autocast-disabled FP32 islands (lattice angles and admissibility optimization
+may remain FP64). Model/VAE/Wan encode and decode retain their pinned bf16
+execution. Each partition must reconstruct the future
 residual, be pairwise orthogonal, leave history exactly zero, and carry between
 2% and 96% of residual energy per grouped band. Every spatial operation is
 view-isolated.
@@ -141,8 +160,13 @@ The immutable 512-row ABC training manifest is partitioned as follows:
 | clean basis prefit and residual-head fit | 128--383 | ordinary RGB/action arrays only |
 | clean transform receipt | 384--415 | basis audit only; no outcome selection |
 | prior-inspected exploratory development | 416--479 | sole reported outcomes |
-| fresh reserve | 480--510 | never opened |
+| prior-consumed, barred frontier rows | 480--510 | never opened by this run |
 | historical constructor probe | 511 | never opened |
+
+Some machine-readable receipts retain the legacy field
+`fresh_reserve_480_510_opened=false` for compatibility. In this qualification
+it means only that rows 480--510 were not opened by this run; it does not claim
+those rows remain globally fresh.
 
 Future-validity substitution is disabled. The V-JEPA target array and teacher
 features are prohibited. Parent manifests, cache identities, resolved config,
