@@ -33,18 +33,15 @@ Protected test data are unsupported by every command.
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import math
 import os
 import platform
 import re
-import struct
 import subprocess
 import sys
 import time
-import zipfile
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -91,9 +88,7 @@ from tools.physics_flow_cache_runtime import (  # noqa: E402
 )
 
 
-SCHEMA_VERSION = 3
-STATE_ACCESS_SCHEMA_VERSION = 1
-STATE_ACCESS_SCHEMA = "raw-physics-flow-selected-npy-bytes-v1"
+SCHEMA_VERSION = 2
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 TRAIN_COUNT = 512
@@ -337,7 +332,7 @@ print(json.dumps({
 }, sort_keys=True))
 """
 
-CACHE_SCHEMA = "raw-physics-flow-cache-v3"
+CACHE_SCHEMA = "raw-physics-flow-cache-v2"
 CACHE_REGISTRATION_KIND = "raw_physics_flow_cache_registration"
 CACHE_METADATA_KIND = "raw_physics_flow_cache_metadata"
 CACHE_AUDIT_KIND = "raw_physics_flow_cache_audit"
@@ -954,861 +949,22 @@ def enforce_current_cache_renderer_runtime(
     return observed
 
 
-STATE_ARCHIVE_MEMBERS = (
-    "joint_states.npy",
-    "joint_actions.npy",
-    "gripper_states.npy",
-    "gripper_actions.npy",
-    "frame_ts.npy",
-    "instruction.npy",
-)
-STATE_ARRAY_WIDTHS = {
-    "joint_states.npy": 12,
-    "joint_actions.npy": 12,
-    "gripper_states.npy": 2,
-    "gripper_actions.npy": 2,
-}
-_ZIP_LOCAL_HEADER = struct.Struct("<4s5H3L2H")
-_ZIP_EOCD = struct.Struct("<4s4H2LH")
-_ZIP64_LOCAL_EXTRA = struct.Struct("<HHQQ")
+def noncontent_file_stat(path: Path) -> dict[str, Any]:
+    """Record file identity metadata without reading any content bytes."""
 
-
-@dataclass(frozen=True)
-class _StoredZipMember:
-    name: str
-    local_header_offset: int
-    payload_offset: int
-    payload_bytes: int
-    crc32: int
-
-
-class _AuditedArchiveFile:
-    """Seekable archive reader that records every physical read range.
-
-    The observer receives offsets and byte counts only; no content is copied
-    into the receipt.  ZIP directory/local-header reads are recorded
-    separately from NPY header and selected array-data reads so the caller can
-    prove that no unselected array-data range was physically read.
-    """
-
-    def __init__(self, path: Path, observer: Any | None = None) -> None:
-        self.name = str(path)
-        self._file = path.open("rb")
-        self._observer = observer
-        self._label = "unclassified"
-        self.records: list[dict[str, Any]] = []
-
-    def set_label(self, label: str) -> str:
-        previous = self._label
-        self._label = label
-        return previous
-
-    def read(self, size: int = -1) -> bytes:
-        start = self._file.tell()
-        value = self._file.read(size)
-        self._record_read(start=start, requested=size, value=value, api="read")
-        return value
-
-    def pread(self, size: int, offset: int) -> bytes:
-        value = os.pread(self._file.fileno(), size, offset)
-        self._record_read(start=offset, requested=size, value=value, api="pread")
-        return value
-
-    def _record_read(
-        self,
-        *,
-        start: int,
-        requested: int,
-        value: bytes,
-        api: str,
-    ) -> None:
-        record = {
-            "label": self._label,
-            "api": api,
-            "archive_byte_start": start,
-            "archive_byte_stop": start + len(value),
-            "requested_bytes": requested,
-            "returned_bytes": len(value),
-        }
-        self.records.append(record)
-        if self._observer is not None:
-            self._observer(dict(record))
-
-    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
-        return self._file.seek(offset, whence)
-
-    def tell(self) -> int:
-        return self._file.tell()
-
-    def seekable(self) -> bool:
-        return True
-
-    def readable(self) -> bool:
-        return True
-
-    def close(self) -> None:
-        self._file.close()
-
-    def __enter__(self) -> "_AuditedArchiveFile":
-        return self
-
-    def __exit__(self, *_: Any) -> None:
-        self.close()
-
-
-def _read_exact_at(
-    archive: _AuditedArchiveFile,
-    *,
-    offset: int,
-    size: int,
-    label: str,
-) -> bytes:
-    if offset < 0 or size < 0:
-        raise PhysicsFlowStage1Error("negative archive read range")
-    previous = archive.set_label(label)
-    try:
-        value = archive.pread(size, offset)
-    finally:
-        archive.set_label(previous)
-    if len(value) != size:
-        raise PhysicsFlowStage1Error(
-            f"premature archive read: label={label} offset={offset} "
-            f"expected={size} observed={len(value)}"
-        )
-    return value
-
-
-def _parse_zip64_local_sizes(extra: bytes, name: str) -> tuple[int, int]:
-    if len(extra) != _ZIP64_LOCAL_EXTRA.size:
-        raise PhysicsFlowStage1Error(
-            f"{name} has noncanonical ZIP64 local extra length"
-        )
-    field_id, field_bytes, payload_bytes, compressed_bytes = (
-        _ZIP64_LOCAL_EXTRA.unpack(extra)
-    )
-    if field_id != 1 or field_bytes != 16:
-        raise PhysicsFlowStage1Error(
-            f"{name} has noncanonical ZIP64 local extra"
-        )
-    return int(payload_bytes), int(compressed_bytes)
-
-
-def _scan_stored_npz_layout(
-    archive: _AuditedArchiveFile,
-    *,
-    archive_bytes: int,
-) -> tuple[dict[str, _StoredZipMember], int, int]:
-    """Validate the exact six-member NumPy ZIP layout without opening payloads.
-
-    Strict physical isolation is possible only for ``ZIP_STORED`` members,
-    whose NPY data can be addressed directly.  DEFLATE can consume compressed
-    bytes that encode values beyond a requested uncompressed boundary, so it
-    is rejected before any member payload byte is read.
-    """
-
-    layouts: dict[str, _StoredZipMember] = {}
-    offset = 0
-    for expected_name in STATE_ARCHIVE_MEMBERS:
-        fixed = _read_exact_at(
-            archive,
-            offset=offset,
-            size=_ZIP_LOCAL_HEADER.size,
-            label="zip_local_header",
-        )
-        (
-            signature,
-            extract_version,
-            flags,
-            compression,
-            _modified_time,
-            _modified_date,
-            local_crc32,
-            compressed_32,
-            payload_32,
-            name_bytes,
-            extra_bytes,
-        ) = _ZIP_LOCAL_HEADER.unpack(fixed)
-        if signature != b"PK\x03\x04":
-            raise PhysicsFlowStage1Error(
-                f"states archive member order/count differs at {expected_name}"
-            )
-        variable = _read_exact_at(
-            archive,
-            offset=offset + _ZIP_LOCAL_HEADER.size,
-            size=name_bytes + extra_bytes,
-            label="zip_local_header",
-        )
-        encoded_name = variable[:name_bytes]
-        extra = variable[name_bytes:]
-        try:
-            observed_name = encoded_name.decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise PhysicsFlowStage1Error(
-                "states archive member name is not canonical ASCII"
-            ) from exc
-        if observed_name != expected_name:
-            raise PhysicsFlowStage1Error(
-                f"states archive member order/name differs: "
-                f"expected={expected_name} observed={observed_name}"
-            )
-        if flags != 0:
-            raise PhysicsFlowStage1Error(
-                f"{expected_name} has unsupported ZIP flags: {flags}"
-            )
-        if compression != zipfile.ZIP_STORED:
-            raise PhysicsFlowStage1Error(
-                f"{expected_name} is compressed; strict selected-byte access "
-                "requires ZIP_STORED or a separately extracted observed-only sidecar"
-            )
-        uses_zip64 = (
-            compressed_32 == 0xFFFFFFFF or payload_32 == 0xFFFFFFFF
-        )
-        if uses_zip64:
-            if (
-                compressed_32 != 0xFFFFFFFF
-                or payload_32 != 0xFFFFFFFF
-                or extract_version != 45
-            ):
-                raise PhysicsFlowStage1Error(
-                    f"{expected_name} has partial/noncanonical ZIP64 sizes"
-                )
-            payload_bytes, compressed_bytes = _parse_zip64_local_sizes(
-                extra, expected_name
-            )
-        else:
-            if extra or extract_version not in (10, 20):
-                raise PhysicsFlowStage1Error(
-                    f"{expected_name} has unsupported local ZIP metadata"
-                )
-            payload_bytes = int(payload_32)
-            compressed_bytes = int(compressed_32)
-        if payload_bytes <= 0 or compressed_bytes != payload_bytes:
-            raise PhysicsFlowStage1Error(
-                f"{expected_name} is not an addressable stored member"
-            )
-        payload_offset = offset + _ZIP_LOCAL_HEADER.size + len(variable)
-        payload_stop = payload_offset + payload_bytes
-        if payload_stop > archive_bytes:
-            raise PhysicsFlowStage1Error(
-                f"{expected_name} payload ends beyond the archive"
-            )
-        layouts[expected_name] = _StoredZipMember(
-            name=expected_name,
-            local_header_offset=offset,
-            payload_offset=payload_offset,
-            payload_bytes=payload_bytes,
-            crc32=int(local_crc32),
-        )
-        # Seeking over a ZIP_STORED member does not read or materialize it.
-        offset = payload_stop
-
-    if archive_bytes < _ZIP_EOCD.size:
-        raise PhysicsFlowStage1Error("states archive is truncated")
-    eocd_offset = archive_bytes - _ZIP_EOCD.size
-    eocd = _read_exact_at(
-        archive,
-        offset=eocd_offset,
-        size=_ZIP_EOCD.size,
-        label="zip_directory_metadata",
-    )
-    (
-        signature,
-        disk_number,
-        directory_disk,
-        entries_on_disk,
-        entries_total,
-        directory_bytes,
-        directory_offset,
-        comment_bytes,
-    ) = _ZIP_EOCD.unpack(eocd)
-    if (
-        signature != b"PK\x05\x06"
-        or disk_number != 0
-        or directory_disk != 0
-        or entries_on_disk != len(STATE_ARCHIVE_MEMBERS)
-        or entries_total != len(STATE_ARCHIVE_MEMBERS)
-        or comment_bytes != 0
-        or directory_offset != offset
-        or directory_offset + directory_bytes != eocd_offset
-    ):
-        raise PhysicsFlowStage1Error(
-            "states archive central directory/count/trailing bytes differ"
-        )
-
-    previous = archive.set_label("zip_directory_metadata")
-    try:
-        with zipfile.ZipFile(archive, mode="r") as container:
-            infos = container.infolist()
-            if container.comment != b"" or container.start_dir != directory_offset:
-                raise PhysicsFlowStage1Error(
-                    "states archive directory placement/comment differs"
-                )
-            if tuple(info.filename for info in infos) != STATE_ARCHIVE_MEMBERS:
-                raise PhysicsFlowStage1Error(
-                    "states archive central member order/names differ"
-                )
-            for info, expected_name in zip(infos, STATE_ARCHIVE_MEMBERS):
-                layout = layouts[expected_name]
-                if (
-                    info.is_dir()
-                    or info.flag_bits != 0
-                    or info.compress_type != zipfile.ZIP_STORED
-                    or info.header_offset != layout.local_header_offset
-                    or info.file_size != layout.payload_bytes
-                    or info.compress_size != layout.payload_bytes
-                    or info.CRC != layout.crc32
-                ):
-                    raise PhysicsFlowStage1Error(
-                        f"{expected_name} central/local ZIP metadata differs"
-                    )
-    except (OSError, zipfile.BadZipFile, NotImplementedError) as exc:
-        raise PhysicsFlowStage1Error("states archive ZIP directory is invalid") from exc
-    finally:
-        archive.set_label(previous)
-    return layouts, int(directory_offset), int(directory_bytes)
-
-
-def _parse_float32_c_npy_header(
-    archive: _AuditedArchiveFile,
-    member: _StoredZipMember,
-    *,
-    expected_width: int,
-) -> dict[str, Any]:
-    prefix = _read_exact_at(
-        archive,
-        offset=member.payload_offset,
-        size=8,
-        label="npy_header",
-    )
-    if prefix[:6] != b"\x93NUMPY":
-        raise PhysicsFlowStage1Error(f"{member.name} lacks an NPY magic header")
-    version = (prefix[6], prefix[7])
-    if version == (1, 0):
-        length_size = 2
-        length_struct = struct.Struct("<H")
-    elif version == (2, 0):
-        length_size = 4
-        length_struct = struct.Struct("<I")
-    else:
-        raise PhysicsFlowStage1Error(
-            f"{member.name} has unsupported NPY version {version}"
-        )
-    encoded_length = _read_exact_at(
-        archive,
-        offset=member.payload_offset + len(prefix),
-        size=length_size,
-        label="npy_header",
-    )
-    header_bytes = int(length_struct.unpack(encoded_length)[0])
-    if header_bytes <= 0 or header_bytes > 64 * 1024:
-        raise PhysicsFlowStage1Error(f"{member.name} NPY header length is invalid")
-    header = _read_exact_at(
-        archive,
-        offset=member.payload_offset + len(prefix) + length_size,
-        size=header_bytes,
-        label="npy_header",
-    )
-    if not header.endswith(b"\n"):
-        raise PhysicsFlowStage1Error(f"{member.name} NPY header is unterminated")
-    try:
-        parsed = ast.literal_eval(header.decode("latin1").strip())
-    except (SyntaxError, ValueError, UnicodeError) as exc:
-        raise PhysicsFlowStage1Error(
-            f"{member.name} NPY header cannot be parsed"
-        ) from exc
-    if not isinstance(parsed, dict) or set(parsed) != {
-        "descr",
-        "fortran_order",
-        "shape",
-    }:
-        raise PhysicsFlowStage1Error(
-            f"{member.name} NPY header keys differ"
-        )
-    shape = parsed["shape"]
-    if (
-        parsed["descr"] != "<f4"
-        or parsed["fortran_order"] is not False
-        or not isinstance(shape, tuple)
-        or len(shape) != 2
-        or not all(isinstance(value, int) and value > 0 for value in shape)
-        or shape[1] != expected_width
-    ):
-        raise PhysicsFlowStage1Error(
-            f"{member.name} dtype/shape/C-order contract differs"
-        )
-    data_offset = member.payload_offset + 8 + length_size + header_bytes
-    if (data_offset - member.payload_offset) % 64 != 0:
-        raise PhysicsFlowStage1Error(
-            f"{member.name} NPY header alignment differs"
-        )
-    data_bytes = int(shape[0]) * int(shape[1]) * 4
-    if data_offset + data_bytes != member.payload_offset + member.payload_bytes:
-        raise PhysicsFlowStage1Error(
-            f"{member.name} has trailing or truncated NPY array bytes"
-        )
+    path = path.expanduser()
+    if not path.is_absolute() or not path.is_file() or path.is_symlink():
+        raise PhysicsFlowStage1Error(f"regular absolute file required: {path}")
+    path = path.resolve(strict=True)
+    stat = path.stat()
     return {
-        "archive_member": member.name,
-        "dtype": "<f4",
-        "shape": [int(shape[0]), int(shape[1])],
-        "fortran_order": False,
-        "npy_version": [int(version[0]), int(version[1])],
-        "npy_header_archive_byte_start": member.payload_offset,
-        "npy_header_archive_byte_stop": data_offset,
-        "array_data_archive_byte_start": data_offset,
-        "array_data_archive_byte_stop": data_offset + data_bytes,
+        "path": str(path),
+        "bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+        "content_bytes_read_for_provenance": False,
     }
-
-
-def _range_is_contained(
-    start: int,
-    stop: int,
-    allowed: Sequence[tuple[int, int]],
-) -> bool:
-    return any(start >= left and stop <= right for left, right in allowed)
-
-
-def _validate_selected_array_reads(
-    *,
-    records: Sequence[Mapping[str, Any]],
-    layouts: Mapping[str, _StoredZipMember],
-    npy_headers: Mapping[str, Mapping[str, Any]],
-    selected_ranges: Mapping[str, tuple[int, int]],
-) -> None:
-    """Fail if any physical read intersects unselected NPY array data."""
-
-    for record in records:
-        read_start = int(record["archive_byte_start"])
-        read_stop = int(record["archive_byte_stop"])
-        if read_stop <= read_start:
-            continue
-        for name, member in layouts.items():
-            if name in npy_headers:
-                data_start = int(
-                    npy_headers[name]["array_data_archive_byte_start"]
-                )
-                data_stop = int(npy_headers[name]["array_data_archive_byte_stop"])
-            else:
-                # No NPY header or payload byte from unused members is permitted.
-                data_start = member.payload_offset
-                data_stop = member.payload_offset + member.payload_bytes
-            overlap_start = max(read_start, data_start)
-            overlap_stop = min(read_stop, data_stop)
-            if overlap_stop <= overlap_start:
-                continue
-            allowed = (
-                [selected_ranges[name]] if name in selected_ranges else []
-            )
-            if not _range_is_contained(overlap_start, overlap_stop, allowed):
-                raise PhysicsFlowStage1Error(
-                    f"unselected array-data bytes were read from {name}: "
-                    f"[{overlap_start},{overlap_stop})"
-                )
-
-
-def _read_selected_state_action_bytes(
-    state_path: Path,
-    *,
-    frame4: int,
-    action_start: int,
-    action_stop: int,
-    read_observer: Any | None = None,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """Direct-read one observed state row and one registered action slice.
-
-    No ``np.load``/``ZipExtFile`` API is used.  Those APIs may materialize a
-    complete member or internally read ahead.  Instead, the function validates
-    an uncompressed NumPy ZIP layout, parses bounded NPY headers, and reads the
-    exact row-major byte ranges by archive offset.  Compressed archives fail
-    before any member payload read.
-    """
-
-    state_path = state_path.expanduser()
-    if (
-        not state_path.is_absolute()
-        or not state_path.is_file()
-        or state_path.is_symlink()
-    ):
-        raise PhysicsFlowStage1Error(
-            f"regular absolute states archive required: {state_path}"
-        )
-    state_path = state_path.resolve(strict=True)
-    archive_bytes = state_path.stat().st_size
-    if frame4 < 0 or action_start < 0 or action_stop <= action_start:
-        raise PhysicsFlowStage1Error("selected state/action indexes are invalid")
-
-    with _AuditedArchiveFile(state_path, read_observer) as archive:
-        layouts, directory_offset, directory_bytes = _scan_stored_npz_layout(
-            archive, archive_bytes=archive_bytes
-        )
-        npy_headers = {
-            name: _parse_float32_c_npy_header(
-                archive,
-                layouts[name],
-                expected_width=STATE_ARRAY_WIDTHS[name],
-            )
-            for name in STATE_ARRAY_WIDTHS
-        }
-        frame_counts = {
-            int(header["shape"][0]) for header in npy_headers.values()
-        }
-        if len(frame_counts) != 1:
-            raise PhysicsFlowStage1Error(
-                "state/action NPY arrays have different frame counts"
-            )
-        frame_count = next(iter(frame_counts))
-        if frame4 >= frame_count or action_stop > frame_count:
-            raise PhysicsFlowStage1Error(
-                "selected state/action range exceeds the registered archive"
-            )
-
-        selections = {
-            "joint_states.npy": (frame4, frame4 + 1),
-            "gripper_states.npy": (frame4, frame4 + 1),
-            "joint_actions.npy": (action_start, action_stop),
-            "gripper_actions.npy": (action_start, action_stop),
-        }
-        selected_ranges: dict[str, tuple[int, int]] = {}
-        selected_bytes: dict[str, bytes] = {}
-        for name in (
-            "joint_states.npy",
-            "gripper_states.npy",
-            "joint_actions.npy",
-            "gripper_actions.npy",
-        ):
-            row_start, row_stop = selections[name]
-            width = STATE_ARRAY_WIDTHS[name]
-            data_start = int(
-                npy_headers[name]["array_data_archive_byte_start"]
-            )
-            byte_start = data_start + row_start * width * 4
-            byte_stop = data_start + row_stop * width * 4
-            selected_ranges[name] = (byte_start, byte_stop)
-            selected_bytes[name] = _read_exact_at(
-                archive,
-                offset=byte_start,
-                size=byte_stop - byte_start,
-                label=f"selected_array_data:{name}",
-            )
-
-        _validate_selected_array_reads(
-            records=archive.records,
-            layouts=layouts,
-            npy_headers=npy_headers,
-            selected_ranges=selected_ranges,
-        )
-        read_records = tuple(dict(record) for record in archive.records)
-
-    selected_arrays = {
-        name: np.frombuffer(value, dtype=np.dtype("<f4")).copy().reshape(
-            selections[name][1] - selections[name][0],
-            STATE_ARRAY_WIDTHS[name],
-        )
-        for name, value in selected_bytes.items()
-    }
-    q4 = np.concatenate(
-        (
-            selected_arrays["joint_states.npy"][0],
-            selected_arrays["gripper_states.npy"][0],
-        )
-    )
-    raw_action = np.concatenate(
-        (
-            selected_arrays["joint_actions.npy"],
-            selected_arrays["gripper_actions.npy"],
-        ),
-        axis=1,
-    )
-
-    member_receipts = {}
-    for name, header in npy_headers.items():
-        row_start, row_stop = selections[name]
-        byte_start, byte_stop = selected_ranges[name]
-        member_receipts[name[:-4]] = {
-            **dict(header),
-            "compression": "ZIP_STORED",
-            "selected_row_start_inclusive": row_start,
-            "selected_row_stop_exclusive": row_stop,
-            "selected_data_archive_byte_start": byte_start,
-            "selected_data_archive_byte_stop": byte_stop,
-            "selected_data_bytes": byte_stop - byte_start,
-            "selected_data_sha256": hashlib.sha256(
-                selected_bytes[name]
-            ).hexdigest(),
-        }
-    selected_data_bytes = sum(len(value) for value in selected_bytes.values())
-    npy_header_bytes = sum(
-        int(record["returned_bytes"])
-        for record in read_records
-        if record["label"] == "npy_header"
-    )
-    zip_metadata_bytes = sum(
-        int(record["returned_bytes"])
-        for record in read_records
-        if record["label"] in {"zip_local_header", "zip_directory_metadata"}
-    )
-    access_plan = {
-        name: {
-            "selected_row_start_inclusive": selections[f"{name}.npy"][0],
-            "selected_row_stop_exclusive": selections[f"{name}.npy"][1],
-            "selected_data_archive_byte_start": selected_ranges[f"{name}.npy"][0],
-            "selected_data_archive_byte_stop": selected_ranges[f"{name}.npy"][1],
-        }
-        for name in ("joint_states", "gripper_states", "joint_actions", "gripper_actions")
-    }
-    receipt = {
-        "state_access_schema_version": STATE_ACCESS_SCHEMA_VERSION,
-        "state_access_schema": STATE_ACCESS_SCHEMA,
-        "path": str(state_path),
-        "bytes": archive_bytes,
-        "archive_format": "NPZ",
-        "archive_member_order": list(STATE_ARCHIVE_MEMBERS),
-        "required_member_compression": "ZIP_STORED",
-        "compressed_members_supported": False,
-        "compressed_member_payload_bytes_read": 0,
-        "members": member_receipts,
-        "access_plan": access_plan,
-        "access_plan_identity_sha256": hashlib.sha256(
-            canonical_json(access_plan)
-        ).hexdigest(),
-        "zip_directory_archive_byte_start": directory_offset,
-        "zip_directory_bytes": directory_bytes,
-        "selected_array_data_pread_ledger": [
-            {
-                "member": name[:-4],
-                "api": "os.pread",
-                "archive_byte_start": selected_ranges[name][0],
-                "archive_byte_stop": selected_ranges[name][1],
-                "requested_bytes": len(selected_bytes[name]),
-                "returned_bytes": len(selected_bytes[name]),
-                "sha256": hashlib.sha256(selected_bytes[name]).hexdigest(),
-            }
-            for name in (
-                "joint_states.npy",
-                "gripper_states.npy",
-                "joint_actions.npy",
-                "gripper_actions.npy",
-            )
-        ],
-        "array_byte_access_audit": {
-            "read_call_count": len(read_records),
-            "userspace_archive_bytes_returned_across_calls": sum(
-                int(record["returned_bytes"]) for record in read_records
-            ),
-            "zip_structure_metadata_bytes_returned": zip_metadata_bytes,
-            "npy_header_bytes_returned": npy_header_bytes,
-            "selected_array_data_bytes_returned": selected_data_bytes,
-            "future_measured_state_array_data_bytes_returned": 0,
-            "unregistered_action_array_data_bytes_returned": 0,
-            "unused_member_payload_bytes_returned": 0,
-            "all_array_data_reads_within_selected_ranges": True,
-        },
-        "whole_archive_content_digest_computed": False,
-        "whole_member_crc_content_validated": False,
-        "local_central_crc_metadata_agree": True,
-        "zip_crc_value_returned_in_receipt": False,
-        "mtime_or_inode_in_selected_value_receipt": False,
-        "only_arrays_indexed": {
-            "joint_states": {"indexes": [frame4]},
-            "gripper_states": {"indexes": [frame4]},
-            "joint_actions": {
-                "slice_start_inclusive": action_start,
-                "slice_stop_exclusive": action_stop,
-            },
-            "gripper_actions": {
-                "slice_start_inclusive": action_start,
-                "slice_stop_exclusive": action_stop,
-            },
-        },
-        "future_measured_state_values_indexed": False,
-        "future_measured_state_opened": False,
-    }
-    return q4, raw_action, receipt
-
-
-def _preflight_state_archive_access(
-    state_path: Path,
-    *,
-    frame4: int,
-    action_start: int,
-    action_stop: int,
-) -> dict[str, Any]:
-    """Validate one archive and plan exact reads without reading array data."""
-
-    state_path = state_path.expanduser()
-    if (
-        not state_path.is_absolute()
-        or not state_path.is_file()
-        or state_path.is_symlink()
-    ):
-        raise PhysicsFlowStage1Error(
-            f"regular absolute states archive required: {state_path}"
-        )
-    state_path = state_path.resolve(strict=True)
-    archive_bytes = state_path.stat().st_size
-    if frame4 < 0 or action_start < 0 or action_stop <= action_start:
-        raise PhysicsFlowStage1Error("selected state/action indexes are invalid")
-    with _AuditedArchiveFile(state_path) as archive:
-        layouts, directory_offset, directory_bytes = _scan_stored_npz_layout(
-            archive, archive_bytes=archive_bytes
-        )
-        npy_headers = {
-            name: _parse_float32_c_npy_header(
-                archive,
-                layouts[name],
-                expected_width=STATE_ARRAY_WIDTHS[name],
-            )
-            for name in STATE_ARRAY_WIDTHS
-        }
-        frame_counts = {
-            int(header["shape"][0]) for header in npy_headers.values()
-        }
-        if len(frame_counts) != 1:
-            raise PhysicsFlowStage1Error(
-                "state/action NPY arrays have different frame counts"
-            )
-        frame_count = next(iter(frame_counts))
-        if frame4 >= frame_count or action_stop > frame_count:
-            raise PhysicsFlowStage1Error(
-                "selected state/action range exceeds the registered archive"
-            )
-        # No array-data range is allowed during preflight.
-        _validate_selected_array_reads(
-            records=archive.records,
-            layouts=layouts,
-            npy_headers=npy_headers,
-            selected_ranges={},
-        )
-        records = tuple(dict(record) for record in archive.records)
-
-    planned_rows = {
-        "joint_states.npy": (frame4, frame4 + 1),
-        "gripper_states.npy": (frame4, frame4 + 1),
-        "joint_actions.npy": (action_start, action_stop),
-        "gripper_actions.npy": (action_start, action_stop),
-    }
-    planned_ranges = {}
-    for name, (row_start, row_stop) in planned_rows.items():
-        width = STATE_ARRAY_WIDTHS[name]
-        data_start = int(npy_headers[name]["array_data_archive_byte_start"])
-        byte_start = data_start + row_start * width * 4
-        byte_stop = data_start + row_stop * width * 4
-        planned_ranges[name[:-4]] = {
-            "row_start_inclusive": row_start,
-            "row_stop_exclusive": row_stop,
-            "archive_byte_start": byte_start,
-            "archive_byte_stop": byte_stop,
-            "bytes": byte_stop - byte_start,
-            "api": "os.pread",
-        }
-    payload = {
-        "state_access_schema_version": STATE_ACCESS_SCHEMA_VERSION,
-        "state_access_schema": STATE_ACCESS_SCHEMA,
-        "kind": "raw_physics_flow_state_access_preflight_row",
-        "path": str(state_path),
-        "bytes": archive_bytes,
-        "archive_member_order": list(STATE_ARCHIVE_MEMBERS),
-        "required_member_compression": "ZIP_STORED",
-        "compressed_members_supported": False,
-        "members": {
-            name[:-4]: {
-                "dtype": header["dtype"],
-                "shape": header["shape"],
-                "fortran_order": header["fortran_order"],
-                "npy_version": header["npy_version"],
-                "npy_header_archive_byte_start": header[
-                    "npy_header_archive_byte_start"
-                ],
-                "npy_header_archive_byte_stop": header[
-                    "npy_header_archive_byte_stop"
-                ],
-                "array_data_archive_byte_start": header[
-                    "array_data_archive_byte_start"
-                ],
-                "array_data_archive_byte_stop": header[
-                    "array_data_archive_byte_stop"
-                ],
-            }
-            for name, header in npy_headers.items()
-        },
-        "planned_direct_reads": planned_ranges,
-        "planned_direct_reads_identity_sha256": hashlib.sha256(
-            canonical_json(planned_ranges)
-        ).hexdigest(),
-        "zip_directory_archive_byte_start": directory_offset,
-        "zip_directory_bytes": directory_bytes,
-        "preflight_access_audit": {
-            "read_call_count": len(records),
-            "userspace_archive_bytes_returned": sum(
-                int(record["returned_bytes"]) for record in records
-            ),
-            "array_data_bytes_returned": 0,
-            "future_measured_state_array_data_bytes_returned": 0,
-            "action_array_data_bytes_returned": 0,
-            "unused_member_payload_bytes_returned": 0,
-        },
-        "whole_archive_content_digest_computed": False,
-        "whole_member_crc_content_validated": False,
-        "local_central_crc_metadata_agree": True,
-        "zip_crc_value_returned_in_receipt": False,
-        "future_measured_state_opened": False,
-        "protected_test_accessed": False,
-    }
-    return identity_payload(payload)
-
-
-def _preflight_registered_state_access(
-    split: str,
-    descriptors: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    rows = []
-    for index, descriptor in enumerate(descriptors):
-        if descriptor.get("clip_index") != index:
-            raise PhysicsFlowStage1Error(
-                f"{split} state-access descriptor order differs"
-            )
-        frame4 = int(descriptor["frame_indices"][4])
-        action_start = int(descriptor["start"])
-        state_path = Path(str(descriptor["episode_dir"])) / "states.npz"
-        receipt = _preflight_state_archive_access(
-            state_path,
-            frame4=frame4,
-            action_start=action_start,
-            action_stop=action_start + SAMPLE_SIZE * CHUNK_SIZE,
-        )
-        rows.append(
-            identity_payload(
-                {
-                    "state_access_schema_version": STATE_ACCESS_SCHEMA_VERSION,
-                    "kind": "raw_physics_flow_registered_state_access_row",
-                    "split": split,
-                    "clip_index": index,
-                    "clip_id": descriptor["clip_id"],
-                    "preflight": receipt,
-                    "planned_selected_array_data_bytes": sum(
-                        int(value["bytes"])
-                        for value in receipt["planned_direct_reads"].values()
-                    ),
-                    "preflight_array_data_bytes_returned": 0,
-                    "future_measured_state_opened": False,
-                    "protected_test_accessed": False,
-                }
-            )
-        )
-    return identity_payload(
-        {
-            "state_access_schema_version": STATE_ACCESS_SCHEMA_VERSION,
-            "kind": "raw_physics_flow_registered_state_access_split",
-            "split": split,
-            "row_count": len(rows),
-            "rows": rows,
-            "all_members_zip_stored": True,
-            "all_local_central_metadata_agree": True,
-            "all_npy_arrays_float32_c_order": True,
-            "preflight_array_data_bytes_returned": 0,
-            "future_measured_state_opened": False,
-            "protected_test_accessed": False,
-        }
-    )
 
 
 def read_json(path: Path, label: str = "JSON") -> dict[str, Any]:
@@ -2272,17 +1428,6 @@ def command_register_cache(args: argparse.Namespace) -> int:
     val_episode = {row["episode_dir"] for row in val_rows}
     if train_episode & val_episode:
         raise PhysicsFlowStage1Error("train/validation episodes overlap")
-    # Validate every registered archive before creating any cache artifact.
-    # This reads ZIP/NPY structure only (zero array-data bytes) and freezes the
-    # exact os.pread ranges later permitted for observed state and actions.
-    state_access_preflight = {
-        "train": _preflight_registered_state_access(
-            "train", train["descriptors"]
-        ),
-        "val": _preflight_registered_state_access(
-            "val", validation["descriptors"]
-        ),
-    }
     calibration_probe = next(
         (
             descriptor
@@ -2335,7 +1480,6 @@ def command_register_cache(args: argparse.Namespace) -> int:
                 },
             },
             "train_validation_episode_overlap_count": 0,
-            "state_access_preflight": state_access_preflight,
             "splits": {"train": train, "val": validation},
             "frozen_representation": {
                 "native_render_shape": [OUTPUT_HEIGHT, OUTPUT_WIDTH],
@@ -2406,7 +1550,6 @@ def validate_cache_registration(path: Path) -> dict[str, Any]:
     registration = read_json(path, "cache registration")
     if (
         not identity_valid(registration)
-        or registration.get("schema_version") != SCHEMA_VERSION
         or registration.get("kind") != CACHE_REGISTRATION_KIND
         or registration.get("status")
         != "registered_before_flow_rendering_or_video_model_outcomes"
@@ -2450,29 +1593,6 @@ def validate_cache_registration(path: Path) -> dict[str, Any]:
         if isinstance(train_split, Mapping)
         else []
     )
-    val_split = splits.get("val") if isinstance(splits, Mapping) else None
-    val_descriptors = (
-        val_split.get("descriptors", [])
-        if isinstance(val_split, Mapping)
-        else []
-    )
-    if (
-        len(train_descriptors) != TRAIN_COUNT
-        or len(val_descriptors) != VAL_COUNT
-    ):
-        raise PhysicsFlowStage1Error("registered split descriptors differ")
-    expected_state_access_preflight = {
-        "train": _preflight_registered_state_access(
-            "train", train_descriptors
-        ),
-        "val": _preflight_registered_state_access("val", val_descriptors),
-    }
-    if registration.get("state_access_preflight") != (
-        expected_state_access_preflight
-    ):
-        raise PhysicsFlowStage1Error(
-            "registered train/validation state-access preflight differs"
-        )
     calibration_probe = next(
         (
             descriptor
@@ -2517,7 +1637,13 @@ def _state_and_actions_for_row(
     descriptor: Mapping[str, Any],
     cached_action: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """Read exact observed-state/action bytes without NPZ member read-ahead."""
+    """Read only observed frame-4 state and candidate action samples.
+
+    The function intentionally never indexes joint/gripper state at frames
+    five through twelve.  Raw action equality is checked over the complete
+    registered candidate span because those actions are sampler inputs, not
+    future observations.
+    """
 
     if tensor_sha256(np.asarray(cached_action)) != descriptor.get(
         "action_row_sha256"
@@ -2531,13 +1657,31 @@ def _state_and_actions_for_row(
     frame4 = int(row["frame_indices"][4])
     start = int(row["start"])
     stop = start + SAMPLE_SIZE * CHUNK_SIZE
-    q4, raw_action, state_access = _read_selected_state_action_bytes(
-        state_path,
-        frame4=frame4,
-        action_start=start,
-        action_stop=stop,
-    )
-    raw_action = raw_action.reshape(SAMPLE_SIZE, CHUNK_SIZE, ACTION_DIM)
+    with np.load(state_path, allow_pickle=False) as state:
+        required = {
+            "joint_states",
+            "gripper_states",
+            "joint_actions",
+            "gripper_actions",
+        }
+        if not required.issubset(state.files):
+            raise PhysicsFlowStage1Error(
+                f"states file lacks {sorted(required - set(state.files))}: {state_path}"
+            )
+        # Only this one observed state boundary is read.
+        q4 = np.concatenate(
+            (
+                np.asarray(state["joint_states"][frame4], dtype=np.float32),
+                np.asarray(state["gripper_states"][frame4], dtype=np.float32),
+            )
+        )
+        raw_action = np.concatenate(
+            (
+                np.asarray(state["joint_actions"][start:stop], dtype=np.float32),
+                np.asarray(state["gripper_actions"][start:stop], dtype=np.float32),
+            ),
+            axis=1,
+        ).reshape(SAMPLE_SIZE, CHUNK_SIZE, ACTION_DIM)
     cached = np.asarray(cached_action[..., :ACTION_DIM], dtype=np.float32)
     if not np.array_equal(raw_action, cached):
         raise PhysicsFlowStage1Error(
@@ -2549,7 +1693,23 @@ def _state_and_actions_for_row(
     if future_endpoints.shape != (FUTURE_TRANSITIONS, ACTION_DIM):
         raise PhysicsFlowStage1Error("future action endpoint geometry differs")
     provenance = {
-        "states_npz": state_access,
+        "states_npz": {
+            **noncontent_file_stat(state_path),
+            "only_arrays_indexed": {
+                "joint_states": {"indexes": [frame4]},
+                "gripper_states": {"indexes": [frame4]},
+                "joint_actions": {
+                    "slice_start_inclusive": start,
+                    "slice_stop_exclusive": stop,
+                },
+                "gripper_actions": {
+                    "slice_start_inclusive": start,
+                    "slice_stop_exclusive": stop,
+                },
+            },
+            "future_measured_state_values_indexed": False,
+            "future_measured_state_opened": False,
+        },
         "observed_frame4_state_sha256": tensor_sha256(q4),
         "candidate_action_span_sha256": tensor_sha256(cached),
         "candidate_action_endpoints_sha256": tensor_sha256(future_endpoints),
@@ -3267,13 +2427,26 @@ def audit_cache(metadata_path: Path, *, write: bool) -> dict[str, Any]:
         false_flags += require_false_flags(row, f"lineage[{index}]")
         state_access = row.get("input_provenance", {}).get("states_npz", {})
         state_path = Path(str(descriptor["episode_dir"])) / "states.npz"
-        _, _, expected_state_access = _read_selected_state_action_bytes(
-            state_path,
-            frame4=int(descriptor["frame_indices"][4]),
-            action_start=int(descriptor["start"]),
-            action_stop=int(descriptor["start"]) + SAMPLE_SIZE * CHUNK_SIZE,
-        )
-        if state_access != expected_state_access:
+        expected_state_access = {
+            **noncontent_file_stat(state_path),
+            "only_arrays_indexed": {
+                "joint_states": {"indexes": [int(descriptor["frame_indices"][4])]},
+                "gripper_states": {
+                    "indexes": [int(descriptor["frame_indices"][4])]
+                },
+                "joint_actions": {
+                    "slice_start_inclusive": int(descriptor["start"]),
+                    "slice_stop_exclusive": int(descriptor["start"]) + 65,
+                },
+                "gripper_actions": {
+                    "slice_start_inclusive": int(descriptor["start"]),
+                    "slice_stop_exclusive": int(descriptor["start"]) + 65,
+                },
+            },
+            "future_measured_state_values_indexed": False,
+            "future_measured_state_opened": False,
+        }
+        if state_access != expected_state_access or "sha256" in state_access:
             raise PhysicsFlowStage1Error(
                 f"lineage state-access boundary differs: row={index}"
             )
