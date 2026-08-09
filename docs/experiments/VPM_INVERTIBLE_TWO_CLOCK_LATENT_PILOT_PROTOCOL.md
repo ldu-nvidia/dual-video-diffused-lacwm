@@ -9,6 +9,11 @@ research execution. Registration and launch nevertheless remain contingent on
 the parent ILSF-2 frozen handoff rule saying to advance and an independent
 auditor acknowledging one exact clean implementation commit.
 
+Terminal handoff note, 2026-08-09: ILSF-2 concluded
+`NO_GO_GENERIC_EARLY_SUBSPACE` with audit status `PASS`. The required advance
+condition was therefore not met. IPQ-TC1 remains an additive, tested,
+unregistered and unlaunched contingency; no endpoint outcome was opened.
+
 Protocol source base: clean integration commit
 `ee4855b3314e0864dece9e832158928570dc93fc`.
 
@@ -303,10 +308,18 @@ interface.
 At inference the sampler accepts only observed RGB history, requested actions,
 morphology, IDs, and sample-keyed Gaussian noise. It cannot accept a full RGB
 clip, clean future latent, auxiliary target, target cache, V-JEPA/TF encoder,
-teacher output, oracle feature, or alternative decoder. Endpoint tensors and
-their hashes are closed before the evaluator may encode clean future RGB for
-scoring. Event sequence counters must prove every target construction happens
-after every autonomous endpoint in its batch.
+teacher output, oracle feature, or alternative decoder. Endpoint tensors,
+decoded predictions, and their hashes are closed before the evaluator may
+encode clean future RGB for scoring. The endpoint process must not instantiate
+the production ABC dataset (whose item constructor serves all 13 RGB frames),
+call a whole-array content hash, or expose a generic RGB-slice interface before
+this boundary. A typed memmap reader may serve only `RGB[row,0:5]` and planned
+`actions[row,0:13]`, recording every file, row, slice, and returned-tensor
+hash. All eight ranks must finish and hash every endpoint for all assigned
+clips, close their pre-barrier memmaps, and cross one global distributed
+barrier. Only then may a distinct scoring reader open full RGB or a process
+rehash the validation arrays. Event sequence counters and the access ledger
+must prove this ordering for every autonomous endpoint and row.
 
 The run fails closed unless:
 

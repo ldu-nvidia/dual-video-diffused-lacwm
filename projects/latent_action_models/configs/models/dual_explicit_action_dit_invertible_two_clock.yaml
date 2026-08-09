@@ -1,0 +1,40 @@
+defaults:
+  - dual_explicit_action_dit_vjepa
+  - _self_
+
+_target_: lam.invertible_two_clock_model.InvertibleTwoClockVPM
+
+# No target extractor exists. Q is the exact complement of spatial Haar-LL in
+# the native future VAE latent and is constructed inside the model.
+time_frequency_transform: null
+
+dual_diffusion:
+  enabled: true
+  auxiliary_history_mode: diffuse_all
+  tf_channels: 16
+  head_condition_on_tf_clock: true
+  condition_mode: matched
+  condition_on_tf: true
+  condition_on_tf_clock: true
+  schedule_mode: aligned
+  tf_lead_logit: 0.0
+  tf_loss_weight: 1.0
+  video_only_control: false
+  parameter_matched_control: false
+  state_gate_init: 0.02
+  state_gate_trainable: false
+  clock_gate_init: 0.02
+  clock_gate_trainable: false
+  preserve_zero_support: true
+  capture_latent_trajectories: false
+  artifact_batch_limit: null
+  evaluation_nfe_steps: [1, 2, 4]
+  evaluation_condition_sources: [autonomous]
+  clock_embedding_dim: 128
+
+invertible_two_clock:
+  arm_mode: synchronous
+  history_latent_frames: 2
+  num_views: 3
+  view_width: 40
+  loss_identity_tolerance: 2.0e-6
