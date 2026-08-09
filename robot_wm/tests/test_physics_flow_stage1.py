@@ -44,6 +44,9 @@ def test_endpoint_grid_is_equal_call_raw_only() -> None:
     source = (ROOT / "tools/physics_flow_stage1.py").read_text()
     assert "recurrent_delta" not in source
     assert "hybrid_anchor_raw_delta" not in source
+    assert "file_record(state_path)" not in source
+    assert '"only_arrays_indexed"' in source
+    assert '"content_bytes_read_for_provenance": False' in source
     assert stage.PARENT_SNAPSHOT_SHA256.startswith("de65e832")
     assert stage.PARENT_RUN_IDENTITY_SHA256.startswith("d79c3699")
     assert stage.PARENT_CANONICAL_MODEL_STATE_SHA256.startswith("d1231b8b")

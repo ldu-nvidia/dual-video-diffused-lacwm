@@ -327,6 +327,24 @@ def file_record(path: Path, *, digest: bool = True) -> dict[str, Any]:
     return result
 
 
+def noncontent_file_stat(path: Path) -> dict[str, Any]:
+    """Record file identity metadata without reading any content bytes."""
+
+    path = path.expanduser()
+    if not path.is_absolute() or not path.is_file() or path.is_symlink():
+        raise PhysicsFlowStage1Error(f"regular absolute file required: {path}")
+    path = path.resolve(strict=True)
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+        "content_bytes_read_for_provenance": False,
+    }
+
+
 def read_json(path: Path, label: str = "JSON") -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -974,8 +992,20 @@ def _state_and_actions_for_row(
         raise PhysicsFlowStage1Error("future action endpoint geometry differs")
     provenance = {
         "states_npz": {
-            **file_record(state_path),
-            "only_observed_state_index_read": frame4,
+            **noncontent_file_stat(state_path),
+            "only_arrays_indexed": {
+                "joint_states": {"indexes": [frame4]},
+                "gripper_states": {"indexes": [frame4]},
+                "joint_actions": {
+                    "slice_start_inclusive": start,
+                    "slice_stop_exclusive": stop,
+                },
+                "gripper_actions": {
+                    "slice_start_inclusive": start,
+                    "slice_stop_exclusive": stop,
+                },
+            },
+            "future_measured_state_values_indexed": False,
             "future_measured_state_opened": False,
         },
         "observed_frame4_state_sha256": tensor_sha256(q4),
@@ -1677,6 +1707,31 @@ def audit_cache(metadata_path: Path, *, write: bool) -> dict[str, Any]:
         ):
             raise PhysicsFlowStage1Error(f"lineage row {index} differs")
         false_flags += require_false_flags(row, f"lineage[{index}]")
+        state_access = row.get("input_provenance", {}).get("states_npz", {})
+        state_path = Path(str(descriptor["episode_dir"])) / "states.npz"
+        expected_state_access = {
+            **noncontent_file_stat(state_path),
+            "only_arrays_indexed": {
+                "joint_states": {"indexes": [int(descriptor["frame_indices"][4])]},
+                "gripper_states": {
+                    "indexes": [int(descriptor["frame_indices"][4])]
+                },
+                "joint_actions": {
+                    "slice_start_inclusive": int(descriptor["start"]),
+                    "slice_stop_exclusive": int(descriptor["start"]) + 65,
+                },
+                "gripper_actions": {
+                    "slice_start_inclusive": int(descriptor["start"]),
+                    "slice_stop_exclusive": int(descriptor["start"]) + 65,
+                },
+            },
+            "future_measured_state_values_indexed": False,
+            "future_measured_state_opened": False,
+        }
+        if state_access != expected_state_access or "sha256" in state_access:
+            raise PhysicsFlowStage1Error(
+                f"lineage state-access boundary differs: row={index}"
+            )
         for source in CACHE_SOURCES:
             if row.get("tensor_sha256", {}).get(source) != tensor_sha256(
                 arrays[source][index]
