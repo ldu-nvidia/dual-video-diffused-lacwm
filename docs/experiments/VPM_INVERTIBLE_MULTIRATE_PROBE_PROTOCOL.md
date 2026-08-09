@@ -31,6 +31,35 @@ fixed/learned wavelet probes predicted residual corrections. None split the
 native video latent into exact complementary states and put only one state at
 the clean clock between the two ordinary VPM calls.
 
+### Causality implementation amendment (frozen before any run)
+
+The ordinary `ABCVideoResidualAnchorDataset` is forbidden in this probe. Its
+constructor validates complete 13-frame rows, which would materialize future
+RGB before endpoint construction even if a later caller sliced the returned
+tensor. Instead, an experiment-local immutable memmap reader has two distinct,
+audited methods and records file, row, and exact temporal slice before and
+after every index operation:
+
+- serving may read RGB `[row,0:5,...]`, actions `[row,0:13,...]`, morphology,
+  and clip identity only;
+- the endpoint-facing `ServingBatch` type has `history_rgb` but no `rgb` field,
+  and rejects any temporal length other than five;
+- scoring may read RGB `[row,0:13,...]` only after all six endpoint states have
+  been materialized and the event ledger closes the endpoint barrier;
+- clean target encoding occurs only after that scoring read. Every batch must
+  prove exact access counts and ordering. Any pre-barrier RGB stop index above
+  five is fatal.
+
+Before outcome evaluation, one target-blind pair (rows 416--417, seed
+`20261101`) must also prove that manual `VPM1` and `VPM2_ORDINARY` are bit-exact
+to `DualExplicitActionDiTModel.sample_future_deployable` under identical
+five-frame history, planned actions, morphology, sample IDs, noise seed, and
+`off` source. The check captures the public decoder input latent at native
+precision, its official latent artifact, decoded uint8 future, and Wan call
+counter. Both final latents and decoded uint8 tensors must be bit-exact. The
+three public Wan calls and four parity-only decoder calls are untimed preflight
+work and are explicitly excluded from endpoint call and latency accounting.
+
 ## Exact future-only, view-isolated transform
 
 The pinned VPM latent has shape `[B,16,4,24,120]`. The first two latent frames
