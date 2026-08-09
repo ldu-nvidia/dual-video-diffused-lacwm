@@ -5,8 +5,10 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=384G
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --partition=batch
+#SBATCH --account=coreai_chef_posttrain
+#SBATCH --qos=short
 #SBATCH --open-mode=append
 #SBATCH --no-requeue
 

@@ -43,6 +43,75 @@ def test_paraunitary_lattice_is_admissible_nonattenuating_and_reconstructs():
     assert abs(torch.dot(lowpass, wavelet.haar_lowpass()).item()) < 0.9999
 
 
+def test_lattice_preserves_fp32_gradient_inside_bf16_autocast():
+    angles = torch.tensor([0.2, -0.1, 0.3], requires_grad=True)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        lowpass = wavelet.lattice_lowpass(angles)
+        objective = lowpass.square().mul(torch.arange(1, 9)).sum()
+    objective.backward()
+    assert lowpass.dtype == torch.float32
+    assert angles.grad is not None
+    assert angles.grad.dtype == torch.float32
+    assert torch.isfinite(angles.grad).all()
+
+
+@pytest.mark.parametrize("basis", ("HAAR", "QMF"))
+def test_bf16_autocast_cannot_downcast_fp32_wavelet_contract(basis):
+    value = torch.randn(
+        (2, *wavelet.LATENT_SHAPE), generator=torch.Generator().manual_seed(81)
+    )
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        if basis == "HAAR":
+            bands = wavelet.haar_decompose(value, history_frames=2)
+        else:
+            bands = wavelet.qmf_decompose(
+                value, lowpass=_learned_filter(), history_frames=2
+            )
+        receipt = wavelet.partition_contract(value, bands, history_frames=2)
+    assert all(tensor.dtype == torch.float32 for tensor in bands.values())
+    assert receipt["max_abs_reconstruction_error"] <= wavelet.HAAR_MAX_ABS_TOLERANCE
+    assert receipt["relative_reconstruction_energy"] <= wavelet.HAAR_RELATIVE_ENERGY_TOLERANCE
+    assert max(receipt["normalized_pairwise_inner_products"].values()) <= wavelet.HAAR_ORTHOGONALITY_TOLERANCE
+
+
+def test_bf16_autocast_fp32_projection_and_sufficient_stats_match_off():
+    generator = torch.Generator().manual_seed(33)
+    features = torch.randn((12, 8), generator=generator)
+    projection = torch.linalg.qr(torch.randn((8, 4), generator=generator)).Q
+    targets = {"ARM": torch.randn((12, 5), generator=generator)}
+    old_arms = wavelet.ladder.ARMS
+    try:
+        wavelet.ladder.ARMS = ("ARM",)
+        reference = wavelet.ladder._new_sufficient_statistics(4, 5, torch.device("cpu"))
+        observed = wavelet.ladder._new_sufficient_statistics(4, 5, torch.device("cpu"))
+        reference_projection = features @ projection
+        wavelet.ladder.update_sufficient_statistics(reference, reference_projection, targets)
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            observed_projection = wavelet._project_hidden_fp32(features, projection)
+            wavelet._update_sufficient_statistics_fp32(observed, observed_projection, targets)
+    finally:
+        wavelet.ladder.ARMS = old_arms
+    assert observed_projection.dtype == torch.float32
+    assert torch.equal(observed_projection, reference_projection)
+    for name in ("sum_x", "sum_xx"):
+        assert observed[name].dtype == torch.float32
+        assert torch.equal(observed[name], reference[name])
+    for name in ("sum_y", "sum_xy", "sum_y2"):
+        assert torch.equal(observed[name]["ARM"], reference[name]["ARM"])
+
+
+def test_bf16_autocast_fp32_euler_matches_reference_bit_exactly():
+    generator = torch.Generator().manual_seed(92)
+    initial = torch.randn((2, *wavelet.LATENT_SHAPE), generator=generator)
+    velocity = torch.randn(initial.shape, generator=generator)
+    reference = torch.randn(initial.shape, generator=generator)
+    expected = wavelet.ladder._one_step_final(initial, velocity, reference, 2)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        observed = wavelet._one_step_final_fp32(initial, velocity, reference, 2)
+    assert observed.dtype == torch.float32
+    assert torch.equal(observed, expected)
+
+
 def test_zero_padded_haar_uses_same_phase_and_matches_block_projection():
     value = torch.randn((2, 3, 2, 24, 40), generator=torch.Generator().manual_seed(5))
     observed = wavelet._spatial_lowpass_view(value, wavelet.haar_lowpass())
@@ -132,7 +201,7 @@ def test_manifest_contract_bars_reserve_and_uses_disjoint_seeds():
     result = wavelet._validate_manifest(rows)
     assert result["ranges"]["nested_fit"] == [128, 384]
     assert result["ranges"]["prior_inspected_exploratory_development"] == [416, 480]
-    assert result["ranges"]["forbidden_fresh_reserve"] == [480, 511]
+    assert result["ranges"]["forbidden_prior_consumed_reserve"] == [480, 511]
     assert result["ranges"]["excluded_constructor_probe"] == [511, 512]
     assert result["basis_seed"] == 20261001
     assert min(result["development_noise_seeds"]) > 20260919
@@ -191,6 +260,106 @@ def _registered_samples():
         }
         for clip in range(*wavelet.DEV_RANGE)
     ]
+
+
+def _registered_calibration_samples():
+    return [
+        {
+            "clip_index": clip,
+            "clip_id": f"clip-{clip}",
+            "episode_dir": f"episode-{clip}",
+        }
+        for clip in range(*wavelet.CAL_RANGE)
+    ]
+
+
+def _basis_calibration_rows():
+    rows = []
+    for clip in range(*wavelet.CAL_RANGE):
+        metrics = {}
+        for basis in ("HAAR", "QMF"):
+            metrics[basis] = {
+                "normalized_l1": 0.90 if basis == "HAAR" else 0.80,
+                "hoyer_sparsity": 0.30 if basis == "HAAR" else 0.40,
+                "small_coefficient_fraction_at_0p1_rms": 0.20,
+                "top_10_percent_energy_fraction": 0.50,
+                "coefficient_input_energy_ratio": 1.0,
+                "terminal_LL_energy_fraction": 0.25,
+                "terminal_LH_energy_fraction": 0.25,
+                "terminal_HL_energy_fraction": 0.25,
+                "terminal_HH_energy_fraction": 0.25,
+            }
+        rows.append(
+            wavelet.ladder.identity_payload(
+                {
+                    "schema": wavelet.BASIS_CAL_ROW_SCHEMA,
+                    "clip_index": clip,
+                    "clip_id": f"clip-{clip}",
+                    "episode_dir": f"episode-{clip}",
+                    "basis_was_frozen": True,
+                    "history_frames_used": 0,
+                    "future_frames_used": 2,
+                    "vpm_forwards": 0,
+                    "residuals_hidden_states_or_outcomes_used": False,
+                    "actions_loaded_by_dataset": True,
+                    "actions_entered_basis_objective": False,
+                    "metrics": metrics,
+                    "tensor_sha256": {
+                        "clean_future_vae_latent": _digest(f"clean-{clip}")
+                    },
+                    "prior_dev_opened": False,
+                    "fresh_reserve_480_510_opened": False,
+                    "validation_opened": False,
+                    "protected_test_opened": False,
+                }
+            )
+        )
+    return rows
+
+
+def test_basis_qualification_replays_exact_calibration_rows(monkeypatch):
+    monkeypatch.setattr(wavelet, "BOOTSTRAP_REPLICATES", 100)
+    replay = wavelet.recompute_basis_qualification(
+        rows=_basis_calibration_rows(),
+        registered_samples=_registered_calibration_samples(),
+        learned_lowpass=_learned_filter(),
+    )
+    assert replay["calibration_rows_replayed"] is True
+    assert replay["qualification_gates"]["all_passed"] is True
+    assert (
+        replay["heldout_clean_receipt"]["normalized_l1_learned_vs_haar"]
+        ["relative_reduction_percent"]
+        > 5.0
+    )
+
+
+def test_basis_calibration_replay_rejects_identity_tamper():
+    rows = _basis_calibration_rows()
+    rows[0] = {**rows[0], "clip_id": "tampered"}
+    with pytest.raises(wavelet.WaveletError, match="identity/schema"):
+        wavelet.recompute_basis_qualification(
+            rows=rows,
+            registered_samples=_registered_calibration_samples(),
+            learned_lowpass=_learned_filter(),
+        )
+
+
+def test_basis_calibration_replay_rejects_physically_impossible_metric():
+    rows = _basis_calibration_rows()
+    payload = {
+        key: value for key, value in rows[0].items() if key != "identity_sha256"
+    }
+    payload["metrics"] = {
+        basis: dict(metrics) for basis, metrics in payload["metrics"].items()
+    }
+    payload["metrics"]["QMF"]["terminal_HH_energy_fraction"] = -0.1
+    rows[0] = wavelet.ladder.identity_payload(payload)
+    with pytest.raises(wavelet.WaveletError, match="physical metric"):
+        wavelet.recompute_basis_qualification(
+            rows=rows,
+            registered_samples=_registered_calibration_samples(),
+            learned_lowpass=_learned_filter(),
+        )
 
 
 def _row(endpoint: str, clip: int, seed: int, error: float):
@@ -298,6 +467,7 @@ def _partition_receipts():
 def _basis_qualification(passed=True):
     result = {
         "admissibility_reconstruction_energy_pass": passed,
+        "heldout_coefficient_energy_pass": passed,
         "nontrivial_filter_change_pass": passed,
         "heldout_normalized_l1_sparsity_pass": passed,
         "nontrivial_terminal_energy_pass": passed,
@@ -360,6 +530,9 @@ def test_protocol_freezes_primary_source_scope_and_claim_boundary():
         "100%",
         "416--479",
         "480--510",
+        "prior-consumed, barred",
+        "identity-bearing JSONL",
+        "autocast-disabled FP32 islands",
         "post-selection exploratory",
         "It is **not** a",
         "Frequency-Forcing reproduction.",

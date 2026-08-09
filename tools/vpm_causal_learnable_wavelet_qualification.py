@@ -34,6 +34,9 @@ ENDPOINT_SCHEMA = "vpm-causal-learnable-wavelet-endpoint-v1"
 ANALYSIS_SCHEMA = "vpm-causal-learnable-wavelet-analysis-v1"
 COMPLETE_SCHEMA = "vpm-causal-learnable-wavelet-complete-v1"
 AUDIT_SCHEMA = "vpm-causal-learnable-wavelet-audit-v1"
+BASIS_SCHEMA = "vpm-causal-learnable-wavelet-basis-v1"
+BASIS_WEIGHT_SCHEMA = "vpm-causal-learnable-wavelet-basis-weights-v1"
+BASIS_CAL_ROW_SCHEMA = "vpm-causal-learnable-wavelet-basis-calibration-row-v1"
 
 BASE_BANDS = ("ST_COARSE", "TEMPORAL_CHANGE", "SPATIOTEMPORAL_DETAIL")
 HAAR_BANDS = tuple(f"HAAR_{band}" for band in BASE_BANDS)
@@ -104,6 +107,17 @@ BAND_METRICS = (
     "preprojection_offband_relative_energy",
     "postprojection_offband_relative_energy",
 )
+SPARSITY_METRICS = (
+    "normalized_l1",
+    "hoyer_sparsity",
+    "small_coefficient_fraction_at_0p1_rms",
+    "top_10_percent_energy_fraction",
+    "coefficient_input_energy_ratio",
+    "terminal_LL_energy_fraction",
+    "terminal_LH_energy_fraction",
+    "terminal_HL_energy_fraction",
+    "terminal_HH_energy_fraction",
+)
 
 
 class WaveletError(ladder.LadderError):
@@ -154,24 +168,31 @@ def lattice_lowpass(free_angles: Any) -> Any:
 
     if free_angles.ndim != 1 or free_angles.numel() != BASIS_FREE_ANGLES:
         raise WaveletError("learned basis must contain exactly three free angles")
-    angles = torch.cat(
-        (
-            free_angles,
-            free_angles.new_tensor([-math.pi / 4.0]) - free_angles.sum().reshape(1),
-        )
-    )
-    polynomial = _rotation(angles[0]).unsqueeze(-1)
-    for theta in angles[1:]:
-        # Right multiplication by diag(1,z^-1) followed by a constant rotation.
-        delayed = torch.stack(
+    # The lattice is part of the numerical evidence contract. In particular,
+    # an enclosing model-level bf16 autocast region must not silently quantize
+    # the polynomial einsum. Preserve the caller's FP32/FP64 dtype and gradient.
+    with torch.autocast(device_type=free_angles.device.type, enabled=False):
+        angles = torch.cat(
             (
-                functional.pad(polynomial[:, 0, :], (0, 1)),
-                functional.pad(polynomial[:, 1, :], (1, 0)),
-            ),
-            dim=1,
+                free_angles,
+                free_angles.new_tensor([-math.pi / 4.0])
+                - free_angles.sum().reshape(1),
+            )
         )
-        polynomial = torch.einsum("ijl,jk->ikl", delayed, _rotation(theta))
-    lowpass = torch.stack((polynomial[0, 0], polynomial[0, 1]), dim=-1).reshape(-1)
+        polynomial = _rotation(angles[0]).unsqueeze(-1)
+        for theta in angles[1:]:
+            # Right multiplication by diag(1,z^-1) then a constant rotation.
+            delayed = torch.stack(
+                (
+                    functional.pad(polynomial[:, 0, :], (0, 1)),
+                    functional.pad(polynomial[:, 1, :], (1, 0)),
+                ),
+                dim=1,
+            )
+            polynomial = torch.einsum("ijl,jk->ikl", delayed, _rotation(theta))
+        lowpass = torch.stack(
+            (polynomial[0, 0], polynomial[0, 1]), dim=-1
+        ).reshape(-1)
     if lowpass.numel() != BASIS_FILTER_LENGTH:
         raise WaveletError("lattice produced the wrong filter support")
     return lowpass
@@ -218,16 +239,19 @@ def _spatial_lowpass_view(value: Any, lowpass: Any) -> Any:
 
     if value.ndim != 5 or value.shape[-2] % 2 or value.shape[-1] % 2:
         raise WaveletError("per-view wavelet tensor must be [B,C,T,even-H,even-W]")
-    lowpass = lowpass.to(device=value.device, dtype=torch.float32)
-    height_matrix = analysis_matrix(lowpass, int(value.shape[-2]))
-    width_matrix = analysis_matrix(lowpass, int(value.shape[-1]))
-    coefficients = value.float()
-    coefficients = torch.einsum(
-        "ih,bcthw,jw->bctij", height_matrix, coefficients, width_matrix
-    )
-    return torch.einsum(
-        "ih,bctij,jw->bcthw", height_matrix, coefficients, width_matrix
-    )
+    # Explicit casts do not override an outer autocast context for einsum.
+    # The transform and evidence tolerances are FP32 contracts.
+    with torch.autocast(device_type=value.device.type, enabled=False):
+        lowpass = lowpass.to(device=value.device, dtype=torch.float32)
+        height_matrix = analysis_matrix(lowpass, int(value.shape[-2]))
+        width_matrix = analysis_matrix(lowpass, int(value.shape[-1]))
+        coefficients = value.float()
+        coefficients = torch.einsum(
+            "ih,bcthw,jw->bctij", height_matrix, coefficients, width_matrix
+        )
+        return torch.einsum(
+            "ih,bctij,jw->bcthw", height_matrix, coefficients, width_matrix
+        )
 
 
 def _temporal_lowpass(value: Any) -> Any:
@@ -239,7 +263,7 @@ def _temporal_lowpass(value: Any) -> Any:
     return low.expand_as(pairs).reshape_as(value)
 
 
-def wavelet_decompose(
+def _wavelet_decompose_fp32(
     value: Any, *, lowpass: Any, history_frames: int
 ) -> dict[str, Any]:
     """Return three orthogonal full-shape projections, computed per view."""
@@ -279,6 +303,17 @@ def wavelet_decompose(
     return result
 
 
+def wavelet_decompose(
+    value: Any, *, lowpass: Any, history_frames: int
+) -> dict[str, Any]:
+    import torch
+
+    with torch.autocast(device_type=value.device.type, enabled=False):
+        return _wavelet_decompose_fp32(
+            value.float(), lowpass=lowpass.float(), history_frames=history_frames
+        )
+
+
 def haar_decompose(value: Any, *, history_frames: int) -> dict[str, Any]:
     import torch
 
@@ -301,7 +336,7 @@ def _future_only(value: Any, history_frames: int) -> Any:
     return result
 
 
-def partition_contract(
+def _partition_contract_fp32(
     value: Any, bands: Mapping[str, Any], *, history_frames: int
 ) -> dict[str, Any]:
     import torch
@@ -343,6 +378,19 @@ def partition_contract(
         "band_energy_fractions": fractions,
         "history_nonzero": history_nonzero,
     }
+
+
+def partition_contract(
+    value: Any, bands: Mapping[str, Any], *, history_frames: int
+) -> dict[str, Any]:
+    import torch
+
+    with torch.autocast(device_type=value.device.type, enabled=False):
+        return _partition_contract_fp32(
+            value.float(),
+            {name: tensor.float() for name, tensor in bands.items()},
+            history_frames=history_frames,
+        )
 
 
 def _new_partition_summary() -> dict[str, Any]:
@@ -483,22 +531,29 @@ def packet_coefficients(value: Any, lowpass: Any) -> Any:
         or value.shape[-1] != VIEW_COUNT * VIEW_WIDTH
     ):
         raise WaveletError("basis tensor must be the exact two-future-token latent marginal")
-    lowpass = lowpass.to(device=value.device, dtype=torch.float32)
-    highpass = qmf_highpass(lowpass)
-    height = torch.cat(
-        (analysis_matrix(lowpass, LATENT_SHAPE[2]), analysis_matrix(highpass, LATENT_SHAPE[2])),
-        dim=0,
-    )
-    width = torch.cat(
-        (analysis_matrix(lowpass, VIEW_WIDTH), analysis_matrix(highpass, VIEW_WIDTH)),
-        dim=0,
-    )
-    views = []
-    for view in range(VIEW_COUNT):
-        left = view * VIEW_WIDTH
-        current = value.float()[..., left : left + VIEW_WIDTH]
-        views.append(torch.einsum("ih,bcthw,jw->bctij", height, current, width))
-    return torch.cat(views, dim=-1)
+    with torch.autocast(device_type=value.device.type, enabled=False):
+        lowpass = lowpass.to(device=value.device, dtype=torch.float32)
+        highpass = qmf_highpass(lowpass)
+        height = torch.cat(
+            (
+                analysis_matrix(lowpass, LATENT_SHAPE[2]),
+                analysis_matrix(highpass, LATENT_SHAPE[2]),
+            ),
+            dim=0,
+        )
+        width = torch.cat(
+            (
+                analysis_matrix(lowpass, VIEW_WIDTH),
+                analysis_matrix(highpass, VIEW_WIDTH),
+            ),
+            dim=0,
+        )
+        views = []
+        for view in range(VIEW_COUNT):
+            left = view * VIEW_WIDTH
+            current = value.float()[..., left : left + VIEW_WIDTH]
+            views.append(torch.einsum("ih,bcthw,jw->bctij", height, current, width))
+        return torch.cat(views, dim=-1)
 
 
 def paper_regularizers(lowpass: Any) -> dict[str, Any]:
@@ -518,7 +573,7 @@ def paper_regularizers(lowpass: Any) -> dict[str, Any]:
     }
 
 
-def _per_sample_sparsity(value: Any, lowpass: Any) -> dict[str, Any]:
+def _per_sample_sparsity_fp32(value: Any, lowpass: Any) -> dict[str, Any]:
     import torch
 
     coefficients = packet_coefficients(value, lowpass).flatten(1)
@@ -561,6 +616,13 @@ def _per_sample_sparsity(value: Any, lowpass: Any) -> dict[str, Any]:
     }
 
 
+def _per_sample_sparsity(value: Any, lowpass: Any) -> dict[str, Any]:
+    import torch
+
+    with torch.autocast(device_type=value.device.type, enabled=False):
+        return _per_sample_sparsity_fp32(value.float(), lowpass.float())
+
+
 def _summarize_sample_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     result = {}
     for name, values in metrics.items():
@@ -594,6 +656,184 @@ def _bootstrap_sparsity_reduction(haar_values: Any, learned_values: Any) -> dict
         ],
         "favorable_episode_fraction": float(np.mean(candidate < control)),
         "bootstrap_replicates": BOOTSTRAP_REPLICATES,
+    }
+
+
+def _validated_basis_calibration_metrics(
+    rows: Sequence[Mapping[str, Any]],
+    registered_samples: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    import torch
+
+    registered = {
+        int(sample.get("clip_index", -1)): (
+            sample.get("clip_id"),
+            sample.get("episode_dir"),
+        )
+        for sample in registered_samples
+    }
+    expected = set(range(*CAL_RANGE))
+    if (
+        set(registered) != expected
+        or len(registered) != len(registered_samples)
+        or any(
+            not isinstance(clip_id, str) or not isinstance(episode, str)
+            for clip_id, episode in registered.values()
+        )
+    ):
+        raise WaveletError("registered basis-calibration identity inventory differs")
+    inventory = {}
+    for row in rows:
+        if row.get("schema") != BASIS_CAL_ROW_SCHEMA or not ladder.identity_valid(row):
+            raise WaveletError("basis-calibration row identity/schema differs")
+        clip_index = int(row.get("clip_index", -1))
+        metrics = row.get("metrics")
+        hashes = row.get("tensor_sha256")
+        if (
+            clip_index not in expected
+            or clip_index in inventory
+            or (row.get("clip_id"), row.get("episode_dir")) != registered[clip_index]
+            or row.get("basis_was_frozen") is not True
+            or int(row.get("history_frames_used", -1)) != 0
+            or int(row.get("future_frames_used", -1)) != 2
+            or int(row.get("vpm_forwards", -1)) != 0
+            or row.get("residuals_hidden_states_or_outcomes_used") is not False
+            or row.get("actions_loaded_by_dataset") is not True
+            or row.get("actions_entered_basis_objective") is not False
+            or row.get("prior_dev_opened") is not False
+            or row.get("fresh_reserve_480_510_opened") is not False
+            or row.get("validation_opened") is not False
+            or row.get("protected_test_opened") is not False
+            or not isinstance(metrics, Mapping)
+            or set(metrics) != {"HAAR", "QMF"}
+            or any(
+                not isinstance(metrics[basis], Mapping)
+                or set(metrics[basis]) != set(SPARSITY_METRICS)
+                or any(
+                    not math.isfinite(float(metrics[basis][name]))
+                    for name in SPARSITY_METRICS
+                )
+                for basis in ("HAAR", "QMF")
+            )
+            or not isinstance(hashes, Mapping)
+            or set(hashes) != {"clean_future_vae_latent"}
+            or not isinstance(hashes["clean_future_vae_latent"], str)
+            or len(hashes["clean_future_vae_latent"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in hashes["clean_future_vae_latent"]
+            )
+        ):
+            raise WaveletError("basis-calibration row contract differs")
+        for basis in ("HAAR", "QMF"):
+            values = metrics[basis]
+            terminal_sum = sum(
+                float(values[name])
+                for name in SPARSITY_METRICS
+                if name.startswith("terminal_")
+            )
+            if (
+                not 0.0 < float(values["normalized_l1"]) <= 1.0 + 1e-6
+                or not -1e-5 <= float(values["hoyer_sparsity"]) <= 1.0 + 1e-5
+                or not 0.0
+                <= float(values["small_coefficient_fraction_at_0p1_rms"])
+                <= 1.0
+                or not 0.0
+                <= float(values["top_10_percent_energy_fraction"])
+                <= 1.0 + 1e-6
+                or float(values["coefficient_input_energy_ratio"]) <= 0.0
+                or any(
+                    not 0.0 <= float(values[name]) <= 1.0 + 1e-6
+                    for name in SPARSITY_METRICS
+                    if name.startswith("terminal_")
+                )
+                or not math.isclose(terminal_sum, 1.0, rel_tol=0.0, abs_tol=2e-5)
+            ):
+                raise WaveletError("basis-calibration physical metric contract differs")
+        inventory[clip_index] = row
+    if set(inventory) != expected or len(rows) != len(expected):
+        raise WaveletError("basis-calibration row inventory differs")
+    return {
+        basis: {
+            name: torch.tensor(
+                [float(inventory[index]["metrics"][basis][name]) for index in sorted(expected)],
+                dtype=torch.float64,
+            )
+            for name in SPARSITY_METRICS
+        }
+        for basis in ("HAAR", "QMF")
+    }
+
+
+def recompute_basis_qualification(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    registered_samples: Sequence[Mapping[str, Any]],
+    learned_lowpass: Any,
+) -> dict[str, Any]:
+    import torch
+    import torch.nn.functional as functional
+
+    joined = _validated_basis_calibration_metrics(rows, registered_samples)
+    sparsity_effect = _bootstrap_sparsity_reduction(
+        joined["HAAR"]["normalized_l1"], joined["QMF"]["normalized_l1"]
+    )
+    learned_admissibility = basis_admissibility(learned_lowpass)
+    fixed_haar = haar_lowpass(dtype=torch.float32)
+    haar_admissibility = basis_admissibility(fixed_haar)
+    filter_cosine = float(
+        functional.cosine_similarity(
+            learned_lowpass.detach().double().cpu(), fixed_haar.double(), dim=0
+        ).abs()
+    )
+    learned_terminal_means = {
+        name.removeprefix("terminal_").removesuffix("_energy_fraction"): float(
+            joined["QMF"][name].mean()
+        )
+        for name in SPARSITY_METRICS
+        if name.startswith("terminal_") and name.endswith("_energy_fraction")
+    }
+    heldout_energy_pass = all(
+        float((metrics["coefficient_input_energy_ratio"] - 1.0).abs().max())
+        <= BASIS_ENERGY_RATIO_TOLERANCE
+        for metrics in joined.values()
+    )
+    gates = {
+        "admissibility_reconstruction_energy_pass": bool(
+            learned_admissibility["passed"] and haar_admissibility["passed"]
+        ),
+        "heldout_coefficient_energy_pass": heldout_energy_pass,
+        "nontrivial_filter_change_pass": filter_cosine < BASIS_FILTER_HAAR_MAX_COSINE,
+        "heldout_normalized_l1_sparsity_pass": bool(
+            sparsity_effect["relative_reduction_percent"]
+            >= BASIS_SPARSITY_IMPROVEMENT_PERCENT
+            and sparsity_effect["paired_episode_bootstrap_95_percent"][0] > 0
+        ),
+        "nontrivial_terminal_energy_pass": all(
+            value >= BASIS_TERMINAL_MIN_ENERGY_FRACTION
+            for value in learned_terminal_means.values()
+        ),
+        "threshold_retention_pass": True,
+        "basis_frozen_before_any_residual_target": True,
+    }
+    gates["all_passed"] = all(gates.values())
+    return {
+        "heldout_clean_receipt": {
+            "clip_indices": list(CAL_RANGE),
+            "episode_count": CAL_RANGE[1] - CAL_RANGE[0],
+            "basis_was_updated": False,
+            "metrics": {
+                basis: _summarize_sample_metrics(metrics)
+                for basis, metrics in joined.items()
+            },
+            "normalized_l1_learned_vs_haar": sparsity_effect,
+            "learned_terminal_band_mean_energy_fraction": learned_terminal_means,
+        },
+        "learned_admissibility": learned_admissibility,
+        "haar_admissibility": haar_admissibility,
+        "learned_filter_absolute_cosine_with_haar": filter_cosine,
+        "qualification_gates": gates,
+        "calibration_rows_replayed": True,
     }
 
 
@@ -657,6 +897,9 @@ def fit_unsupervised_basis(clean_future_cpu: Any, device: Any) -> tuple[Any, dic
         "weight_decay": 0.0,
         "angle_and_admissibility_precision": "float64",
         "coefficient_objective_precision": "float32",
+        "basis_optimizer_input_storage_precision": (
+            "float32 after the pinned bf16 VAE encode"
+        ),
         "initial_free_angles": [float(value) for value in initial.tolist()],
         "final_free_angles": [float(value) for value in angles.detach().cpu().tolist()],
         "trace": trace,
@@ -738,7 +981,7 @@ def _validate_manifest(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "nested_fit": list(FIT_RANGE),
         "calibration": list(CAL_RANGE),
         "prior_inspected_exploratory_development": list(DEV_RANGE),
-        "forbidden_fresh_reserve": list(RESERVE_RANGE),
+        "forbidden_prior_consumed_reserve": list(RESERVE_RANGE),
         "excluded_constructor_probe": list(STRUCTURAL_EXCLUDED_RANGE),
     }
     covered = [index for start, stop in ranges.values() for index in range(start, stop)]
@@ -842,6 +1085,11 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
                 ),
                 "sha256": FREQUENCY_FORCING_SOURCE_SHA256,
                 "joint_generator_training_epochs_reported": 400,
+                "provenance_scope": (
+                    "protocol-freeze literature provenance only; not a runtime scientific input"
+                ),
+                "runtime_hash_recomputed": False,
+                "source_content_bundled_in_repository": False,
             },
             "partitions": partitions,
             "frozen_design": {
@@ -864,7 +1112,9 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
                     "weight_decay": 0.0,
                     "tensor_scope": "only two clean future VAE latent frames [16,2,24,120]",
                     "training_rows": list(FIT_RANGE),
-                    "residuals_hidden_states_actions_or_outcomes_allowed": False,
+                    "residuals_hidden_states_actions_or_outcomes_enter_objective_allowed": False,
+                    "ordinary_dataset_arrays_loaded": ["rgb", "actions"],
+                    "actions_enter_basis_objective": False,
                     "threshold_gates_enabled": False,
                     "terminal_band_gate_retention": 1.0,
                     "freeze_point": "fixed final update 512 before any residual-head target construction",
@@ -926,6 +1176,8 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
                 "vjepa_target_array_allowed": False,
                 "teacher_calls": 0,
                 "basis_prefit_uses_only_clean_training_vae_latents": True,
+                "basis_prefit_actions_loaded_by_dataset": True,
+                "basis_prefit_actions_enter_objective": False,
                 "basis_prefit_future_latent_frames": 2,
                 "basis_prefit_history_latent_frames": 0,
                 "basis_frozen_before_residual_targets": True,
@@ -937,6 +1189,17 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
                 "protected_test_opened": False,
                 "development_opened_during_registration": False,
                 "wandb_enabled": False,
+            },
+            "barred_range_provenance": {
+                "rows_480_510": (
+                    "already consumed by the completed direct-residual frontier; "
+                    "barred and not opened by this qualification"
+                ),
+                "legacy_machine_field_semantics": (
+                    "fresh_reserve_480_510_opened=false means only that this "
+                    "qualification did not open those rows; it is not a global "
+                    "freshness claim"
+                ),
             },
             "claim_boundary": (
                 "post-selection exploratory reuse of prior-inspected ABC-train rows "
@@ -1032,6 +1295,47 @@ def _future_rows(
     }
 
 
+def _project_hidden_fp32(hidden: Any, projection: Any) -> Any:
+    import torch
+
+    with torch.autocast(device_type=hidden.device.type, enabled=False):
+        return hidden.float() @ projection.to(device=hidden.device, dtype=torch.float32)
+
+
+def _difference_fp32(first: Any, second: Any) -> Any:
+    import torch
+
+    with torch.autocast(device_type=first.device.type, enabled=False):
+        return first.float() - second.float()
+
+
+def _sum_fp32(first: Any, second: Any) -> Any:
+    import torch
+
+    with torch.autocast(device_type=first.device.type, enabled=False):
+        return first.float() + second.float()
+
+
+def _update_sufficient_statistics_fp32(
+    stats: dict[str, Any], features: Any, targets: Mapping[str, Any]
+) -> None:
+    import torch
+
+    with torch.autocast(device_type=features.device.type, enabled=False):
+        ladder.update_sufficient_statistics(
+            stats,
+            features.float(),
+            {name: value.float() for name, value in targets.items()},
+        )
+
+
+def _predict_ridge_fp32(features: Any, head: Mapping[str, Any]) -> Any:
+    import torch
+
+    with torch.autocast(device_type=features.device.type, enabled=False):
+        return ladder.predict_ridge_head(features.float(), head).float()
+
+
 def _target_tokens(
     direct: Any,
     *,
@@ -1086,7 +1390,6 @@ def _target_tokens(
 
 def _fit_phase(args: argparse.Namespace) -> int:
     import torch
-    import torch.nn.functional as functional
 
     if not torch.cuda.is_available():
         raise WaveletError("CUDA is required")
@@ -1122,7 +1425,7 @@ def _fit_phase(args: argparse.Namespace) -> int:
                 future = video_clean.float()[:, :, int(history_frames) :]
                 if tuple(future.shape[1:]) != (LATENT_SHAPE[0], 2, LATENT_SHAPE[2], LATENT_SHAPE[3]):
                     raise WaveletError("basis prefit did not isolate exactly two future VAE tokens")
-                clean_fit.append(future.cpu().to(torch.float16))
+                clean_fit.append(future.cpu())
         opened = {path.resolve(strict=True) for path in guard.opened}
     dataset.assert_exact_accesses(1)
     if opened != expected_arrays:
@@ -1135,7 +1438,11 @@ def _fit_phase(args: argparse.Namespace) -> int:
 
     # Phase B: frozen-basis clean-latent receipts only. Calibration rows never
     # select, update, or replace the final-step filter.
-    cal_metrics: dict[str, dict[str, list[Any]]] = {"HAAR": {}, "QMF": {}}
+    cal_rows: list[dict[str, Any]] = []
+    cal_registered = {
+        int(sample["clip_index"]): sample
+        for sample in registration["selected_manifest_rows"]["calibration"]
+    }
     with ladder.NumpyTargetOpenGuard(target_path) as guard:
         dataset = _phase_dataset(config, registration, CAL_RANGE)
         with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -1147,64 +1454,60 @@ def _fit_phase(args: argparse.Namespace) -> int:
                     batch["rgb"], video_clean.shape
                 )
                 future = video_clean.float()[:, :, int(history_frames) :]
+                batch_metrics = {}
                 for basis, lowpass in (
                     ("HAAR", haar_lowpass(device=device, dtype=torch.float32)),
                     ("QMF", learned_lowpass.to(device=device)),
                 ):
                     metrics = _per_sample_sparsity(future, lowpass)
-                    for name, values in metrics.items():
-                        cal_metrics[basis].setdefault(name, []).append(values.detach().cpu())
+                    if set(metrics) != set(SPARSITY_METRICS):
+                        raise WaveletError("basis-calibration metric schema differs")
+                    batch_metrics[basis] = metrics
+                for local, clip_index in enumerate(indexes):
+                    identity = cal_registered[clip_index]
+                    cal_rows.append(
+                        ladder.identity_payload(
+                            {
+                                "schema": BASIS_CAL_ROW_SCHEMA,
+                                "clip_index": clip_index,
+                                "clip_id": identity["clip_id"],
+                                "episode_dir": identity["episode_dir"],
+                                "basis_was_frozen": True,
+                                "history_frames_used": 0,
+                                "future_frames_used": 2,
+                                "vpm_forwards": 0,
+                                "residuals_hidden_states_or_outcomes_used": False,
+                                "actions_loaded_by_dataset": True,
+                                "actions_entered_basis_objective": False,
+                                "metrics": {
+                                    basis: {
+                                        name: float(values[name][local].detach().cpu())
+                                        for name in SPARSITY_METRICS
+                                    }
+                                    for basis, values in batch_metrics.items()
+                                },
+                                "tensor_sha256": {
+                                    "clean_future_vae_latent": ladder._safe_tensor_sha256(
+                                        future[local : local + 1]
+                                    )
+                                },
+                                "prior_dev_opened": False,
+                                "fresh_reserve_480_510_opened": False,
+                                "validation_opened": False,
+                                "protected_test_opened": False,
+                            }
+                        )
+                    )
         opened = {path.resolve(strict=True) for path in guard.opened}
     dataset.assert_exact_accesses(1)
     if opened != expected_arrays:
         raise WaveletError(f"basis-calibration input graph differs: {sorted(opened)}")
     del dataset
-    cal_metrics_joined = {
-        basis: {name: torch.cat(values) for name, values in metrics.items()}
-        for basis, metrics in cal_metrics.items()
-    }
-    if any(
-        values.shape[0] != CAL_RANGE[1] - CAL_RANGE[0]
-        for metrics in cal_metrics_joined.values()
-        for values in metrics.values()
-    ):
-        raise WaveletError("basis-calibration metric inventory differs")
-    sparsity_effect = _bootstrap_sparsity_reduction(
-        cal_metrics_joined["HAAR"]["normalized_l1"],
-        cal_metrics_joined["QMF"]["normalized_l1"],
-    )
-    learned_admissibility = basis_admissibility(learned_lowpass)
-    haar_admissibility = basis_admissibility(haar_lowpass())
-    filter_cosine = float(
-        functional.cosine_similarity(
-            learned_lowpass.double(), haar_lowpass(dtype=torch.float64), dim=0
-        ).abs()
-    )
-    learned_terminal_means = {
-        name.removeprefix("terminal_").removesuffix("_energy_fraction"): float(values.mean())
-        for name, values in cal_metrics_joined["QMF"].items()
-        if name.startswith("terminal_") and name.endswith("_energy_fraction")
-    }
-    basis_qualification = {
-        "admissibility_reconstruction_energy_pass": bool(
-            learned_admissibility["passed"] and haar_admissibility["passed"]
-        ),
-        "nontrivial_filter_change_pass": filter_cosine < BASIS_FILTER_HAAR_MAX_COSINE,
-        "heldout_normalized_l1_sparsity_pass": bool(
-            sparsity_effect["relative_reduction_percent"]
-            >= BASIS_SPARSITY_IMPROVEMENT_PERCENT
-            and sparsity_effect["paired_episode_bootstrap_95_percent"][0] > 0
-        ),
-        "nontrivial_terminal_energy_pass": all(
-            value >= BASIS_TERMINAL_MIN_ENERGY_FRACTION
-            for value in learned_terminal_means.values()
-        ),
-        "threshold_retention_pass": True,
-        "basis_frozen_before_any_residual_target": True,
-    }
-    basis_qualification["all_passed"] = all(basis_qualification.values())
+    cal_rows_path = output / "basis_calibration_rows.jsonl"
+    ladder.exclusive_jsonl(cal_rows_path, cal_rows)
+    sealed_cal_rows = ladder.read_jsonl(cal_rows_path)
     basis_weights = {
-        "schema": "vpm-causal-learnable-wavelet-basis-weights-v1",
+        "schema": BASIS_WEIGHT_SCHEMA,
         "source_commit": registration["source_commit"],
         "registration_identity_sha256": registration["identity_sha256"],
         "learned_lowpass": learned_lowpass,
@@ -1215,13 +1518,20 @@ def _fit_phase(args: argparse.Namespace) -> int:
     buffer = io.BytesIO()
     torch.save(basis_weights, buffer)
     ladder.exclusive_bytes(output / "learned_basis.pt", buffer.getvalue())
+    basis_evidence = recompute_basis_qualification(
+        rows=sealed_cal_rows,
+        registered_samples=registration["selected_manifest_rows"]["calibration"],
+        learned_lowpass=learned_lowpass,
+    )
+    basis_qualification = basis_evidence["qualification_gates"]
     basis_receipt = ladder.identity_payload(
         {
-            "schema": "vpm-causal-learnable-wavelet-basis-v1",
+            "schema": BASIS_SCHEMA,
             "created_at_utc": ladder._now(),
             "registration_identity_sha256": registration["identity_sha256"],
-            "primary_source_sha256": FREQUENCY_FORCING_SOURCE_SHA256,
+            "primary_source_protocol_freeze_sha256": FREQUENCY_FORCING_SOURCE_SHA256,
             "weights": ladder.file_record(output / "learned_basis.pt"),
+            "calibration_rows": ladder.file_record(cal_rows_path),
             "optimization": basis_optimization,
             "training_access": {
                 "clip_indices": list(FIT_RANGE),
@@ -1229,24 +1539,21 @@ def _fit_phase(args: argparse.Namespace) -> int:
                 "tensor_scope": "two future VAE latent frames [16,2,24,120]",
                 "history_frames_used": 0,
                 "vpm_forwards": 0,
-                "residuals_hidden_states_actions_or_outcomes_used": False,
+                "residuals_hidden_states_or_outcomes_used": False,
+                "dataset_arrays_loaded": ["rgb", "actions"],
+                "actions_loaded_by_dataset": True,
+                "actions_entered_basis_objective": False,
                 "vjepa_target_array_opened": False,
             },
-            "heldout_clean_receipt": {
+            "calibration_access": {
                 "clip_indices": list(CAL_RANGE),
                 "exact_dataset_accesses_per_row": 1,
                 "basis_was_updated": False,
-                "metrics": {
-                    basis: _summarize_sample_metrics(metrics)
-                    for basis, metrics in cal_metrics_joined.items()
-                },
-                "normalized_l1_learned_vs_haar": sparsity_effect,
-                "learned_terminal_band_mean_energy_fraction": learned_terminal_means,
+                "dataset_arrays_loaded": ["rgb", "actions"],
+                "actions_loaded_by_dataset": True,
+                "actions_entered_basis_objective": False,
             },
-            "learned_admissibility": learned_admissibility,
-            "haar_admissibility": haar_admissibility,
-            "learned_filter_absolute_cosine_with_haar": filter_cosine,
-            "qualification_gates": basis_qualification,
+            **basis_evidence,
             "threshold_gates_enabled": False,
             "terminal_band_gate_retention": [1.0, 1.0, 1.0, 1.0],
             "basis_frozen_before_any_residual_target": True,
@@ -1290,7 +1597,10 @@ def _fit_phase(args: argparse.Namespace) -> int:
                         }
                     elif observed != (grid, patch_size, patch_dim):
                         raise WaveletError("Wan grid changed during fit")
-                    direct = (prepared["video_target"] - off_velocity).float()
+                    clean_velocity = _difference_fp32(
+                        prepared["initial_video"], prepared["video_clean"]
+                    )
+                    direct = _difference_fp32(clean_velocity, off_velocity)
                     targets, receipts = _target_tokens(
                         direct,
                         learned_lowpass=learned_lowpass.to(device=device),
@@ -1302,7 +1612,7 @@ def _fit_phase(args: argparse.Namespace) -> int:
                             _update_partition_summary(
                                 fit_partitions[basis], receipts[basis][alignment]
                             )
-                    projected = hidden.float() @ projection
+                    projected = _project_hidden_fp32(hidden, projection)
                     positions = ladder.future_token_positions(
                         grid=grid,
                         patch_size=patch_size,
@@ -1312,8 +1622,8 @@ def _fit_phase(args: argparse.Namespace) -> int:
                     x, y = _future_rows(projected, targets, positions, indexes, noise_seed)
                     for dose in DOSES:
                         if start < FIT_RANGE[0] + dose:
-                            ladder.update_sufficient_statistics(stats_by_dose[dose], x, y)
-                    del batch, prepared, hidden, projected, direct, targets, x, y
+                            _update_sufficient_statistics_fp32(stats_by_dose[dose], x, y)
+                    del batch, prepared, hidden, projected, clean_velocity, direct, targets, x, y
         opened = {path.resolve(strict=True) for path in guard.opened}
     dataset.assert_exact_accesses(len(FIT_NOISE_SEEDS))
     if opened != expected_arrays:
@@ -1437,6 +1747,101 @@ def _fit_phase(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validated_basis(
+    output: Path, registration: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    import torch
+
+    basis_path = ladder.canonical_file(output / "basis.json", "basis receipt")
+    basis = ladder.read_json(basis_path)
+    training_access = basis.get("training_access", {})
+    calibration_access = basis.get("calibration_access", {})
+    if (
+        basis.get("schema") != BASIS_SCHEMA
+        or not ladder.identity_valid(basis)
+        or basis.get("registration_identity_sha256") != registration["identity_sha256"]
+        or basis.get("basis_frozen_before_any_residual_target") is not True
+        or basis.get("threshold_gates_enabled") is not False
+        or basis.get("terminal_band_gate_retention") != [1.0, 1.0, 1.0, 1.0]
+        or basis.get("primary_source_protocol_freeze_sha256")
+        != FREQUENCY_FORCING_SOURCE_SHA256
+        or basis.get("prior_dev_opened") is not False
+        or basis.get("fresh_reserve_480_510_opened") is not False
+        or basis.get("validation_opened") is not False
+        or basis.get("protected_test_opened") is not False
+        or training_access.get("clip_indices") != list(FIT_RANGE)
+        or int(training_access.get("exact_dataset_accesses_per_row", -1)) != 1
+        or training_access.get("tensor_scope")
+        != "two future VAE latent frames [16,2,24,120]"
+        or int(training_access.get("history_frames_used", -1)) != 0
+        or int(training_access.get("vpm_forwards", -1)) != 0
+        or training_access.get("residuals_hidden_states_or_outcomes_used") is not False
+        or training_access.get("dataset_arrays_loaded") != ["rgb", "actions"]
+        or training_access.get("actions_loaded_by_dataset") is not True
+        or training_access.get("actions_entered_basis_objective") is not False
+        or training_access.get("vjepa_target_array_opened") is not False
+        or calibration_access.get("clip_indices") != list(CAL_RANGE)
+        or int(calibration_access.get("exact_dataset_accesses_per_row", -1)) != 1
+        or calibration_access.get("basis_was_updated") is not False
+        or calibration_access.get("dataset_arrays_loaded") != ["rgb", "actions"]
+        or calibration_access.get("actions_loaded_by_dataset") is not True
+        or calibration_access.get("actions_entered_basis_objective") is not False
+    ):
+        raise WaveletError("sealed basis receipt differs")
+    weights_record = basis.get("weights", {})
+    weights_path = ladder.canonical_file(weights_record.get("path", ""), "basis weights")
+    rows_record = basis.get("calibration_rows", {})
+    rows_path = ladder.canonical_file(
+        rows_record.get("path", ""), "basis calibration rows"
+    )
+    for path, record, label in (
+        (weights_path, weights_record, "basis weights"),
+        (rows_path, rows_record, "basis calibration rows"),
+    ):
+        if (
+            path.parent != output
+            or path.stat().st_size != int(record.get("bytes", -1))
+            or ladder.sha256_file(path) != record.get("sha256")
+        ):
+            raise WaveletError(f"{label} artifact differs")
+    basis_weights = torch.load(weights_path, map_location="cpu", weights_only=True)
+    if (
+        basis_weights.get("schema") != BASIS_WEIGHT_SCHEMA
+        or basis_weights.get("source_commit") != registration["source_commit"]
+        or basis_weights.get("registration_identity_sha256") != registration["identity_sha256"]
+        or basis_weights.get("threshold_gates_enabled") is not False
+        or not all(
+            isinstance(basis_weights.get(name), torch.Tensor)
+            and tuple(basis_weights[name].shape) == (BASIS_FILTER_LENGTH,)
+            for name in ("learned_lowpass", "haar_lowpass")
+        )
+        or not torch.equal(basis_weights.get("haar_lowpass"), haar_lowpass())
+        or not isinstance(basis_weights.get("terminal_band_gate_retention"), torch.Tensor)
+        or tuple(basis_weights["terminal_band_gate_retention"].shape) != (4,)
+        or not torch.equal(
+            basis_weights["terminal_band_gate_retention"], torch.ones(4)
+        )
+    ):
+        raise WaveletError("basis filter tensor inventory differs")
+    rows = ladder.read_jsonl(rows_path)
+    recomputed = recompute_basis_qualification(
+        rows=rows,
+        registered_samples=registration["selected_manifest_rows"]["calibration"],
+        learned_lowpass=basis_weights["learned_lowpass"],
+    )
+    for key in (
+        "heldout_clean_receipt",
+        "learned_admissibility",
+        "haar_admissibility",
+        "learned_filter_absolute_cosine_with_haar",
+        "qualification_gates",
+        "calibration_rows_replayed",
+    ):
+        if basis.get(key) != recomputed[key]:
+            raise WaveletError(f"basis replay differs for {key}")
+    return basis, basis_weights, rows, recomputed
+
+
 def _load_weights(
     output: Path, registration: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1450,48 +1855,20 @@ def _load_weights(
     basis_record = fit.get("basis", {})
     basis_path = ladder.canonical_file(basis_record.get("path", ""), "basis receipt")
     if (
-        basis_path.parent != output
+        basis_path != output / "basis.json"
         or basis_path.stat().st_size != int(basis_record.get("bytes", -1))
         or ladder.sha256_file(basis_path) != basis_record.get("sha256")
     ):
-        raise WaveletError("basis receipt artifact differs")
-    basis = ladder.read_json(basis_path)
-    if (
-        basis.get("schema") != "vpm-causal-learnable-wavelet-basis-v1"
-        or not ladder.identity_valid(basis)
-        or basis.get("registration_identity_sha256") != registration["identity_sha256"]
-        or basis.get("identity_sha256") != fit.get("basis_identity_sha256")
-        or basis.get("basis_frozen_before_any_residual_target") is not True
-        or basis.get("threshold_gates_enabled") is not False
-        or basis.get("training_access", {}).get("history_frames_used") != 0
-        or basis.get("training_access", {}).get("vpm_forwards") != 0
-        or basis.get("training_access", {}).get(
-            "residuals_hidden_states_actions_or_outcomes_used"
-        )
-        is not False
-    ):
-        raise WaveletError("sealed basis receipt differs")
-    basis_weights_record = basis.get("weights", {})
-    basis_weights_path = ladder.canonical_file(
-        basis_weights_record.get("path", ""), "basis weights"
+        raise WaveletError("fit basis receipt link differs")
+    basis, basis_weights, _basis_rows, recomputed_basis = _validated_basis(
+        output, registration
     )
     if (
-        basis_weights_path.parent != output
-        or basis_weights_path.stat().st_size != int(basis_weights_record.get("bytes", -1))
-        or ladder.sha256_file(basis_weights_path) != basis_weights_record.get("sha256")
+        basis.get("identity_sha256") != fit.get("basis_identity_sha256")
+        or fit.get("basis_calibration", {}).get("qualification_gates")
+        != recomputed_basis["qualification_gates"]
     ):
-        raise WaveletError("basis weight artifact differs")
-    basis_weights = torch.load(basis_weights_path, map_location="cpu", weights_only=True)
-    if not all(
-        isinstance(basis_weights.get(name), torch.Tensor)
-        and tuple(basis_weights[name].shape) == (BASIS_FILTER_LENGTH,)
-        for name in ("learned_lowpass", "haar_lowpass")
-    ):
-        raise WaveletError("basis filter tensor inventory differs")
-    observed_learned_admissibility = basis_admissibility(
-        basis_weights.get("learned_lowpass")
-    )
-    observed_haar_admissibility = basis_admissibility(basis_weights.get("haar_lowpass"))
+        raise WaveletError("fit basis qualification link differs")
     record = fit.get("weights", {})
     path = ladder.canonical_file(record.get("path", ""), "adapter weights")
     if (
@@ -1505,8 +1882,19 @@ def _load_weights(
     capacity = int(selected.get("capacity", -1))
     ridge_lambda = float(selected.get("ridge_lambda", float("nan")))
     heads = weights.get("heads", {})
+    fit_access = fit.get("optimization", {})
+    basis_calibration = fit.get("basis_calibration", {})
+    expected_fit_calls = (
+        ((FIT_RANGE[1] - FIT_RANGE[0] + 1) // 2) * len(FIT_NOISE_SEEDS)
+    )
+    expected_fit_tokens = (
+        (FIT_RANGE[1] - FIT_RANGE[0])
+        * len(FIT_NOISE_SEEDS)
+        * TOKEN_SAMPLE_COUNT
+    )
     if (
         weights.get("schema") != WEIGHT_SCHEMA
+        or weights.get("source_commit") != registration["source_commit"]
         or weights.get("registration_identity_sha256") != registration["identity_sha256"]
         or set(heads) != {str(dose) for dose in DOSES}
         or any(set(dose_heads) != set(ARMS) for dose_heads in heads.values())
@@ -1515,28 +1903,45 @@ def _load_weights(
         or float(weights.get("selected_ridge_lambda", float("nan"))) != ridge_lambda
         or capacity not in CAPACITY_RUNGS
         or ridge_lambda not in RIDGE_LAMBDAS
-        or fit.get("optimization", {}).get("clip_indices") != list(FIT_RANGE)
-        or fit.get("basis_calibration", {}).get("clip_indices") != list(CAL_RANGE)
+        or fit_access.get("clip_indices") != list(FIT_RANGE)
+        or fit_access.get("fit_doses") != list(DOSES)
+        or fit_access.get("dataset_array_validation_rows")
+        != [FIT_RANGE[0], FIT_RANGE[1] - 1]
+        or int(fit_access.get("exact_dataset_accesses_per_row", -1))
+        != len(FIT_NOISE_SEEDS)
+        or fit_access.get("noise_seeds") != list(FIT_NOISE_SEEDS)
+        or fit_access.get("sampled_future_tokens_by_dose")
+        != {str(dose): expected_fit_tokens for dose in DOSES}
+        or int(fit_access.get("off_wan_invocations", -1)) != expected_fit_calls
+        or int(fit_access.get("teacher_calls", -1)) != 0
+        or fit_access.get("vjepa_target_array_opened") is not False
+        or fit_access.get("basis_frozen_before_first_residual_target") is not True
+        or basis_calibration.get("clip_indices") != list(CAL_RANGE)
+        or basis_calibration.get("dataset_array_validation_rows")
+        != [CAL_RANGE[0], CAL_RANGE[1] - 1]
+        or int(basis_calibration.get("exact_dataset_accesses_per_row", -1)) != 1
+        or basis_calibration.get("noise_seeds") != []
+        or int(basis_calibration.get("off_wan_invocations", -1)) != 0
+        or int(basis_calibration.get("teacher_calls", -1)) != 0
+        or basis_calibration.get("vjepa_target_array_opened") is not False
         or fit.get("zero_head_exact_zero") is not True
         or fit.get("prior_dev_opened") is not False
         or fit.get("fresh_reserve_480_510_opened") is not False
         or fit.get("constructor_probe_511_opened") is not False
         or fit.get("validation_opened") is not False
         or fit.get("protected_test_opened") is not False
-        or set(fit.get("optimization", {}).get("partition_contracts", {})) != {"HAAR", "QMF"}
+        or set(fit_access.get("partition_contracts", {})) != {"HAAR", "QMF"}
         or any(
             receipt.get("passed") is not True
-            for receipt in fit.get("optimization", {}).get("partition_contracts", {}).values()
+            or int(receipt.get("checked_batches", -1)) != 2 * expected_fit_calls
+            for receipt in fit_access.get("partition_contracts", {}).values()
         )
-        or fit.get("basis_calibration", {}).get("basis_was_updated") is not False
+        or basis_calibration.get("basis_was_updated") is not False
         or weights.get("basis_identity_sha256") != basis["identity_sha256"]
-        or basis_weights.get("schema") != "vpm-causal-learnable-wavelet-basis-weights-v1"
+        or basis_weights.get("schema") != BASIS_WEIGHT_SCHEMA
         or basis_weights.get("registration_identity_sha256") != registration["identity_sha256"]
         or basis_weights.get("threshold_gates_enabled") is not False
         or not torch.equal(weights.get("learned_lowpass"), basis_weights.get("learned_lowpass"))
-        or basis.get("primary_source_sha256") != FREQUENCY_FORCING_SOURCE_SHA256
-        or observed_learned_admissibility != basis.get("learned_admissibility")
-        or observed_haar_admissibility != basis.get("haar_admissibility")
     ):
         raise WaveletError("sealed fit/weight contract differs")
     parameter_counts = set()
@@ -1607,8 +2012,10 @@ def _prediction_for_endpoint(
     else:
         prefix, arm = endpoint.split("_", 1)
         dose = int(prefix[1:])
-    projected_hidden = hidden.float() @ projection
-    tokens = ladder.predict_ridge_head(projected_hidden, weights["heads"][str(dose)][arm]).clone()
+    projected_hidden = _project_hidden_fp32(hidden, projection)
+    tokens = _predict_ridge_fp32(
+        projected_hidden, weights["heads"][str(dose)][arm]
+    ).clone()
     positions = ladder.future_token_positions(
         grid=grid,
         patch_size=patch_size,
@@ -1636,7 +2043,7 @@ def _prediction_for_endpoint(
     return correction, raw
 
 
-def _projection_leakage(
+def _projection_leakage_fp32(
     raw: Any,
     correction: Any,
     *,
@@ -1662,7 +2069,27 @@ def _projection_leakage(
     return pre_leakage, post_leakage
 
 
-def _per_sample_band_metrics(
+def _projection_leakage(
+    raw: Any,
+    correction: Any,
+    *,
+    endpoint: str,
+    learned_lowpass: Any,
+    history_frames: int,
+) -> tuple[Any, Any]:
+    import torch
+
+    with torch.autocast(device_type=raw.device.type, enabled=False):
+        return _projection_leakage_fp32(
+            raw.float(),
+            correction.float(),
+            endpoint=endpoint,
+            learned_lowpass=learned_lowpass.float(),
+            history_frames=history_frames,
+        )
+
+
+def _per_sample_band_metrics_fp32(
     prediction: Any,
     target: Any,
     *,
@@ -1690,6 +2117,55 @@ def _per_sample_band_metrics(
         "preprojection_offband_relative_energy": pre_leakage,
         "postprojection_offband_relative_energy": post_leakage,
     }
+
+
+def _per_sample_band_metrics(
+    prediction: Any,
+    target: Any,
+    *,
+    history_frames: int,
+    pre_leakage: Any,
+    post_leakage: Any,
+) -> dict[str, Any]:
+    import torch
+
+    with torch.autocast(device_type=prediction.device.type, enabled=False):
+        return _per_sample_band_metrics_fp32(
+            prediction.float(),
+            target.float(),
+            history_frames=history_frames,
+            pre_leakage=pre_leakage.float(),
+            post_leakage=post_leakage.float(),
+        )
+
+
+def _standard_future_metrics_fp32(**kwargs: Any) -> dict[str, Any]:
+    import torch
+
+    velocity = kwargs["velocity"]
+    with torch.autocast(device_type=velocity.device.type, enabled=False):
+        converted = dict(kwargs)
+        for name in (
+            "velocity",
+            "base_velocity",
+            "direct_residual",
+            "final",
+            "clean",
+        ):
+            converted[name] = converted[name].float()
+        return ladder._per_sample_future_metrics(**converted)
+
+
+def _one_step_final_fp32(
+    initial: Any, velocity: Any, reference: Any, history_frames: int
+) -> Any:
+    """Integrate the one-step flow in FP32 even inside model bf16 autocast."""
+    import torch
+
+    with torch.autocast(device_type=initial.device.type, enabled=False):
+        return ladder._one_step_final(
+            initial.float(), velocity.float(), reference.float(), history_frames
+        )
 
 
 def _evaluate_phase(args: argparse.Namespace) -> int:
@@ -1781,7 +2257,7 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
                         after.record()
                         adapter_timings[endpoint].append(_event_ms(before, after))
                         residuals[endpoint] = correction
-                        velocities[endpoint] = off_velocity.float() + correction
+                        velocities[endpoint] = _sum_fp32(off_velocity, correction)
                         if audit_leakage:
                             pre, post = _projection_leakage(
                                 raw_correction,
@@ -1801,7 +2277,7 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
                         before = torch.cuda.Event(enable_timing=True)
                         after = torch.cuda.Event(enable_timing=True)
                         before.record()
-                        final = ladder._one_step_final(
+                        final = _one_step_final_fp32(
                             prepared["initial_video"],
                             velocities[endpoint],
                             prepared["reference"],
@@ -1865,8 +2341,10 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
                     video_clean = model._encode_clip(batch["rgb"]).to(batch["rgb"].dtype)
                     if video_clean.shape != prepared["initial_video"].shape:
                         raise WaveletError("development clean-video grid differs")
-                    video_target = prepared["initial_video"] - video_clean
-                    direct_target = (video_target - off_velocity).float()
+                    video_target = _difference_fp32(
+                        prepared["initial_video"], video_clean
+                    )
+                    direct_target = _difference_fp32(video_target, off_velocity)
                     target_bands = {
                         "HAAR": haar_decompose(
                             direct_target, history_frames=prepared["history_frames"]
@@ -1905,7 +2383,7 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
 
                     metrics_by_endpoint = {}
                     for endpoint in ENDPOINTS:
-                        standard = ladder._per_sample_future_metrics(
+                        standard = _standard_future_metrics_fp32(
                             velocity=velocities[endpoint],
                             base_velocity=off_velocity,
                             direct_residual=direct_target,
@@ -2131,45 +2609,6 @@ def _bootstrap_relative(control: Any, candidate: Any, *, seed: int) -> dict[str,
     }
 
 
-def _bootstrap_auc_difference(
-    off: Any,
-    band_curve: Sequence[Any],
-    direct_curve: Sequence[Any],
-    *,
-    seed: int,
-) -> dict[str, Any]:
-    import numpy as np
-
-    off = np.asarray(off, dtype=np.float64)
-    bands = np.stack([np.asarray(value, dtype=np.float64) for value in band_curve])
-    directs = np.stack([np.asarray(value, dtype=np.float64) for value in direct_curve])
-    expected = (len(DOSES), DEV_RANGE[1] - DEV_RANGE[0], len(DEV_NOISE_SEEDS))
-    if bands.shape != expected or directs.shape != expected or off.shape != expected[1:]:
-        raise WaveletError("learning-curve inventory differs")
-    off_episode = off.mean(axis=1).clip(min=1e-30)
-    band_improvement = 100.0 * (off_episode[None, :] - bands.mean(axis=2)) / off_episode[None, :]
-    direct_improvement = 100.0 * (off_episode[None, :] - directs.mean(axis=2)) / off_episode[None, :]
-    x = (np.log2(np.asarray(DOSES, dtype=np.float64)) - math.log2(DOSES[0])) / (
-        math.log2(DOSES[-1]) - math.log2(DOSES[0])
-    )
-    band_auc = np.trapezoid(band_improvement, x=x, axis=0)
-    direct_auc = np.trapezoid(direct_improvement, x=x, axis=0)
-    differences = band_auc - direct_auc
-    rng = np.random.default_rng(seed)
-    indexes = rng.integers(0, differences.shape[0], size=(BOOTSTRAP_REPLICATES, differences.shape[0]))
-    draws = differences[indexes].mean(axis=1)
-    return {
-        "band_mean_relative_improvement_auc": float(band_auc.mean()),
-        "full_direct_mean_relative_improvement_auc": float(direct_auc.mean()),
-        "band_minus_full_direct_auc": float(differences.mean()),
-        "paired_episode_bootstrap_95_difference": [
-            float(value) for value in np.quantile(draws, (0.025, 0.975))
-        ],
-        "favorable_episode_fraction": float(np.mean(differences > 0)),
-        "bootstrap_replicates": BOOTSTRAP_REPLICATES,
-    }
-
-
 def analyze_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -2282,6 +2721,7 @@ def analyze_rows(
             raise WaveletError(f"development {basis} partition receipt differs")
     if set(basis_qualification) != {
         "admissibility_reconstruction_energy_pass",
+        "heldout_coefficient_energy_pass",
         "nontrivial_filter_change_pass",
         "heldout_normalized_l1_sparsity_pass",
         "nontrivial_terminal_energy_pass",
@@ -2462,7 +2902,7 @@ def analyze_rows(
         "haar_and_qmf_partition_reconstruction_orthogonality_pass": True,
         "basis_qualification_pass": basis_qualification["all_passed"] is True,
         "post_selection_dev_only": True,
-        "fresh_reserve_480_510_unopened": True,
+        "prior_consumed_rows_480_510_unopened_by_this_run": True,
         "constructor_probe_511_unopened": True,
         "validation_and_protected_test_unopened": True,
     }
@@ -2515,8 +2955,13 @@ def _validated_endpoint(
         or endpoint.get("dataset_array_validation_rows") != [DEV_RANGE[0], DEV_RANGE[1] - 1]
         or int(endpoint.get("exact_dataset_accesses_per_row", -1)) != len(DEV_NOISE_SEEDS)
         or int(endpoint.get("shared_wan_invocations", -1)) != expected_batches
+        or int(endpoint.get("wan_sample_calls", -1))
+        != (DEV_RANGE[1] - DEV_RANGE[0]) * len(DEV_NOISE_SEEDS)
+        or endpoint.get("development_noise_seeds") != list(DEV_NOISE_SEEDS)
         or int(endpoint.get("teacher_calls", -1)) != 0
         or endpoint.get("vjepa_target_array_opened") is not False
+        or endpoint.get("future_target_entered_correction") is not False
+        or endpoint.get("scoring_target_constructed_after_all_endpoints") is not True
         or endpoint.get("zero_equals_off_bit_exact") is not True
         or endpoint.get("post_selection_exploratory_dev_opened") is not True
         or endpoint.get("fresh_reserve_480_510_opened") is not False
@@ -2552,6 +2997,7 @@ def _validated_endpoint(
             or int(row.get("batch_ordinal", -1)) != ordinal
             or int(row.get("noise_seed", -1)) != seed
             or row.get("clip_indices") != clips
+            or int(row.get("batch_size", -1)) != len(clips)
             or set(latency.get("adapter", {})) != set(ENDPOINTS) - {"VPM_OFF"}
             or set(latency.get("euler", {})) != set(ENDPOINTS)
             or set(latency.get("decoder", {})) != set(ENDPOINTS)
@@ -2560,8 +3006,52 @@ def _validated_endpoint(
                 for group in (latency["adapter"], latency["euler"], latency["decoder"])
                 for value in group.values()
             )
+            or any(
+                not math.isfinite(float(latency.get(name, float("nan"))))
+                or float(latency[name]) < 0
+                for name in (
+                    "causal_preparation",
+                    "wan",
+                    "full_primary_endpoint",
+                )
+            )
         ):
             raise WaveletError("timing row inventory differs")
+    observed_timing_summaries = {
+        "adapter_latency_ms_per_batch": {
+            name: _latency_summary(
+                [float(row["latency_ms"]["adapter"][name]) for row in timing]
+            )
+            for name in set(ENDPOINTS) - {"VPM_OFF"}
+        },
+        "wan_latency_ms_per_batch": _latency_summary(
+            [float(row["latency_ms"]["wan"]) for row in timing]
+        ),
+        "causal_preparation_latency_ms_per_batch": _latency_summary(
+            [float(row["latency_ms"]["causal_preparation"]) for row in timing]
+        ),
+        "euler_latency_ms_per_batch": {
+            name: _latency_summary(
+                [float(row["latency_ms"]["euler"][name]) for row in timing]
+            )
+            for name in ENDPOINTS
+        },
+        "decoder_latency_ms_per_batch": {
+            name: _latency_summary(
+                [float(row["latency_ms"]["decoder"][name]) for row in timing]
+            )
+            for name in ENDPOINTS
+        },
+        "full_primary_endpoint_latency_ms_per_batch": _latency_summary(
+            [float(row["latency_ms"]["full_primary_endpoint"]) for row in timing]
+        ),
+    }
+    if (
+        endpoint.get("full_primary_endpoint")
+        != endpoint_name(256, "FULL_DIRECT", "ALIGNED")
+        or any(endpoint.get(name) != value for name, value in observed_timing_summaries.items())
+    ):
+        raise WaveletError("endpoint timing summary replay differs")
     return endpoint, paths[0], paths[1]
 
 
@@ -2571,12 +3061,14 @@ def _analyze_phase(args: argparse.Namespace) -> int:
     fit, _weights = _load_weights(output, registration)
     endpoint, rows_path, _timing_path = _validated_endpoint(output, registration, fit)
     rows = ladder.read_jsonl(rows_path)
-    basis = ladder.read_json(output / "basis.json")
+    _basis, _basis_weights, _basis_rows, recomputed_basis = _validated_basis(
+        output, registration
+    )
     analysis = analyze_rows(
         rows,
         registered_samples=registration["selected_manifest_rows"]["exploratory_development"],
         partition_contract_receipts=endpoint["partition_contracts"],
-        basis_qualification=basis["qualification_gates"],
+        basis_qualification=recomputed_basis["qualification_gates"],
     )
     analysis = ladder.identity_payload(
         {
@@ -2639,12 +3131,14 @@ def _audit_phase(args: argparse.Namespace) -> int:
     ):
         raise WaveletError("analysis artifact receipt differs")
     rows = ladder.read_jsonl(rows_path)
-    basis = ladder.read_json(output / "basis.json")
+    _basis, _basis_weights, _basis_rows, recomputed_basis = _validated_basis(
+        output, registration
+    )
     recomputed = analyze_rows(
         rows,
         registered_samples=registration["selected_manifest_rows"]["exploratory_development"],
         partition_contract_receipts=endpoint["partition_contracts"],
-        basis_qualification=basis["qualification_gates"],
+        basis_qualification=recomputed_basis["qualification_gates"],
     )
     for key in (
         "aggregates",
@@ -2660,6 +3154,7 @@ def _audit_phase(args: argparse.Namespace) -> int:
     artifacts = (
         "registration.json",
         "basis.json",
+        "basis_calibration_rows.jsonl",
         "learned_basis.pt",
         "fit.json",
         "adapter_weights.pt",
@@ -2682,11 +3177,12 @@ def _audit_phase(args: argparse.Namespace) -> int:
                 for name in artifacts
             },
             "row_inventory_recomputed": True,
-            "paired_tensor_hashes_recomputed": True,
-            "timing_inventory_recomputed": True,
-            "zero_noop_recomputed": True,
-            "haar_and_qmf_partition_contracts_recomputed_from_sealed_receipt": True,
+            "paired_stored_tensor_hash_equality_revalidated": True,
+            "timing_row_inventory_and_summary_recomputed": True,
+            "zero_noop_stored_hash_and_metric_equality_revalidated": True,
+            "partition_contract_aggregate_receipts_revalidated": True,
             "basis_qualification_recomputed_from_sealed_receipt": True,
+            "basis_calibration_row_identity_inventory_and_bootstrap_recomputed": True,
             "role_scoped_row_access_receipts_validated": True,
             "post_selection_exploratory_dev_opened": True,
             "fresh_reserve_480_510_opened": False,
