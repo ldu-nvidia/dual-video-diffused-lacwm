@@ -71,9 +71,9 @@ action chunk (t). The nine-pose raw path is
   Q_i=(q_{i,4},a_{i,4,-1},a_{i,5,-1},\ldots,a_{i,11,-1}).
 \]
 
-No measured state at frames 5 through 12 and no future RGB are read by the
-cache predictor. Raw action samples are checked bit-exactly against the
-immutable cached generator input.
+No measured state value at frames 5 through 12 is indexed or enters the cache
+predictor, and no future RGB value is indexed. Raw action samples are checked
+bit-exactly against the immutable cached generator input.
 
 For each transition, every source-visible articulated robot pixel is
 back-projected into the source geometry, transported in its MuJoCo geom-local
@@ -130,6 +130,11 @@ Donors use fixed seed 20260831, are episode-disjoint, and are chosen within
 split without RGB or measured future state. Row lineage binds ordered clip ID,
 manifest index, action window/hash, observed state hash, calibration identity,
 camera eligibility, donor, pose path, tensor hashes, visibility, and latency.
+For `states.npz`, provenance records only absolute path, byte count, mtime,
+device, and inode—never a whole-file content digest—and enumerates the only
+indexed values: `joint_states[frame4]`, `gripper_states[frame4]`, and the
+registered `[start:stop)` joint/gripper action slices. The auditor rejects a
+state-file SHA field or any different slice declaration.
 Global metadata binds the immutable RGB/action hashes, source commit, official
 ABC commit, renderer prerequisite, row lineage, and all arrays. Protected test
 data are unsupported.
