@@ -23,7 +23,9 @@ from tools.corrected_renderer_attribution import (
     read_json,
     read_jsonl,
     require_false_flags,
+    seal,
     sha256_file,
+    write_json,
 )
 
 
@@ -266,7 +268,9 @@ def audit(output: Path, registered_source: Path) -> dict[str, Any]:
             ("provenance_rows", provenance_rows),
         )
     )
-    return {
+    return seal({
+        "schema_version": 1,
+        "kind": "corrected_renderer_attribution_hardened_audit",
         "status": "hardened_audit_passed",
         "decision": analysis["decision"],
         "registration_identity_sha256": registration["identity_sha256"],
@@ -280,15 +284,23 @@ def audit(output: Path, registered_source: Path) -> dict[str, Any]:
         "effects_recomputed": len(recomputed_effects),
         "gates_recomputed": len(recomputed_gates),
         "explicit_false_flags": false_flags,
-    }
+        "auditor_source_sha256": sha256_file(Path(__file__).resolve()),
+        "protected_test_accessed": False,
+    })
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--registered-source", type=Path, required=True)
+    parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
-    print(json.dumps(audit(args.output, args.registered_source), indent=2, sort_keys=True))
+    result = audit(args.output, args.registered_source)
+    if args.receipt is not None:
+        if args.receipt.exists():
+            raise FileExistsError(args.receipt)
+        write_json(args.receipt, result)
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
