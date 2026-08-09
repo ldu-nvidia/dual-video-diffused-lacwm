@@ -914,8 +914,19 @@ def _load_model(
         crop_size=256,
     )
     torch.cuda.synchronize(torch_device)
+    device_index = (
+        torch_device.index
+        if torch_device.index is not None
+        else torch.cuda.current_device()
+    )
+    device_properties = torch.cuda.get_device_properties(device_index)
     return encoder, predictor, transform, {
         "device": str(torch_device),
+        "gpu_name": str(device_properties.name),
+        "gpu_compute_capability": list(torch.cuda.get_device_capability(device_index)),
+        "gpu_total_memory_bytes": int(device_properties.total_memory),
+        "torch_version": str(torch.__version__),
+        "torch_cuda_version": str(torch.version.cuda),
         "parameter_storage_dtype": "float32",
         "forward_autocast_dtype": dtype_name,
         "load_seconds": time.perf_counter() - load_start,
@@ -1209,8 +1220,14 @@ def _summarize(
         "encoder_p95_ms": 1000.0 * float(np.quantile([row["encoder_seconds"] for row in timings], 0.95)),
         "teacher_forced_control_batch_mean_ms": 1000.0
         * float(np.mean([row["teacher_forced_batch_seconds"] for row in timings])),
+        "teacher_forced_control_batch_amortized_per_condition_mean_ms": 1000.0
+        * float(np.mean([row["teacher_forced_batch_seconds"] for row in timings]))
+        / len(CONTROL_NAMES),
         "causal_control_batch_total_mean_ms": 1000.0
         * float(np.mean([row["causal_batch_total_seconds"] for row in timings])),
+        "causal_control_batch_total_amortized_per_condition_mean_ms": 1000.0
+        * float(np.mean([row["causal_batch_total_seconds"] for row in timings]))
+        / len(CONTROL_NAMES),
         "causal_per_call_mean_ms": 1000.0
         * float(
             np.mean(
@@ -1221,6 +1238,18 @@ def _summarize(
                 ]
             )
         ),
+        "causal_per_call_amortized_per_condition_mean_ms": 1000.0
+        * float(
+            np.mean(
+                [
+                    value
+                    for row in timings
+                    for value in row["causal_batch_call_seconds"]
+                ]
+            )
+        )
+        / len(CONTROL_NAMES),
+        "control_batch_size": len(CONTROL_NAMES),
     }
     max_reintegration_error = max(
         float(row["aligned_pose_reintegration_max_abs"]) for row in timings
@@ -1295,6 +1324,25 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         loaded = dict(_load_native_arrays(clip))
         loaded["episode_index"] = clip.episode_index
         payloads.append(loaded)
+    warmup_started = time.perf_counter()
+    _evaluate_clip(
+        -1,
+        cohort[0],
+        payloads[0],
+        payloads[1],
+        encoder=encoder,
+        predictor=predictor,
+        transform=transform,
+        device=args.device,
+        dtype_name=args.dtype,
+        max_horizon=args.max_horizon,
+    )
+    import torch
+
+    torch.cuda.synchronize(torch.device(args.device))
+    warmup_seconds = time.perf_counter() - warmup_started
+    torch.cuda.reset_peak_memory_stats(torch.device(args.device))
+    print("completed one excluded full-shape latency warmup", flush=True)
     rows: list[dict[str, Any]] = []
     timings: list[dict[str, Any]] = []
     for index, clip in enumerate(cohort):
@@ -1316,6 +1364,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         rows.extend(clip_rows)
         timings.append(timing)
         print(f"evaluated {index + 1}/{len(cohort)} native DROID clips", flush=True)
+    memory = {
+        "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(args.device)),
+        "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(args.device)),
+    }
     per_clip_path = output / "per_clip_metrics.jsonl"
     timings_path = output / "timings.jsonl"
     write_jsonl(per_clip_path, rows)
@@ -1329,6 +1381,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "clip_count": len(cohort),
             "row_count": len(rows),
             "model": model_load,
+            "warmup": {
+                "full_shape_excluded_from_latency_and_quality": True,
+                "seconds": warmup_seconds,
+            },
+            "memory": memory,
             **_summarize(rows, timings),
             "protected_test_accessed": False,
             "wan_integration_authorized": False,
