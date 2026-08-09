@@ -311,8 +311,9 @@ and file SHA-256 is
 `29cbc6c4e0df57a51cd50d11eaac8c38e19c36f48942e7a8fd3a0927a3f47233`.
 
 Stored cache telemetry gives only a component-level speed bound. The sum of
-nine per-pose renderer timers for one aligned trajectory averaged 51.16 ms in train and 44.48 ms in
-validation (p95 57.62 / 58.28 ms) on the allocated B200. This excludes state
+nine per-pose renderer timers for one aligned trajectory averaged 51.16 ms in
+train and 44.48 ms in validation (p95 57.62 / 58.28 ms) on the allocated B200.
+This excludes state
 ingestion, recurrent prediction, packing, Wan, decode, and serving overhead;
 the cache job also rendered a hold control. It therefore neither establishes
 5--10 Hz generation nor rules it out. The earlier measured NFE-1 Wan path, not
@@ -334,8 +335,9 @@ enough to survive uncertainty and complete latency accounting.
 
 The recurrent delta-response robot-state predictor has now cleared the causal
 renderer prerequisite. The exact fit384 model was frozen and evaluated on the
-complete 55-episode renderer-endpoint-unopened D405 census. Mean rendered robot-flow EPE
-fell from `4.628886` to `2.690298` pixels versus raw planned commands
+complete 55-episode renderer-endpoint-unopened D405 census. Mean rendered
+robot-flow EPE fell from `4.628886` to `2.690298` pixels versus raw planned
+commands
 (`+41.880%`), from `4.120211` to `2.690298` versus absolute ridge (`+34.705%`),
 and from `22.943593` to `2.690298` versus episode-shuffled commands
 (`+88.274%`). All three flow-superiority and all six spatial non-inferiority
