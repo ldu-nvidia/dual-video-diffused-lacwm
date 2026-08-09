@@ -67,7 +67,7 @@ git -C "$REPO_ROOT" merge-base --is-ancestor \
 readonly ARTIFACT_PREFIX="/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train/artifacts/dual_video_diffusion/vpm_invertible_multirate_probe/"
 [[ "$OUTPUT_DIR" == "$ARTIFACT_PREFIX"* ]] || \
   die "output must use the registered Lustre ILSF-2 artifact root"
-EXPECTED_BASENAME="vpm-invertible-multirate-dev64-seed20261101-${EXPECTED_COMMIT:0:7}-v1"
+EXPECTED_BASENAME="vpm-invertible-multirate-dev64-seed20261101-${EXPECTED_COMMIT:0:7}-v2"
 [[ "$(basename "$OUTPUT_DIR")" == "$EXPECTED_BASENAME" ]] || \
   die "output basename must be $EXPECTED_BASENAME"
 
@@ -79,6 +79,14 @@ VPM_SNAPSHOT="$("$PYTHON_BIN" -c \
 [[ "$(sha256sum "$VPM_SNAPSHOT" | awk '{print $1}')" == "$VPM_SHA256" ]] || \
   die "registered VPM snapshot SHA-256 differs"
 
+RUNTIME_RECORD="${OUTPUT_DIR}.runtime_verification.json"
+PATH_GUARD="$REPO_ROOT/tools/slurm/vpm_invertible_multirate_paths.sh"
+[[ -f "$PATH_GUARD" && ! -L "$PATH_GUARD" ]] || die "path guard is invalid"
+source "$PATH_GUARD"
+prepare_vpm_invertible_multirate_artifact_parent \
+  "$OUTPUT_DIR" "$RUNTIME_RECORD" "$ARTIFACT_PREFIX" || \
+  die "artifact parent/freshness guard failed"
+
 export WAN_DIR="$WAN_DIR_VALUE"
 export VIDEOX_HOME="$VIDEOX_HOME_VALUE"
 export LACWM_PYTHON="$PYTHON_BIN"
@@ -88,7 +96,6 @@ unset WANDB_RUN_ID WANDB_RUN_GROUP WANDB_NAME WANDB_RESUME WANDB_TAGS
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 source "$REPO_ROOT/tools/env/activate_b200.sh"
 
-RUNTIME_RECORD="${OUTPUT_DIR}.runtime_verification.json"
 [[ ! -e "$RUNTIME_RECORD" && ! -L "$RUNTIME_RECORD" ]] || \
   die "runtime record must be fresh"
 (set -o noclobber; "$PYTHON_BIN" "$REPO_ROOT/tools/env/verify_b200_runtime.py" \
