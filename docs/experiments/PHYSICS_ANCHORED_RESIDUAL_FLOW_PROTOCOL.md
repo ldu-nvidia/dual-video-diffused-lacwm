@@ -170,6 +170,28 @@ raw command and the current ridge while retaining silhouette/RGB gains. Full
 metrics, artifacts, audit identities, timing and limitations are in
 `CORRECTED_RENDERER_ATTRIBUTION_RESULT.md`.
 
+### Gate 0d: fresh trajectory-consistent and raw-scaffold gate (2026-08-08)
+
+The fresh, prospectively selected fit384/score24 study returned
+`GO_raw_geometry_scaffold_pass` **only**. The recurrent delta-response model
+fixed Gate-0c's motion defect: robot-flow EPE fell 47.25% versus raw command and
+40.78% versus the absolute ridge, with Holm-positive lower bounds and all 24
+clips favorable in both contrasts. It nevertheless failed its predeclared
+all-endpoint family because RGB-edge retention versus raw/absolute and
+silhouette/IoU retention versus absolute did not all have nonnegative paired
+lower bounds. The transition-local absolute-anchor/raw-delta hybrid failed its
+5% flow margin and absolute-ridge contrast. Neither learned arm is authorized
+for Wan.
+
+The separately registered native raw geometry fallback passed. Raw flow beat a
+same-stratum shuffled complete raw trajectory by 75.63% and hold-current by
+38.25%, with Holm-positive bounds, at least 75% favorable clips, and positive
+silhouette/RGB/IoU controls. Gate 1 may therefore screen **native raw geometry
+only**, with equal Wan calls against off, shuffled, wrong-time and hold controls.
+This is renderer attribution, not generated-video evidence. Full metrics,
+freshness proof, multiplicity control and audit identities are in
+`TRAJECTORY_CONSISTENT_RENDERER_GATE_RESULT.md`.
+
 ## Gate 1: fixed causal flow conditioning
 
 Use one parent snapshot, identical data order/noise/optimizer, equal trainable
@@ -183,6 +205,12 @@ parameter count, equal updates, and equal Wan calls. The mandatory arms are:
 | `FLOW-TIMESHIFT` | same episode, wrong trajectory time | temporal attribution |
 | `FLOW-WRONG-CAL` | deliberately perturbed extrinsic | geometry attribution |
 | `FLOW-ORACLE` | target-video full-scene flow | non-deployable privileged diagnostic only |
+
+For the next confirmatory execution authorized by Gate 0d, `FLOW-CAUSAL` means
+the **native raw-command** rendered field. The recurrent and hybrid corrections
+are excluded. Add a `FLOW-HOLD` arm using the current measured pose with zero
+future robot motion. Keep any oracle arm diagnostic and outside deployable
+family selection.
 
 Evaluate NFE 1/2/4 without spending a transformer call on flow. Register one
 primary endpoint before training. A reasonable development gate is:
