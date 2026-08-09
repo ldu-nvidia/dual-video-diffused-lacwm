@@ -134,6 +134,31 @@ rows remain in the train stream with exact-zero fields and an explicit
 ineligible flag; the primary evaluation population is the prospectively
 registered D405 subset.
 
+Registration also runs a pre-output renderer-runtime qualification in an
+isolated cache-only virtual environment. Its lexical `bin/python` symlink,
+complete symlink chain and resolved CPython binary, `pyvenv.cfg`, package
+module files, and the NumPy 2.0.1, MCAP 1.4.0, and MuJoCo 3.3.7 distribution
+`RECORD` files are content-bound. The active calibration/compression stack is
+also direct-import and RECORD-bound: mcap-protobuf-support 0.5.4,
+protobuf 7.35.1, zstandard 0.25.0, and the alternate MCAP codec lz4 4.4.5.
+The qualification requires user-site isolation, `MUJOCO_GL=egl`, exact
+imports/versions, a successful 8x8 offscreen render, and a successful decode
+of the deterministic first registered train-D405 `/top-camera-info` message
+from its zstd-compressed MCAP. The LACWM registration process and cache child
+must produce the identical calibration identity. Every unambiguous file with
+a declared RECORD SHA-256 is
+rehashed and size-checked, including all native MuJoCo/NumPy libraries;
+existing unhashed RECORD entries are also content-bound. The sole allowed
+ambiguity is NumPy 2.0.1's duplicate generated `conv_template` bytecode row,
+whose exact unhashed declaration, stale declared hash/size, and observed
+hash/size are source-pinned. Zero other mismatches are accepted. Counts, total
+bytes, and deterministic inventory identities are sealed. Each cache builder
+must reproduce the identical receipt in its current process before creating
+its split directory. Registration,
+auditing/sealing, training, and evaluation remain in the separately registered
+full LACWM runtime; the cache-only interpreter is never resolved before
+execution and is used as the main process only for the two render jobs.
+
 Four compact arrays are materialized and independently reconstructed by the
 cache auditor:
 
