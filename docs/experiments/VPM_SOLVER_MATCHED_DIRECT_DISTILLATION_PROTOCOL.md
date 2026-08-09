@@ -169,10 +169,23 @@ d79c3699f0c68dcd17321fcb0ea2846fca4d96f8c815f91dff02a19d3140787f
 
 canonical model-state SHA-256
 d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0
+
+runtime tensor-state SHA-256
+82ffa76e99574f5202831897411e4b22eb281c1e2512dc358238bef72d5a4d5a
 ```
 
-The older `f67c7bae...` snapshot is forbidden. Registration must bind the
-parent resolved config and strict-load every model key. External teacher/EMA
+These are two hashes of the same named tensors with different, explicitly
+sealed framing algorithms. The canonical lineage value is produced by
+`snapshot_model_state_receipt_v1`; the runtime value is produced by
+`tensor_state_sha256_v1`. They are deliberately unequal and must never be
+compared across algorithms. Registration recomputes both hashes over the raw
+`snapshot["model"]` mapping. The memory smoke and trainer additionally require
+the raw parent state, strictly loaded online model, frozen teacher, and initial
+EMA target to match the runtime value exactly; every receipt names its hash
+algorithm.
+
+The older `f67c7bae...` snapshot is forbidden. Registration also binds the
+parent resolved config and strict-loads every model key. External teacher/EMA
 copies are created only after this load, excluded from the optimizer's
 parameter groups, and never reachable from the public deployment sampler.
 Student checkpoints contain separately labelled online and EMA states; the

@@ -50,6 +50,14 @@ def _registration(tmp_path: Path) -> dict:
         "wandb": {"enabled": False, "writes": 0},
         "jobs_submitted": 0,
         "protected_test_accessed": False,
+        "parent": {
+            **pilot.parent_model_state_lineage(),
+            "model_state_hash_receipt": {
+                **pilot.parent_model_state_lineage(),
+                "state_tensors": 1,
+                "state_values": 1,
+            },
+        },
         "runtime": {
             "python": str(python),
             "python_target": pilot.file_record(python),
@@ -76,6 +84,40 @@ def test_endpoint_factorial_and_resource_arithmetic_are_frozen() -> None:
     assert plan["maximum_reserved_b200_hours"] == expected == 113
     assert plan["wandb"] is False
     assert plan["requeue"] is False
+
+
+def test_parent_dual_hash_lineage_names_noninterchangeable_algorithms() -> None:
+    lineage = pilot.parent_model_state_lineage()
+    assert lineage == {
+        "canonical_model_state_sha256": (
+            "d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0"
+        ),
+        "canonical_hash_algorithm": "snapshot_model_state_receipt_v1",
+        "runtime_tensor_state_sha256": (
+            "82ffa76e99574f5202831897411e4b22eb281c1e2512dc358238bef72d5a4d5a"
+        ),
+        "runtime_hash_algorithm": "tensor_state_sha256_v1",
+    }
+    assert (
+        lineage["canonical_model_state_sha256"]
+        != lineage["runtime_tensor_state_sha256"]
+    )
+
+
+def test_smoke_trainer_and_evaluator_use_runtime_hash_for_loaded_state() -> None:
+    root = Path(pilot.__file__).resolve().parents[1]
+    smoke = (root / "tools/adjacent_consistency_memory_smoke.py").read_text()
+    trainer = (root / "robot_wm/utils/adjacent_consistency_trainer.py").read_text()
+    evaluate = (root / "tools/adjacent_consistency_evaluate.py").read_text()
+    for source in (smoke, trainer):
+        assert "require_model_state_hashes(" in source
+        assert "PARENT_RUNTIME_TENSOR_STATE_SHA256" in source
+    parent_branch = evaluate[
+        evaluate.index('if endpoint.checkpoint == "parent"') :
+        evaluate.index("else:", evaluate.index('if endpoint.checkpoint == "parent"'))
+    ]
+    assert "PARENT_RUNTIME_TENSOR_STATE_SHA256" in parent_branch
+    assert "PARENT_CANONICAL_MODEL_STATE_SHA256" not in parent_branch
 
 
 def test_registration_artifact_allowlist_is_exact() -> None:

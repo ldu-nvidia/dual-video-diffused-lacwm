@@ -106,6 +106,14 @@ def _read_trace(
         or header.get("parent_run_identity_sha256") != pilot.PARENT_RUN_IDENTITY_SHA256
         or header.get("parent_canonical_model_state_sha256")
         != pilot.PARENT_CANONICAL_MODEL_STATE_SHA256
+        or header.get("parent_canonical_model_state_hash_algorithm")
+        != pilot.PARENT_CANONICAL_MODEL_STATE_HASH_ALGORITHM
+        or header.get("parent_runtime_tensor_state_sha256")
+        != pilot.PARENT_RUNTIME_TENSOR_STATE_SHA256
+        or header.get("parent_runtime_tensor_state_hash_algorithm")
+        != pilot.PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM
+        or header.get("parent_model_state_hash_receipt")
+        != registration.get("parent", {}).get("model_state_hash_receipt")
         or header.get("parent_resolved_config_sha256")
         != pilot.PARENT_RESOLVED_CONFIG_SHA256
         or header.get("parent_training_source_commit")
@@ -184,6 +192,12 @@ def _validate_completion(
         or trace_complete.get("run_identity_sha256") != expected_identity
         or trace_complete.get("resolved_arm_config_semantic_sha256")
         != registration["arm_resolved_configs"][arm.code]["semantic_sha256"]
+        or trace_complete.get("parent_canonical_model_state_sha256")
+        != pilot.PARENT_CANONICAL_MODEL_STATE_SHA256
+        or trace_complete.get("parent_runtime_tensor_state_sha256")
+        != pilot.PARENT_RUNTIME_TENSOR_STATE_SHA256
+        or trace_complete.get("parent_model_state_hash_receipt")
+        != header.get("parent_model_state_hash_receipt")
         or trace_complete.get("initial_rank_state_receipts")
         != header.get("initial_rank_state_receipts")
     ):
@@ -357,7 +371,7 @@ def _state_record(
         path = Path(registration["parent"]["snapshot"]["path"])
         snapshot = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         state = snapshot.get("model")
-        expected = pilot.PARENT_CANONICAL_MODEL_STATE_SHA256
+        expected = pilot.PARENT_RUNTIME_TENSOR_STATE_SHA256
     else:
         record = training[endpoint.checkpoint]
         snapshot = torch.load(
@@ -376,6 +390,12 @@ def _state_record(
             != registration["identity_sha256"]
             or snapshot.get("resolved_arm_config_semantic_sha256")
             != registration["arm_resolved_configs"][arm.code]["semantic_sha256"]
+            or snapshot.get("parent_canonical_model_state_sha256")
+            != pilot.PARENT_CANONICAL_MODEL_STATE_SHA256
+            or snapshot.get("parent_runtime_tensor_state_sha256")
+            != pilot.PARENT_RUNTIME_TENSOR_STATE_SHA256
+            or snapshot.get("parent_model_state_hash_receipt")
+            != registration.get("parent", {}).get("model_state_hash_receipt")
             or snapshot.get("teacher_serialized") is not False
             or any(key in snapshot for key in ("ema", "model_ema", "ema_model"))
         ):

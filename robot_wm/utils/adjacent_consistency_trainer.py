@@ -18,11 +18,15 @@ from lam.adjacent_consistency_model import (
     AdjacentConsistencyVPM,
 )
 from robot_wm.modeling.low_nfe.adjacent_consistency import (
+    CANONICAL_MODEL_STATE_HASH_ALGORITHM,
+    RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
     ema_update_module_,
     module_state_receipt,
     receipt_dict,
+    require_model_state_hashes,
     state_probe,
     tensor_sha256,
+    tensor_state_sha256,
 )
 from robot_wm.utils.trainer import Trainer
 
@@ -39,6 +43,11 @@ PARENT_RUN_IDENTITY_SHA256 = (
 PARENT_CANONICAL_MODEL_STATE_SHA256 = (
     "d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0"
 )
+PARENT_RUNTIME_TENSOR_STATE_SHA256 = (
+    "82ffa76e99574f5202831897411e4b22eb281c1e2512dc358238bef72d5a4d5a"
+)
+PARENT_CANONICAL_MODEL_STATE_HASH_ALGORITHM = "snapshot_model_state_receipt_v1"
+PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM = "tensor_state_sha256_v1"
 PARENT_RESOLVED_CONFIG_SHA256 = (
     "ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38"
 )
@@ -71,6 +80,15 @@ TREATMENT_FIELDS = (
     "ema_probe_before_update",
 )
 AUDIT_FIELDS = PAIRED_INVARIANT_FIELDS + TREATMENT_FIELDS
+
+
+def _parent_model_state_lineage() -> dict[str, str]:
+    return {
+        "canonical_model_state_sha256": PARENT_CANONICAL_MODEL_STATE_SHA256,
+        "canonical_hash_algorithm": PARENT_CANONICAL_MODEL_STATE_HASH_ALGORITHM,
+        "runtime_tensor_state_sha256": PARENT_RUNTIME_TENSOR_STATE_SHA256,
+        "runtime_hash_algorithm": PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -291,6 +309,19 @@ class AdjacentConsistencyTrainer(Trainer):
             != self._acd_source_commit
         ):
             raise RuntimeError("registered source commit differs from live source")
+        registered_parent = self._acd_registration.get("parent")
+        if (
+            not isinstance(registered_parent, Mapping)
+            or any(
+                registered_parent.get(key) != value
+                for key, value in _parent_model_state_lineage().items()
+            )
+            or CANONICAL_MODEL_STATE_HASH_ALGORITHM
+            != PARENT_CANONICAL_MODEL_STATE_HASH_ALGORITHM
+            or RUNTIME_TENSOR_STATE_HASH_ALGORITHM
+            != PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM
+        ):
+            raise RuntimeError("registered dual model-state lineage differs")
         model = kwargs.get("model") if "model" in kwargs else args[0]
         config = kwargs.get("config") if "config" in kwargs else args[6]
         if not isinstance(model, AdjacentConsistencyVPM):
@@ -331,6 +362,13 @@ class AdjacentConsistencyTrainer(Trainer):
             raise RuntimeError("ACD parent snapshot environment identity differs")
         if os.environ.get("ACD_P0_PARENT_CONFIG_SHA256") != PARENT_RESOLVED_CONFIG_SHA256:
             raise RuntimeError("ACD parent config environment identity differs")
+        if (
+            os.environ.get("ACD_P0_PARENT_CANONICAL_MODEL_STATE_SHA256")
+            != PARENT_CANONICAL_MODEL_STATE_SHA256
+            or os.environ.get("ACD_P0_PARENT_RUNTIME_TENSOR_STATE_SHA256")
+            != PARENT_RUNTIME_TENSOR_STATE_SHA256
+        ):
+            raise RuntimeError("ACD parent dual-hash environment identity differs")
         observed_snapshot = _sha256(load_path)
         if observed_snapshot == LEGACY_REJECTED_SNAPSHOT_SHA256:
             raise RuntimeError("legacy f67 VPM is explicitly forbidden")
@@ -360,6 +398,19 @@ class AdjacentConsistencyTrainer(Trainer):
         ]
         if mismatched:
             raise RuntimeError(f"faithful parent tensor schema differs: {mismatched[:8]}")
+        try:
+            self._parent_state_hash_receipt = require_model_state_hashes(
+                parent_state,
+                expected_canonical_sha256=PARENT_CANONICAL_MODEL_STATE_SHA256,
+                expected_runtime_sha256=PARENT_RUNTIME_TENSOR_STATE_SHA256,
+                label="trainer raw parent model state",
+            )
+        except Exception as exc:
+            raise RuntimeError("trainer raw parent model-state hashes differ") from exc
+        if self._parent_state_hash_receipt != registered_parent.get(
+            "model_state_hash_receipt"
+        ):
+            raise RuntimeError("runtime raw parent hash receipt differs from registration")
         if list(config.get("exclude_keys", [])):
             raise RuntimeError("ACD-P0 strictly loads every parent model key")
         if int(config.get("max_iter", -1)) != 400:
@@ -425,11 +476,19 @@ class AdjacentConsistencyTrainer(Trainer):
         }
         if len(initial_full_hashes) != 1:
             raise RuntimeError("teacher/student/EMA full states are not bit-exact")
-        if (
-            self._teacher_initial_state_receipt["sha256"]
-            != PARENT_CANONICAL_MODEL_STATE_SHA256
+        if any(
+            receipt.get("hash_algorithm")
+            != PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM
+            or receipt.get("sha256") != PARENT_RUNTIME_TENSOR_STATE_SHA256
+            for receipt in (
+                self._student_initial_state_receipt,
+                self._teacher_initial_state_receipt,
+                self._target_initial_state_receipt,
+            )
         ):
-            raise RuntimeError("loaded teacher full state differs from canonical parent")
+            raise RuntimeError(
+                "strictly loaded student/teacher/EMA runtime state differs from parent"
+            )
         initial_counts = {
             tuple(
                 receipt[key]
@@ -510,6 +569,16 @@ class AdjacentConsistencyTrainer(Trainer):
                 "parent_snapshot_sha256": PARENT_SNAPSHOT_SHA256,
                 "parent_run_identity_sha256": PARENT_RUN_IDENTITY_SHA256,
                 "parent_canonical_model_state_sha256": PARENT_CANONICAL_MODEL_STATE_SHA256,
+                "parent_canonical_model_state_hash_algorithm": (
+                    PARENT_CANONICAL_MODEL_STATE_HASH_ALGORITHM
+                ),
+                "parent_runtime_tensor_state_sha256": (
+                    PARENT_RUNTIME_TENSOR_STATE_SHA256
+                ),
+                "parent_runtime_tensor_state_hash_algorithm": (
+                    PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM
+                ),
+                "parent_model_state_hash_receipt": self._parent_state_hash_receipt,
                 "parent_resolved_config": str(resolved_config.resolve(strict=True)),
                 "parent_resolved_config_sha256": PARENT_RESOLVED_CONFIG_SHA256,
                 "parent_training_source_commit": PARENT_TRAINING_SOURCE_COMMIT,
@@ -564,7 +633,28 @@ class AdjacentConsistencyTrainer(Trainer):
             map_location=f"cuda:{self.local_rank}",
             weights_only=True,
         )
-        self.model.module.load_state_dict(snapshot["model"], strict=True)
+        parent_state = snapshot.get("model")
+        if not isinstance(parent_state, dict):
+            raise RuntimeError("ACD strict-load snapshot lacks model state")
+        try:
+            receipt = require_model_state_hashes(
+                parent_state,
+                expected_canonical_sha256=PARENT_CANONICAL_MODEL_STATE_SHA256,
+                expected_runtime_sha256=PARENT_RUNTIME_TENSOR_STATE_SHA256,
+                label="strict-load parent model state",
+            )
+        except Exception as exc:
+            raise RuntimeError("ACD strict-load parent model-state hashes differ") from exc
+        if receipt != self._parent_state_hash_receipt:
+            raise RuntimeError("ACD strict-load parent receipt changed after preflight")
+        incompatible = self.model.module.load_state_dict(parent_state, strict=True)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise RuntimeError("ACD strict parent load returned incompatible keys")
+        if (
+            tensor_state_sha256(self.model.module.state_dict())
+            != PARENT_RUNTIME_TENSOR_STATE_SHA256
+        ):
+            raise RuntimeError("ACD strictly loaded model runtime state differs")
 
     def initialize_wandb(self, cfg) -> None:
         """Prepared ACD-P0 source never writes external telemetry."""
@@ -701,6 +791,13 @@ class AdjacentConsistencyTrainer(Trainer):
                 "acd_arm": self._acd_arm,
                 "target_model": self.target_model.state_dict(),
                 "teacher_snapshot_sha256": PARENT_SNAPSHOT_SHA256,
+                "parent_canonical_model_state_sha256": (
+                    PARENT_CANONICAL_MODEL_STATE_SHA256
+                ),
+                "parent_runtime_tensor_state_sha256": (
+                    PARENT_RUNTIME_TENSOR_STATE_SHA256
+                ),
+                "parent_model_state_hash_receipt": self._parent_state_hash_receipt,
                 "teacher_initial_probe_sha256": self._teacher_initial_probe,
                 "teacher_final_probe_sha256": tensor_sha256(
                     state_probe(self.teacher_model)
@@ -807,6 +904,15 @@ class AdjacentConsistencyTrainer(Trainer):
                     "trace_sha256": _sha256(self._trace_path),
                     "trace_update_rows": self._trace_update_rows,
                     "trace_final_record_sha256": self._trace_chain_sha256,
+                    "parent_canonical_model_state_sha256": (
+                        PARENT_CANONICAL_MODEL_STATE_SHA256
+                    ),
+                    "parent_runtime_tensor_state_sha256": (
+                        PARENT_RUNTIME_TENSOR_STATE_SHA256
+                    ),
+                    "parent_model_state_hash_receipt": (
+                        self._parent_state_hash_receipt
+                    ),
                     "teacher_initial_probe_sha256": self._teacher_initial_probe,
                     "teacher_final_probe_sha256": tensor_sha256(
                         state_probe(self.teacher_model)

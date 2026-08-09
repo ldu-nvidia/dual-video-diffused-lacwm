@@ -64,7 +64,12 @@ memory-smoke submission plan with
 authorization receipt for phase `memory_smoke`. The Slurm job executes one
 synthetic `[1,13,3,180,960]` forward/backward/optimizer/EMA transaction with
 three full model copies on one B200. It opens no training/validation data and
-must retain at least 16 GiB headroom with at most 90% reserved memory.
+must retain at least 16 GiB headroom with at most 90% reserved memory. Before
+the transaction it independently recomputes the parent's canonical
+`snapshot_model_state_receipt_v1` hash (`d123…`) and runtime
+`tensor_state_sha256_v1` hash (`82ff…`), then requires the strictly loaded
+student, teacher, and EMA target to match `82ff…`. Comparing a runtime hash to
+the canonical value is a contract failure, not a checkpoint mismatch.
 
 After it passes, create the registration-ready seal:
 
@@ -84,7 +89,8 @@ The expected status is `READY_FOR_REGISTRATION`.
 
 Registration byte-hashes the actual train RGB/action arrays, validates their
 NumPy schemas, keeps validation bytes deferred, composes both full resolved
-Hydra jobs, and binds every semantic field into the arm identities.
+Hydra jobs, binds every semantic field into the arm identities, and seals both
+non-interchangeable parent model-state hashes plus their algorithm names.
 
 ```bash
 "$ACD_PYTHON" "$ACD_SOURCE/tools/low_nfe_direct_baseline.py" register \
@@ -122,7 +128,9 @@ commit, registration identity, phase, and arm and must still be fresh. The
 wrapper revalidates registration, exports its exact arm/config identities, and
 passes the registered save and visualization paths. Rank zero rehashes all
 train RGB/action bytes before each arm; all ranks compare full initial/final
-state receipts. Either mismatch stops before useful training.
+state receipts. The trainer rechecks the raw parent under both algorithms and
+the strictly loaded model/teacher/EMA state under the runtime algorithm before
+the first update. Either mismatch stops before useful training.
 
 Evaluation authorization is accepted only after both independent 400-update
 completion receipts exist. The evaluator materializes and hashes every

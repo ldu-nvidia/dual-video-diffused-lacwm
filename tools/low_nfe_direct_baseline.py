@@ -43,6 +43,11 @@ PARENT_RUN_IDENTITY_SHA256 = (
 PARENT_CANONICAL_MODEL_STATE_SHA256 = (
     "d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0"
 )
+PARENT_RUNTIME_TENSOR_STATE_SHA256 = (
+    "82ffa76e99574f5202831897411e4b22eb281c1e2512dc358238bef72d5a4d5a"
+)
+PARENT_CANONICAL_MODEL_STATE_HASH_ALGORITHM = "snapshot_model_state_receipt_v1"
+PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM = "tensor_state_sha256_v1"
 PARENT_RESOLVED_CONFIG_SHA256 = (
     "ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38"
 )
@@ -261,6 +266,28 @@ EXACT_SOURCE_TESTS = (
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parent_model_state_lineage() -> dict[str, str]:
+    """Return the two named, deliberately non-interchangeable parent hashes."""
+
+    return {
+        "canonical_model_state_sha256": PARENT_CANONICAL_MODEL_STATE_SHA256,
+        "canonical_hash_algorithm": PARENT_CANONICAL_MODEL_STATE_HASH_ALGORITHM,
+        "runtime_tensor_state_sha256": PARENT_RUNTIME_TENSOR_STATE_SHA256,
+        "runtime_hash_algorithm": PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
+    }
+
+
+def _require_parent_model_state_lineage(
+    value: Mapping[str, Any], *, label: str
+) -> None:
+    expected = parent_model_state_lineage()
+    if any(
+        value.get(key) != expected_value
+        for key, expected_value in expected.items()
+    ):
+        raise ACDPilotError(f"{label} dual model-state lineage differs")
 
 
 canonical_json = shared.canonical_json
@@ -637,11 +664,28 @@ def _validate_memory_receipt(path: Path, commit: str) -> dict[str, Any]:
         path.resolve(strict=True), "resolved memory-smoke receipt"
     )
     receipt = read_json(path, "ACD memory smoke receipt")
+    parent_state = receipt.get("parent_model_state_hash_receipt")
+    loaded_states = receipt.get("strict_loaded_runtime_tensor_state_sha256")
     if (
         not identity_valid(receipt)
         or receipt.get("kind") != "acd_p0_memory_smoke_receipt"
         or receipt.get("source_commit") != commit
         or receipt.get("parent_snapshot_sha256") != PARENT_SNAPSHOT_SHA256
+        or not isinstance(parent_state, Mapping)
+        or any(
+            parent_state.get(key) != value
+            for key, value in parent_model_state_lineage().items()
+        )
+        or not isinstance(parent_state.get("state_tensors"), int)
+        or parent_state.get("state_tensors", 0) <= 0
+        or not isinstance(parent_state.get("state_values"), int)
+        or parent_state.get("state_values", 0) <= 0
+        or loaded_states
+        != {
+            "student": PARENT_RUNTIME_TENSOR_STATE_SHA256,
+            "teacher": PARENT_RUNTIME_TENSOR_STATE_SHA256,
+            "ema_target": PARENT_RUNTIME_TENSOR_STATE_SHA256,
+        }
         or receipt.get("status") != "PASS"
         or receipt.get("model_copies") != 3
         or receipt.get("synthetic_full_geometry") != [1, 13, 3, 180, 960]
@@ -726,7 +770,7 @@ def command_readiness(args: argparse.Namespace) -> int:
                 "snapshot_sha256": PARENT_SNAPSHOT_SHA256,
                 "legacy_rejected_snapshot_sha256": LEGACY_REJECTED_SNAPSHOT_SHA256,
                 "run_identity_sha256": PARENT_RUN_IDENTITY_SHA256,
-                "canonical_model_state_sha256": PARENT_CANONICAL_MODEL_STATE_SHA256,
+                **parent_model_state_lineage(),
                 "resolved_config_sha256": PARENT_RESOLVED_CONFIG_SHA256,
                 "training_source_commit": PARENT_TRAINING_SOURCE_COMMIT,
             },
@@ -785,6 +829,10 @@ def _validate_registration_inputs(args: argparse.Namespace) -> tuple[dict[str, A
         or readiness.get("outcome_rows_opened") != 0
     ):
         raise ACDPilotError("exact-source readiness gate is not open")
+    parent = readiness.get("parent")
+    if not isinstance(parent, Mapping):
+        raise ACDPilotError("readiness parent lineage is absent")
+    _require_parent_model_state_lineage(parent, label="readiness parent")
     memory = _validate_memory_receipt(args.memory_smoke_receipt, args.expected_commit)
     if readiness.get("memory_smoke", {}).get("identity_sha256") != memory.get(
         "identity_sha256"
@@ -795,6 +843,12 @@ def _validate_registration_inputs(args: argparse.Namespace) -> tuple[dict[str, A
 
 def command_register(args: argparse.Namespace) -> int:
     import torch
+
+    from robot_wm.modeling.low_nfe.adjacent_consistency import (
+        CANONICAL_MODEL_STATE_HASH_ALGORITHM,
+        RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
+        require_model_state_hashes,
+    )
 
     source, readiness, memory = _validate_registration_inputs(args)
     output = args.output.expanduser()
@@ -816,15 +870,32 @@ def command_register(args: argparse.Namespace) -> int:
     snapshot = torch.load(
         snapshot_record["path"], map_location="cpu", weights_only=True, mmap=True
     )
+    parent_state = snapshot.get("model")
     if (
         snapshot.get("snapshot_schema_version") != 3
         or snapshot.get("run_identity_sha256") != PARENT_RUN_IDENTITY_SHA256
         or snapshot.get("_start_iter") != 1000
-        or not isinstance(snapshot.get("model"), Mapping)
+        or not isinstance(parent_state, Mapping)
         or any(key in snapshot for key in ("ema", "model_ema", "ema_model"))
     ):
         raise ACDPilotError("parent snapshot metadata differs")
-    del snapshot
+    if (
+        CANONICAL_MODEL_STATE_HASH_ALGORITHM
+        != PARENT_CANONICAL_MODEL_STATE_HASH_ALGORITHM
+        or RUNTIME_TENSOR_STATE_HASH_ALGORITHM
+        != PARENT_RUNTIME_TENSOR_STATE_HASH_ALGORITHM
+    ):
+        raise ACDPilotError("source model-state hash algorithm identity differs")
+    try:
+        parent_state_hash_receipt = require_model_state_hashes(
+            parent_state,
+            expected_canonical_sha256=PARENT_CANONICAL_MODEL_STATE_SHA256,
+            expected_runtime_sha256=PARENT_RUNTIME_TENSOR_STATE_SHA256,
+            label="registered raw parent model state",
+        )
+    except Exception as exc:
+        raise ACDPilotError("registered raw parent model-state hashes differ") from exc
+    del snapshot, parent_state
     train_rows = shared._manifest(
         args.train_manifest, "train", 512, TRAIN_MANIFEST_SHA256
     )
@@ -944,7 +1015,8 @@ def command_register(args: argparse.Namespace) -> int:
                 "snapshot": snapshot_record,
                 "resolved_config": config_record,
                 "run_identity_sha256": PARENT_RUN_IDENTITY_SHA256,
-                "canonical_model_state_sha256": PARENT_CANONICAL_MODEL_STATE_SHA256,
+                **parent_model_state_lineage(),
+                "model_state_hash_receipt": parent_state_hash_receipt,
                 "training_source_commit": PARENT_TRAINING_SOURCE_COMMIT,
                 "legacy_rejected_snapshot_sha256": LEGACY_REJECTED_SNAPSHOT_SHA256,
             },
@@ -1025,6 +1097,23 @@ def validate_registration(path: Path) -> dict[str, Any]:
         != expected_core_identity
     ):
         raise ACDPilotError("registration identity/protocol differs")
+    parent = value.get("parent")
+    if not isinstance(parent, Mapping):
+        raise ACDPilotError("registration parent lineage is absent")
+    _require_parent_model_state_lineage(parent, label="registration parent")
+    parent_receipt = parent.get("model_state_hash_receipt")
+    if (
+        not isinstance(parent_receipt, Mapping)
+        or any(
+            parent_receipt.get(key) != expected
+            for key, expected in parent_model_state_lineage().items()
+        )
+        or not isinstance(parent_receipt.get("state_tensors"), int)
+        or parent_receipt.get("state_tensors", 0) <= 0
+        or not isinstance(parent_receipt.get("state_values"), int)
+        or parent_receipt.get("state_values", 0) <= 0
+    ):
+        raise ACDPilotError("registration parent dual-hash receipt differs")
     python_path = Path(str(value.get("runtime", {}).get("python", "")))
     if (
         not python_path.is_absolute()
