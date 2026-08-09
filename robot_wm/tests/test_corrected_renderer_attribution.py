@@ -122,6 +122,17 @@ class CorrectedRendererAttributionTest(unittest.TestCase):
             far_depth=10.0,
         )
         self.assertLess(oracle_metrics["robot_flow_epe_px"], 1e-10)
+        below_threshold = robot_flow_error(
+            source,
+            candidate_target,
+            source,
+            oracle_target,
+            far_depth=10.0,
+            min_oracle_motion_px=1000.0,
+        )
+        self.assertIsNone(below_threshold["robot_flow_epe_px"])
+        self.assertEqual(below_threshold["oracle_moving_flow_sample_count"], 0.0)
+        self.assertFalse(below_threshold["flow_transition_scored"])
 
     def test_paired_difference_is_deterministic_and_respects_direction(self):
         reference = np.asarray([2.0, 3.0, 4.0, 5.0])

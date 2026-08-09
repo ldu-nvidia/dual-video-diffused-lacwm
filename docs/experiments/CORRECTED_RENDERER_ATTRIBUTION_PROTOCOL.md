@@ -123,6 +123,16 @@ is in-frame and whose oracle motion is at least 0.25 pixels. Source reprojection
 RMSE, valid support, in-frame support, and moving-pixel counts are mandatory
 audit fields.
 
+A transition with fewer than ten qualifying moving pixels has no identifiable
+robot-flow endpoint and is excluded symmetrically for every arm, rather than
+being assigned an arbitrary zero or failure value. Clip flow EPE is pooled by
+qualifying oracle pixel count across the remaining transitions; each clip must
+retain at least ten pixels or execution fails. This zero-support rule was
+frozen after a tooling-qualification attempt stopped before writing any frame
+metric or analysis because a fine-motion transition had zero pixels above the
+registered 0.25-pixel threshold. No renderer comparison outcome was available
+from that incomplete attempt.
+
 This is a rendered robot-geometry flow diagnostic. It excludes objects,
 contacts, occlusions by scene objects, camera distortion, and real optical-flow
 estimation.
