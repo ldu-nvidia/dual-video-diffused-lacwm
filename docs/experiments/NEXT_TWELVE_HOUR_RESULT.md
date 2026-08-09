@@ -297,6 +297,18 @@ is `f91debf83e94aa2a1a5792dca2850715eb9f0ed0c6fe975a8f4c14b15a10eab2`
 and file SHA-256 is
 `5adc647ccc912839d50e9278ae0be2922ece0546ec02660bb39d4fb49c666ba5`.
 
+A second posthoc cache-only diagnostic measured whether zero-training
+substitution would be grossly out of distribution for the raw-flow adapter.
+Recurrent versus raw aligned fields had mean cosine `0.9727` train / `0.9739`
+validation, support ratios `0.9903` / `0.9923`, and relative L2 distances
+`0.2115` / `0.2068`. Recurrent visible-motion magnitude averaged `0.8907` /
+`0.8876` of raw. This does not prove compatibility, but it rules out a simple
+support/scale collapse and makes a frozen-checkpoint substitution screen more
+diagnostic. Its identity is
+`589cf1398ad7014086fd59a81f66105177de1330b73b6e1fc443c00e5300b7c1`
+and file SHA-256 is
+`29cbc6c4e0df57a51cd50d11eaac8c38e19c36f48942e7a8fd3a0927a3f47233`.
+
 ## Claim boundary
 
 The completed screens support a narrower and more useful conclusion: clean
