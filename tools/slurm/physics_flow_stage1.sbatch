@@ -153,16 +153,22 @@ export PHYSICS_FLOW_STUDY_REGISTRATION_SHA256="$REGISTRATION_SHA256"
 export PHYSICS_FLOW_STUDY_REGISTRATION_IDENTITY_SHA256="$STUDY_IDENTITY"
 export PHYSICS_FLOW_RUN_ROOT="$TRAINING_ROOT"
 
-export WANDB_ENTITY=zijiandu
-export WANDB_PROJECT=dual-video-diffusion-private
-export WANDB_MODE=online
 export WANDB_SILENT=true
 unset WANDB_RUN_GROUP WANDB_GROUP WANDB_JOB_TYPE WANDB_NOTES
 STUDY_ROOT="$(dirname "$REGISTRATION")"
-export WANDB_DIR="$STUDY_ROOT/wandb"
-export WANDB_CACHE_DIR="$STUDY_ROOT/wandb-cache"
-export WANDB_CONFIG_DIR="$STUDY_ROOT/wandb-config"
-mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR"
+if [[ "$MODE" == "train" ]]; then
+  export WANDB_ENTITY=zijiandu
+  export WANDB_PROJECT=dual-video-diffusion-private
+  export WANDB_MODE=online
+  export WANDB_DIR="$STUDY_ROOT/wandb"
+  export WANDB_CACHE_DIR="$STUDY_ROOT/wandb-cache"
+  export WANDB_CONFIG_DIR="$STUDY_ROOT/wandb-config"
+  mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR"
+else
+  # Frozen-v7 evaluation is a new artifact lineage, not a training/W&B run.
+  export WANDB_MODE=disabled
+  unset WANDB_ENTITY WANDB_PROJECT WANDB_DIR WANDB_CACHE_DIR WANDB_CONFIG_DIR
+fi
 
 IPC_TMPDIR="/tmp/lacwm-physics-flow-${UID}-${SLURM_JOB_ID}-${MODE}"
 [[ ! -e "$IPC_TMPDIR" ]] || die "fresh IPC directory exists"
@@ -203,7 +209,8 @@ if [[ "$MODE" == "train" ]]; then
   echo "Raw physics-flow training complete: $ARM -> $RUN_DIR"
 else
   cd "$REPO_ROOT"
-  "$PYTHON_BIN" "$STAGE_TOOL" compare-traces --registration "$REGISTRATION" >/dev/null
+  "$PYTHON_BIN" "$STAGE_TOOL" compare-traces \
+    --registration "$REGISTRATION" --read-only >/dev/null
   "$PYTHON_BIN" "$PARENT_PARITY" \
     --registration "$REGISTRATION" \
     --output "$STUDY_ROOT/parent_sampler_parity.json" >/dev/null

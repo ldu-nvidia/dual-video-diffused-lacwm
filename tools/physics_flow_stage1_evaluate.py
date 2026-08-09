@@ -200,7 +200,7 @@ def _load_model(
     registration: Mapping[str, Any],
     arm: stage.Arm,
     device: Any,
-    pairing_artifact: Mapping[str, Any],
+    input_gate_artifact: Mapping[str, Any],
 ) -> tuple[Any, dict[str, Any]]:
     import torch
     from hydra.utils import instantiate
@@ -216,7 +216,9 @@ def _load_model(
         sys.path.insert(0, root)
     os.environ["WAN_DIR"] = registration["runtime"]["wan_dir"]
     os.environ["VIDEOX_HOME"] = registration["runtime"]["videox_home"]
-    run_dir = Path(registration["output_root"]) / "training" / arm.run_name
+    run_dir = Path(str(input_gate_artifact.get("run_dir", ""))).resolve(
+        strict=True
+    )
     config_path = run_dir / ".hydra" / "config.yaml"
     config_record = stage.file_record(config_path)
     config = OmegaConf.load(config_path)
@@ -260,12 +262,12 @@ def _load_model(
     snapshot_path = run_dir / "snapshot.pt"
     snapshot_record = _distributed_file_record(snapshot_path)
     if (
-        config_record != pairing_artifact.get("resolved_config")
-        or snapshot_record != pairing_artifact.get("snapshot")
-        or str(run_dir.resolve(strict=True)) != pairing_artifact.get("run_dir")
+        config_record != input_gate_artifact.get("resolved_config")
+        or snapshot_record != input_gate_artifact.get("snapshot")
+        or str(run_dir) != input_gate_artifact.get("run_dir")
     ):
         raise PhysicsFlowEvaluationError(
-            f"{arm.code} endpoint artifacts differ from repair gate"
+            f"{arm.code} endpoint artifacts differ from causal-input gate"
         )
     snapshot = torch.load(
         snapshot_path, map_location="cpu", weights_only=True, mmap=True
@@ -568,6 +570,7 @@ def _score_rows(
     device: Any,
     registration: Mapping[str, Any],
     model_artifacts: Mapping[str, Mapping[str, Any]],
+    input_replay_gate_identity_sha256: str,
     parent_parity_identity_sha256: str,
 ) -> list[dict[str, Any]]:
     rows = []
@@ -607,6 +610,9 @@ def _score_rows(
                         "registration_identity_sha256": registration[
                             "identity_sha256"
                         ],
+                        "input_replay_gate_identity_sha256": (
+                            input_replay_gate_identity_sha256
+                        ),
                         "source_commit": registration["source_repository"][
                             "git_commit"
                         ],
@@ -696,11 +702,11 @@ def command_evaluate(args: argparse.Namespace) -> int:
     if "B200" not in torch.cuda.get_device_properties(device).name.upper():
         raise PhysicsFlowEvaluationError("evaluation requires B200 GPUs")
     registration = stage.validate_study_registration(args.registration)
-    # The source-pinned single-rank gate compared all 400 deterministic
-    # same-arm updates and every current/v5 model tensor before this output
-    # directory could exist.  Each rank validates its immutable receipt before
-    # constructing the validation mmap or loading an endpoint model.
-    pairing, _pairing_record = stage.load_training_pairing(registration)
+    # The source-pinned gate proves exact v7/v5 causal-input replay, exact frozen
+    # tensors, and finite trainable drift without a post-hoc numerical threshold.
+    # It preserves v7's failed exact-output qualification and authorizes only a
+    # fresh exploratory evaluation of immutable v7 checkpoints.
+    input_gate, _input_gate_record = stage.load_input_replay_gate(registration)
     # This receipt is validated before the validation mmap is constructed.  It
     # proves that the third endpoint delegates bit-for-bit to the untouched
     # parent's public target-blind sampler on a registered train history.
@@ -720,7 +726,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
     artifacts = {}
     for arm in stage.ARMS:
         models[arm.code], artifacts[arm.code] = _load_model(
-            registration, arm, device, pairing["artifacts"][arm.code]
+            registration, arm, device, input_gate["artifacts"][arm.code]
         )
     models[stage.PARENT_EVALUATION_MODEL_CODE], artifacts[
         stage.PARENT_EVALUATION_MODEL_CODE
@@ -823,6 +829,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
                         device=device,
                         registration=registration,
                         model_artifacts=artifacts,
+                        input_replay_gate_identity_sha256=input_gate[
+                            "identity_sha256"
+                        ],
                         parent_parity_identity_sha256=parent_parity[
                             "identity_sha256"
                         ],
@@ -871,6 +880,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
             "schema_version": stage.SCHEMA_VERSION,
             "kind": "raw_physics_flow_stage1_evaluation_rank",
             "registration_identity_sha256": registration["identity_sha256"],
+            "input_replay_gate_identity_sha256": input_gate[
+                "identity_sha256"
+            ],
             "rank": rank,
             "world_size": world_size,
             "d405_clip_indexes": assigned,
@@ -920,6 +932,8 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 or source_receipt.get("rank") != source_rank
                 or source_receipt.get("registration_identity_sha256")
                 != registration["identity_sha256"]
+                or source_receipt.get("input_replay_gate_identity_sha256")
+                != input_gate["identity_sha256"]
                 or source_receipt.get("rows_file") != rank_files[-1]
                 or source_receipt.get("lpips_evaluator_identity_sha256")
                 != registration["runtime"]["lpips_alex"]["identity_sha256"]
@@ -963,6 +977,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 "kind": stage.EVALUATION_INVENTORY_KIND,
                 "status": "complete",
                 "registration_identity_sha256": registration["identity_sha256"],
+                "input_replay_gate_identity_sha256": input_gate[
+                    "identity_sha256"
+                ],
                 "d405_clips": len(dataset.d405_indexes),
                 "d405_clip_indexes": list(dataset.d405_indexes),
                 "noise_seed_ids": list(stage.NOISE_SEEDS),

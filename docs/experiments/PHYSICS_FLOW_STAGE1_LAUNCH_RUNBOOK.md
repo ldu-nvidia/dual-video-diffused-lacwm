@@ -1,34 +1,20 @@
-# Raw physics-flow Stage-1 launch runbook
+# Raw physics-flow Stage-1 frozen-v7 exploratory evaluation runbook
 
-Status: **prepared only; do not execute any command in this document until an
-independent source auditor explicitly acknowledges the exact 40-character
-`EXPECTED_COMMIT`.** Preparing this runbook did not create a cluster checkout,
-cache, study registration, training run, evaluation output, or validation
-outcome.
+Status: **prepared only; do not execute or launch from this source checkout.** A launch
+requires an independently acknowledged exact 40-character v8 source commit and
+a fresh commit-derived source, study, and log namespace.
 
-The chain is fail-closed and uses fresh source, cache, study, log, and training
-paths. `afterok` dependencies stop every downstream job if registration, either
-cache, either audit, parent-lineage sealing, either matched training arm, or
-historical-parent parity fails. The evaluation job itself performs trace
-comparison, the isolated historical 6560866 parity gate, all 21 target-blind
-endpoint materializations, scoring, analysis, and final replay audit in that
-order.
+This v8 chain performs no cache build, training, checkpoint write, or W&B run.
+It first registers and seals an honest causal-input replay of immutable v7
+against the v5 input-lineage diagnostic, then evaluates the frozen v7
+checkpoints under the endpoint grid and decision gates that were frozen before
+v7 outcomes. V7 remains `STOP_EXACT_REPAIR_EQUIVALENCE`; v8 cannot
+retroactively pass it.
 
-This v7 chain is a full rerun, not a seed-only replay. The sealed v5 artifacts
-are admitted only as a numeric repair reference: v5 has zero endpoint rows and
-supports no quality conclusion. Before v7 evaluation can create its output
-directory, the chain requires all eight cache arrays, every row-level numeric
-and tensor hash, all 400 same-arm deterministic update records, and every model
-tensor to match v5 exactly. Strict-access provenance and run identities must
-differ. Snapshot pickle bytes, provenance paths/identities, wall-clock timing,
-and GPU-memory telemetry are explicitly excluded; the final audit recomputes
-the same cache/training/model-state equivalence without opening v5 endpoints.
+## 1. Immutable inputs and fresh paths
 
-## 1. Exact immutable inputs
-
-Run on `gcp-nrt-login-002` only after audit acknowledgment. Replace the single
-placeholder with the auditor-approved commit; do not infer it from a moving
-branch.
+Run on `gcp-nrt-login-002` only after source audit acknowledgment. Replace the
+single placeholder; never infer it from a moving branch.
 
 ```bash
 set -euo pipefail
@@ -41,89 +27,44 @@ EXPECTED_COMMIT=REPLACE_WITH_AUDITOR_ACKNOWLEDGED_40_CHARACTER_COMMIT
 SHORT=${EXPECTED_COMMIT:0:7}
 
 SOURCE_MIRROR=$BASE/src/dual-video-diffused-lacwm
-SOURCE_REPO=$BASE/src/worktrees/raw-physics-flow-stage1-$SHORT
-PARENT_SOURCE_REPO=$BASE/src/vjepa2-faithful-cascade-656086686dae/dual-video-diffused-lacwm
+SOURCE_REPO=$BASE/src/worktrees/raw-physics-flow-stage1-$SHORT-v8
 PYTHON_BIN=$BASE/envs/lacwm-b200-py310/bin/python
-# Cache rendering is the sole consumer of this isolated MuJoCo venv. Keep the
-# lexical symlink path: resolving it before execution silently selects the
-# LACWM venv and drops MuJoCo from sys.path.
-CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python
 WAN_DIR=$BASE/wan_fun_1.3b_control
 VIDEOX_HOME=$BASE/VideoX-Fun-1d6d9c3
-OFFICIAL_ABC=$BASE/src/amazon-far-abc-6bc6586
 
-IMMUTABLE=$BASE/artifacts/dual_video_diffusion/vjepa2_cache_builds/vjepa2-cache-20260729-03-immutable1be7690
-TRAIN_MANIFEST=$IMMUTABLE/manifests/train.jsonl
-VAL_MANIFEST=$IMMUTABLE/manifests/val.jsonl
-TRAIN_RGB_METADATA=$IMMUTABLE/caches/train/metadata.json
-VAL_RGB_METADATA=$IMMUTABLE/caches/val/metadata.json
-PREPROCESSED_ROOT=$BASE/data/production_v1/abc_pp
-RAW_ROOT=$BASE/data/production_v1/abc_raw/data/train
-
-RENDERER_GATE=$BASE/artifacts/dual_video_diffusion/trajectory_consistent_renderer_gate/trajectory-renderer-train384-fresh24-20260808-856cd55-v1
-PARENT_RUN=$BASE/runs/dual_video_diffusion/vjepa2_controlled_study/vjepa2-faithful-cascade-20260730-seed1234-6560866-v1/vpm_parameter_matched_video
-PARENT_SNAPSHOT=$PARENT_RUN/snapshot.pt
-PARENT_CONFIG=$PARENT_RUN/resolved_update_1000.yaml
-LEGACY_SNAPSHOT=$BASE/runs/dual_video_diffusion/vjepa2_controlled_study/vjepa2-controlled-20260730-seed1234-9cf8e69-v3/vpm_parameter_matched_video/snapshot.pt
-PREFLIGHT=$BASE/artifacts/dual_video_diffusion/preflight_20260808
-LINEAGE_FAILED_LOG=$PREFLIGHT/snapshot_compare-507379.log
-LINEAGE_COMPARISON_LOG=$PREFLIGHT/snapshot_compare-507381.log
-LPIPS_PREFLIGHT_LOG=$PREFLIGHT/lpips_pin-507388.log
-CAUSAL_LADDER=$BASE/artifacts/dual_video_diffusion/causal_compressibility_ladder/causal-compressibility-train256-dev64-seed20260820-4d4db76-v1/registration.json
-DIRECT_FRONTIER=$BASE/artifacts/dual_video_diffusion/vpm_direct_residual_frontier/vpm-direct-residual-fit256-outcome31-seed20260832-4f75f9c-v2
-
-V5_CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-e632344-v5
 V5_STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-e632344-v5
-CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v7
-STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v7
-LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v7
+V7_CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-19717d3-v7
+V7_STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-19717d3-v7
+V7_LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-19717d3-v7
+
+STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260809-$SHORT-v8-exploratory
+LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260809-$SHORT-v8-exploratory
 REGISTRATION=$STUDY_ROOT/registration.json
-```
 
-The parent source is an independent, clean repository worktree at exact commit
-6560866; detachment is not required by the registration contract. Both parent
-source paths deliberately share the registered external Python/Wan/VideoX
-runtime. Assert all immutable inputs before creating anything:
-
-```bash
-test "$(git -C "$PARENT_SOURCE_REPO" rev-parse HEAD)" = 656086686dae723c942a4209a9d71cdb17ed6ccc
-test -z "$(git -C "$PARENT_SOURCE_REPO" status --porcelain --untracked-files=all)"
-test "$(git -C "$OFFICIAL_ABC" rev-parse HEAD)" = 6bc6586721cf0c409ccee80f675a28de9b9b2f5e
-test -z "$(git -C "$OFFICIAL_ABC" status --porcelain --untracked-files=all)"
-test "$(sha256sum "$PARENT_SNAPSHOT" | awk '{print $1}')" = de65e832c56f82be1472edb1fd789e16d3a6c8a7adc9b1f31306779951cb463a
-test "$(sha256sum "$PARENT_CONFIG" | awk '{print $1}')" = ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38
-test "$(sha256sum "$LINEAGE_FAILED_LOG" | awk '{print $1}')" = 18bff874df2ae79bae614520ce80d3dd2d223a86d31bf1c8cc5ad24e05f10714
-test "$(sha256sum "$LINEAGE_COMPARISON_LOG" | awk '{print $1}')" = 048bcddd35ecd2458e5b17f28a48a8a4967111dbb888e8cd2bc9d5ff669c0e2a
-test "$(sha256sum "$LPIPS_PREFLIGHT_LOG" | awk '{print $1}')" = db37a417618afa1156cb7226140993755279191edfef8a0c628d550de20fc6af
-test -d "$V5_CACHE_ROOT"
 test -d "$V5_STUDY_ROOT"
-test -L "$PYTHON_BIN"
-test "$(readlink "$PYTHON_BIN")" = "/lustre/fsw/portfolios/coreai/users/ldu/lacwm_train/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
-test "$(sha256sum "$BASE/envs/lacwm-b200-py310/pyvenv.cfg" | awk '{print $1}')" = 1462a3436cb7564a778b577ed97d7b8adee292ba7f03ae92d544761a11fcbc2d
-test "$(sha256sum "$BASE/envs/lacwm-b200-py310/lib/python3.10/site-packages/lpips-0.1.4.dist-info/RECORD" | awk '{print $1}')" = 43d3121c0b0c2d34380a1f786dd9501be8f64270bea81f6118bbb98c384df7ae
-test "$(sha256sum "$BASE/envs/lacwm-b200-py310/lib/python3.10/site-packages/torch-2.7.1+cu128.dist-info/RECORD" | awk '{print $1}')" = 277c9bbc200c0507440f5b6da4b681199f7dd72250e52028e308aa81eb285d6b
-test "$(sha256sum "$BASE/envs/lacwm-b200-py310/lib/python3.10/site-packages/torchvision-0.22.1+cu128.dist-info/RECORD" | awk '{print $1}')" = ae8a47757ba5c4a89c8d2f3bdbaefb7f9ca7a0cc4af350fdb58288885fde4cd2
-test -L "$CACHE_PYTHON_BIN"
-test "$(readlink "$CACHE_PYTHON_BIN")" = "$BASE/envs/lacwm-b200-py310/bin/python"
-test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/pyvenv.cfg" | awk '{print $1}')" = a85cf62de5c2c623fdc358933f86f50e58d93f41b580f097d3b1f6f66c5b67ab
-test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/mujoco-3.3.7.dist-info/RECORD" | awk '{print $1}')" = b403cad508902f2ea3c1106ee827cc89599e8bd3d156f5602703531ab1c1e250
-test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/numpy-2.0.1.dist-info/RECORD" | awk '{print $1}')" = dca51d52189d5aff4cdc2da2b4c2883c9c35ebd7e8d1cc30856b3b05c5b4bf59
-test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/mcap-1.4.0.dist-info/RECORD" | awk '{print $1}')" = b6c95f80a91a66103f55c58a92a0da30871e9b012beaf05a805bccdde95cdd16
-test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/mcap_protobuf_support-0.5.4.dist-info/RECORD" | awk '{print $1}')" = 84dbce795b6b9f8ad82135443f25df5a028355805ef29668a940a31ce036d36c
-test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/protobuf-7.35.1.dist-info/RECORD" | awk '{print $1}')" = cb998781253fda25fd95558ea6a87879ca4897cbdcf79da2709264c8da4ce3ea
-test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/lz4-4.4.5.dist-info/RECORD" | awk '{print $1}')" = 6ae8e7c253be6063a94f74d4478f5c3cad56e021346068851d2c7ad52ec712c0
-test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/zstandard-0.25.0.dist-info/RECORD" | awk '{print $1}')" = 264b11507cd20241c4a087e7c2bc5f5c5a39f7ba6e589f1e509338f3fc35ce0d
-test "$(sha256sum "$(readlink -f "$CACHE_PYTHON_BIN")" | awk '{print $1}')" = 49b2c58e9fddd98ff9b53f6f7613a91db9053f858c89cae5dcd25ee7828bc0d6
+test -d "$V7_CACHE_ROOT"
+test -d "$V7_STUDY_ROOT"
+test "$(sha256sum "$V7_STUDY_ROOT/registration.json" | awk '{print $1}')" = 82c6b16c59454835be90889451bfd6c365c6e93499c5861d206dc2791a37e786
+test "$(sha256sum "$V7_CACHE_ROOT/cache_registration.json" | awk '{print $1}')" = a1af8831819455207b5b9a47fe33b2da5a50cbd9d21c24b96646e553a4f8c0a8
+test "$(sha256sum "$V7_LOG_ROOT/eval-507846.out" | awk '{print $1}')" = 9aea10af872bfa81389553da9a2d8045cf7cf0ff1ebbc849d8d9184220263d44
+test ! -e "$V7_STUDY_ROOT/training_pairing.json"
+test ! -e "$V7_STUDY_ROOT/parent_sampler_parity.json"
+test ! -e "$V7_STUDY_ROOT/evaluation"
+test ! -e "$V7_STUDY_ROOT/analysis"
 test ! -e "$SOURCE_REPO"
-test ! -e "$CACHE_ROOT"
 test ! -e "$STUDY_ROOT"
 test ! -e "$LOG_ROOT"
 ```
 
-## 2. Freeze the audited source
+The registration code additionally binds the exact v7/v5 registrations,
+traces, completions, configs, checkpoints, all eight cache arrays, and the v7
+failure log. It verifies 2,000 exact causal-input hashes, 9,200 exact
+input/probe/clock/index/order values, 7,200 finite output-diagnostic values,
+the exact 1,686-tensor model schema, the registered 495/500 trainable mismatch
+families, and bit identity of every other frozen parameter and buffer. Finite
+trainable/output drift is descriptive; no numerical pass threshold exists.
 
-Fetching is permitted only after the audit acknowledgment. The fetched branch
-must resolve to the acknowledged commit before a detached worktree is made.
+## 2. Freeze the audited v8 source
 
 ```bash
 git -C "$SOURCE_MIRROR" fetch --no-tags origin "refs/heads/$BRANCH"
@@ -131,160 +72,74 @@ test "$(git -C "$SOURCE_MIRROR" rev-parse FETCH_HEAD)" = "$EXPECTED_COMMIT"
 git -C "$SOURCE_MIRROR" worktree add --detach "$SOURCE_REPO" "$EXPECTED_COMMIT"
 test "$(git -C "$SOURCE_REPO" rev-parse HEAD)" = "$EXPECTED_COMMIT"
 test -z "$(git -C "$SOURCE_REPO" status --porcelain --untracked-files=all)"
-PYTHONPATH="$SOURCE_REPO" "$PYTHON_BIN" -c \
-  'from pathlib import Path; from tools import physics_flow_stage1 as p; p.validate_renderer_gate(Path(__import__("sys").argv[1]))' \
-  "$RENDERER_GATE"
-PYTHONPATH="$SOURCE_REPO" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-  "$PYTHON_BIN" -c \
-  'from pathlib import Path; from tools import physics_flow_stage1 as p; p._collect_main_python_runtime(Path(__import__("sys").argv[1]))' \
-  "$PYTHON_BIN"
-mkdir -p "$(dirname "$CACHE_ROOT")" "$(dirname "$STUDY_ROOT")" "$LOG_ROOT"
-test -d "$(dirname "$CACHE_ROOT")"
-test -d "$(dirname "$STUDY_ROOT")"
+mkdir -p "$(dirname "$STUDY_ROOT")" "$LOG_ROOT"
 ```
 
-## 3. Submit the complete dependency chain
+## 3. Submit registration then evaluation
 
-The following prefix explicitly enters Bash inside every Slurm `--wrap`
-script before using `pipefail` or sourcing the B200 activation helper. Large
-artifacts remain on Lustre. No protected test split is named anywhere in the
-chain. The cluster's `batch` partition requires a GPU request even for the
-CPU-dominant registration and sealing stages, so all four wrapped jobs request
-one B200 and leave it otherwise unused where appropriate. Registration, cache
-auditing/sealing, training, and evaluation execute with `PYTHON_BIN`.
-Registration launches one pre-output child preflight through the unresolved
-`CACHE_PYTHON_BIN` symlink. It imports and content-verifies the complete direct
-MCAP/protobuf/codec stack, performs an EGL render, and decodes the deterministic
-first registered train-D405 calibration from its zstd MCAP, requiring the
-LACWM-registration and cache-runtime calibration identities to match. Only the
-two cache builders execute their main process with that cache-only runtime.
-The LACWM interpreter is also invoked through its absolute lexical venv entry,
-never its resolved base-CPython target. Before output creation, the operator
-lightweight operator preflight requires its full symlink chain, resolved
-executable, `pyvenv.cfg`, isolated site-packages, and
-LPIPS/torch/torchvision module plus distribution-RECORD receipt. The
-heavyweight offline AlexNet/LPIPS model construction runs as the first command
-inside the compute registration job, before `register-cache` can create its
-output. Study registration independently repeats it. Resolving the entry
-discards those site-packages and fails closed before cache or training output.
+The registration allocation opens no generated-video outcome. It writes a new
+registration plus `v7_v5_causal_input_replay_gate.json`; it does not write to
+v5 or v7. The sole evaluation allocation revalidates that gate, runs native
+parent parity before validation opens, materializes the frozen endpoint grid,
+scores, analyzes, and audits. `afterok` prevents evaluation after any
+registration failure.
 
 ```bash
-BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME MUJOCO_GL=egl; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO;"
+BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME WANDB_MODE=disabled; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO;"
 
 REGISTER_JOB=$(sbatch --parsable \
-  --job-name=pf-register-$SHORT \
+  --job-name=pf-v8-register-$SHORT \
   --output="$LOG_ROOT/register-%j.out" \
   --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=32 \
   --mem=256G --time=02:00:00 \
   --partition=batch --account=coreai_chef_posttrain --qos=short --no-requeue \
   --exclude=pool0-0081,pool0-0089 \
   --wrap="$BASH_PREFIX \
-    $PYTHON_BIN tools/physics_flow_stage1.py preflight-main-runtime \
-      --source-repo $SOURCE_REPO --expected-commit $EXPECTED_COMMIT \
-      --python $PYTHON_BIN --lpips-preflight-log $LPIPS_PREFLIGHT_LOG; \
-    $PYTHON_BIN tools/physics_flow_stage1.py register-cache \
-    --output $CACHE_ROOT --source-repo $SOURCE_REPO \
-    --cache-python $CACHE_PYTHON_BIN \
-    --v5-reference-cache-root $V5_CACHE_ROOT \
-    --expected-commit $EXPECTED_COMMIT --official-abc-root $OFFICIAL_ABC \
-    --renderer-gate $RENDERER_GATE --train-manifest $TRAIN_MANIFEST \
-    --val-manifest $VAL_MANIFEST --train-cache-metadata $TRAIN_RGB_METADATA \
-    --val-cache-metadata $VAL_RGB_METADATA \
-    --preprocessed-root $PREPROCESSED_ROOT --raw-root $RAW_ROOT'")
-
-CACHE_TRAIN_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
-  --job-name=pf-cache-train-$SHORT \
-  --output="$LOG_ROOT/cache-train-%j.out" \
-  --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=32 \
-  --mem=256G --time=02:00:00 --partition=batch \
-  --account=coreai_chef_posttrain --qos=short --no-requeue \
-  --exclude=pool0-0081,pool0-0089 \
-  --wrap="$BASH_PREFIX $CACHE_PYTHON_BIN tools/physics_flow_stage1.py build-cache \
-    --registration $CACHE_ROOT/cache_registration.json --split train'")
-
-CACHE_VAL_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
-  --job-name=pf-cache-val-$SHORT \
-  --output="$LOG_ROOT/cache-val-%j.out" \
-  --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=32 \
-  --mem=256G --time=02:00:00 --partition=batch \
-  --account=coreai_chef_posttrain --qos=short --no-requeue \
-  --exclude=pool0-0081,pool0-0089 \
-  --wrap="$BASH_PREFIX $CACHE_PYTHON_BIN tools/physics_flow_stage1.py build-cache \
-    --registration $CACHE_ROOT/cache_registration.json --split val'")
-
-SEAL_JOB=$(sbatch --parsable \
-  --dependency=afterok:$CACHE_TRAIN_JOB:$CACHE_VAL_JOB \
-  --job-name=pf-seal-$SHORT --output="$LOG_ROOT/seal-%j.out" \
-  --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=32 \
-  --mem=256G --time=02:00:00 \
-  --partition=batch --account=coreai_chef_posttrain --qos=short --no-requeue \
-  --exclude=pool0-0081,pool0-0089 \
-  --wrap="$BASH_PREFIX \
-    $PYTHON_BIN tools/physics_flow_stage1.py audit-cache --metadata $CACHE_ROOT/train/metadata.json; \
-    $PYTHON_BIN tools/physics_flow_stage1.py audit-cache --metadata $CACHE_ROOT/val/metadata.json; \
-    $PYTHON_BIN tools/physics_flow_stage1.py register-study \
+    $PYTHON_BIN tools/physics_flow_stage1.py register-frozen-v7-evaluation \
       --output $STUDY_ROOT --source-repo $SOURCE_REPO \
-      --v5-reference-study-root $V5_STUDY_ROOT \
-      --parent-source-repo $PARENT_SOURCE_REPO \
       --expected-commit $EXPECTED_COMMIT \
-      --train-flow-metadata $CACHE_ROOT/train/metadata.json \
-      --val-flow-metadata $CACHE_ROOT/val/metadata.json \
-      --parent-snapshot $PARENT_SNAPSHOT \
-      --parent-resolved-config $PARENT_CONFIG \
-      --legacy-parent-snapshot $LEGACY_SNAPSHOT \
-      --lineage-failed-log $LINEAGE_FAILED_LOG \
-      --lineage-comparison-log $LINEAGE_COMPARISON_LOG \
-      --causal-ladder-registration $CAUSAL_LADDER \
-      --direct-frontier-root $DIRECT_FRONTIER \
-      --lpips-preflight-log $LPIPS_PREFLIGHT_LOG \
-      --python $PYTHON_BIN --wan-dir $WAN_DIR --videox-home $VIDEOX_HOME; \
+      --v7-cache-root $V7_CACHE_ROOT --v7-study-root $V7_STUDY_ROOT \
+      --v5-reference-study-root $V5_STUDY_ROOT; \
     $PYTHON_BIN tools/physics_flow_stage1_workflow.py plan \
       --registration $REGISTRATION'")
 
-FLOW_OFF_JOB=$(sbatch --parsable --dependency=afterok:$SEAL_JOB \
-  --job-name=pf-off-$SHORT --output="$LOG_ROOT/train-off-%j.out" \
-  "$SOURCE_REPO/tools/slurm/physics_flow_stage1.sbatch" \
-  --mode train --arm FLOW-OFF --registration "$REGISTRATION" \
-  --repo-root "$SOURCE_REPO" --expected-commit "$EXPECTED_COMMIT" \
-  --python "$PYTHON_BIN")
-
-RAW_FLOW_JOB=$(sbatch --parsable --dependency=afterok:$SEAL_JOB \
-  --job-name=pf-raw-$SHORT --output="$LOG_ROOT/train-raw-%j.out" \
-  "$SOURCE_REPO/tools/slurm/physics_flow_stage1.sbatch" \
-  --mode train --arm RAW-FLOW --registration "$REGISTRATION" \
-  --repo-root "$SOURCE_REPO" --expected-commit "$EXPECTED_COMMIT" \
-  --python "$PYTHON_BIN")
-
-EVAL_JOB=$(sbatch --parsable \
-  --dependency=afterok:$FLOW_OFF_JOB:$RAW_FLOW_JOB \
-  --job-name=pf-eval-$SHORT --output="$LOG_ROOT/eval-%j.out" \
+EVAL_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
+  --job-name=pf-v8-eval-$SHORT --output="$LOG_ROOT/eval-%j.out" \
   "$SOURCE_REPO/tools/slurm/physics_flow_stage1.sbatch" \
   --mode evaluate --registration "$REGISTRATION" \
   --repo-root "$SOURCE_REPO" --expected-commit "$EXPECTED_COMMIT" \
   --python "$PYTHON_BIN")
 
-printf 'register=%s cache_train=%s cache_val=%s seal=%s off=%s raw=%s eval=%s\n' \
-  "$REGISTER_JOB" "$CACHE_TRAIN_JOB" "$CACHE_VAL_JOB" "$SEAL_JOB" \
-  "$FLOW_OFF_JOB" "$RAW_FLOW_JOB" "$EVAL_JOB"
+printf 'register=%s eval=%s\n' "$REGISTER_JOB" "$EVAL_JOB"
 ```
+
+No command above sets an online W&B entity/project, creates a v8 training
+directory, or invokes `write-arm-plan`. The evaluation entrypoint explicitly
+sets `WANDB_MODE=disabled` and points model loading at the immutable v7 run
+directories.
 
 ## 4. Read-only monitoring and terminal evidence
 
-Monitoring must not alter job state. The terminal success criterion is a
-nonempty `$STUDY_ROOT/analysis/audit.json`, not merely a completed Slurm job.
-
 ```bash
-squeue -j "$REGISTER_JOB,$CACHE_TRAIN_JOB,$CACHE_VAL_JOB,$SEAL_JOB,$FLOW_OFF_JOB,$RAW_FLOW_JOB,$EVAL_JOB" \
-  -o '%.18i %.30j %.2t %.10M %.10l %R'
-sacct -j "$REGISTER_JOB,$CACHE_TRAIN_JOB,$CACHE_VAL_JOB,$SEAL_JOB,$FLOW_OFF_JOB,$RAW_FLOW_JOB,$EVAL_JOB" \
+squeue -j "$REGISTER_JOB,$EVAL_JOB" -o '%.18i %.30j %.2t %.10M %.10l %R'
+sacct -j "$REGISTER_JOB,$EVAL_JOB" \
   --format=JobID,JobName%32,State,ExitCode,Elapsed,Start,End
-test -s "$STUDY_ROOT/analysis/audit.json"
-$PYTHON_BIN "$SOURCE_REPO/tools/physics_flow_stage1.py" audit-study \
-  --registration "$REGISTRATION" --read-only
+tail -n 80 "$LOG_ROOT/register-$REGISTER_JOB.out"
+tail -n 120 "$LOG_ROOT/eval-$EVAL_JOB.out"
 ```
 
-Interpret only the sealed `analysis.json`/`audit.json`. A pass supports the
-narrow causal raw-geometry scaffold claim in the prospective protocol. A stop
-is evidence against this fixed-conditioning design under the registered
-200-update/NFE-1 gate; it is not evidence that every possible dual video
-diffusion mechanism is impossible.
+Terminal success requires nonempty immutable files at:
+
+```bash
+test -s "$STUDY_ROOT/v7_v5_causal_input_replay_gate.json"
+test -s "$STUDY_ROOT/parent_sampler_parity.json"
+test -s "$STUDY_ROOT/evaluation/inventory.json"
+test -s "$STUDY_ROOT/analysis/analysis.json"
+test -s "$STUDY_ROOT/analysis/audit.json"
+```
+
+Report the preregistered decision and all effect/interval tables, including
+negative results. Interpret either `ADVANCE_RAW_FLOW_SCAFFOLD` or
+`STOP_FIXED_RAW_FLOW` only within the registered single-seed exploratory claim
+boundary. A confirmatory video-quality claim remains deferred to a future
+prospectively deterministic, multi-seed study.
