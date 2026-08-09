@@ -554,6 +554,7 @@ def _source_records() -> dict[str, Any]:
         for name, relative in {
             "bridge": "tools/recurrent_flow_wan_bridge.py",
             "raw_stage": "tools/physics_flow_stage1.py",
+            "cache_runtime": "tools/physics_flow_cache_runtime.py",
             "confirmation": "tools/recurrent_delta_spatial_confirmation.py",
             "trajectory": "tools/trajectory_consistent_renderer_gate.py",
             "model": "projects/latent_action_models/lam/physics_flow_model.py",
@@ -562,6 +563,49 @@ def _source_records() -> dict[str, Any]:
             "protocol": "docs/experiments/RECURRENT_FLOW_WAN_SCREEN_PROTOCOL.md",
         }.items()
     }
+
+
+def _rebind_cache_renderer_runtime(
+    base_registration: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Relocate an otherwise byte-identical runtime receipt to this checkout."""
+
+    base_source = Path(str(base_registration["source_repository"]["path"]))
+    sealed = raw_stage.validate_cache_renderer_runtime_receipt(
+        base_registration.get("cache_renderer_runtime"), source_repo=base_source
+    )
+    current_helper = raw_stage.file_record(
+        REPO_ROOT / "tools" / "physics_flow_cache_runtime.py"
+    )
+    old_helper = sealed.get("helper_source", {})
+    if any(
+        current_helper.get(key) != old_helper.get(key)
+        for key in ("bytes", "sha256")
+    ):
+        raise RecurrentFlowBridgeError(
+            "bridge cache-runtime helper is not byte-identical to raw v7"
+        )
+    rebound = {
+        key: value for key, value in sealed.items() if key != "identity_sha256"
+    }
+    rebound["helper_source"] = current_helper
+    rebound = raw_stage.identity_payload(rebound)
+    return raw_stage.validate_cache_renderer_runtime_receipt(
+        rebound, source_repo=REPO_ROOT
+    )
+
+
+def _enforce_bridge_cache_renderer_runtime(
+    registration: Mapping[str, Any],
+) -> dict[str, Any]:
+    return raw_stage.enforce_current_cache_renderer_runtime(
+        {
+            "cache_renderer_runtime": registration.get("cache_renderer_runtime"),
+            "source_repository": {
+                "path": registration.get("source", {}).get("repository")
+            },
+        }
+    )
 
 
 def _raw_input_revalidation(base_registration: Mapping[str, Any]) -> dict[str, Any]:
@@ -834,6 +878,7 @@ def command_register_cache(args: argparse.Namespace) -> int:
     if base_registration.get("identity_sha256") != BASE_RAW_CACHE_REGISTRATION_IDENTITY:
         raise RecurrentFlowBridgeError("canonical v7 raw registration identity differs")
     input_revalidation = _raw_input_revalidation(base_registration)
+    cache_renderer_runtime = _rebind_cache_renderer_runtime(base_registration)
     causal_prefix_freeze = _freeze_causal_prefix_values(base_registration)
     sealed = validate_confirmation(args.confirmation_root, args.strict_audit)
     output.mkdir(mode=0o700)
@@ -871,6 +916,10 @@ def command_register_cache(args: argparse.Namespace) -> int:
                 "clean": source["clean"],
                 "files": _source_records(),
             },
+            "cache_renderer_runtime": cache_renderer_runtime,
+            "base_cache_renderer_runtime_identity_sha256": base_registration[
+                "cache_renderer_runtime"
+            ]["identity_sha256"],
             "raw_stage_input_contract": {
                 "registration": raw_stage.file_record(args.raw_cache_registration),
                 "identity_sha256": base_registration["identity_sha256"],
@@ -993,6 +1042,13 @@ def validate_cache_registration(path: Path) -> dict[str, Any]:
         != payload["raw_stage_input_contract"]["identity_sha256"]
     ):
         raise RecurrentFlowBridgeError("raw-stage input registration changed")
+    expected_runtime = _rebind_cache_renderer_runtime(base_registration)
+    if (
+        payload.get("cache_renderer_runtime") != expected_runtime
+        or payload.get("base_cache_renderer_runtime_identity_sha256")
+        != base_registration["cache_renderer_runtime"]["identity_sha256"]
+    ):
+        raise RecurrentFlowBridgeError("bridge cache renderer runtime changed")
     if _raw_input_revalidation(base_registration) != payload[
         "raw_stage_input_contract"
     ].get("input_revalidation"):
@@ -1220,7 +1276,7 @@ def command_build_cache(args: argparse.Namespace) -> int:
         Path(registration["output_root"]), base_record, "cache_registration.json"
     )
     base_registration = raw_stage.validate_cache_registration(base_registration_path)
-    raw_stage.enforce_current_cache_renderer_runtime(base_registration)
+    cache_renderer_runtime = _enforce_bridge_cache_renderer_runtime(registration)
     split = args.split
     count = raw_stage.TRAIN_COUNT if split == "train" else raw_stage.VAL_COUNT
     split_root = Path(registration["output_root"]) / split
@@ -1381,6 +1437,9 @@ def command_build_cache(args: argparse.Namespace) -> int:
             "inference_predictor_sha256": registration["confirmation"][
                 "inference_predictor"
             ]["sha256"],
+            "cache_renderer_runtime_identity_sha256": cache_renderer_runtime[
+                "identity_sha256"
+            ],
             "predictor_refit_or_tuning": False,
             "render_wall_seconds": time.perf_counter() - started,
             "causal_inputs_only": True,
@@ -1411,6 +1470,8 @@ def load_cache_metadata(path: Path, split: str) -> dict[str, Any]:
         or payload.get("confirmation_completion_identity_sha256")
         != CONFIRMATION_COMPLETION_IDENTITY
         or payload.get("predictor_refit_or_tuning") is not False
+        or len(str(payload.get("cache_renderer_runtime_identity_sha256", "")))
+        != 64
         or payload.get("causal_inputs_only") is not True
         or payload.get("future_rgb_opened") is not False
         or payload.get("future_measured_state_opened") is not False
@@ -1431,7 +1492,7 @@ def _full_replay_cache(
 ) -> dict[str, Any]:
     """Recompute every aligned/hold row from causal inputs and render exactly."""
 
-    raw_stage.enforce_current_cache_renderer_runtime(base_registration)
+    _enforce_bridge_cache_renderer_runtime(registration)
     rows, actions, descriptors = raw_stage._load_split_registration(
         base_registration, split
     )
@@ -1524,6 +1585,11 @@ def command_audit_cache(args: argparse.Namespace) -> int:
     ]:
         raise RecurrentFlowBridgeError("metadata/cache-registration record differs")
     registration = validate_cache_registration(registration_path)
+    if (
+        metadata.get("cache_renderer_runtime_identity_sha256")
+        != registration["cache_renderer_runtime"]["identity_sha256"]
+    ):
+        raise RecurrentFlowBridgeError("metadata cache renderer runtime differs")
     base_path = _resolve_record(
         Path(registration["output_root"]),
         registration["raw_stage_input_contract"]["registration"],

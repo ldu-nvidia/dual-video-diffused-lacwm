@@ -204,6 +204,42 @@ def test_registered_source_revalidates_full_executing_checkout(
         bridge._validate_source(registration)
 
 
+def test_cache_runtime_rebind_changes_only_helper_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_helper = tmp_path / "old" / "tools" / "physics_flow_cache_runtime.py"
+    new_root = tmp_path / "new"
+    new_helper = new_root / "tools" / "physics_flow_cache_runtime.py"
+    old_helper.parent.mkdir(parents=True)
+    new_helper.parent.mkdir(parents=True)
+    old_helper.write_text("identical runtime helper\n")
+    new_helper.write_text("identical runtime helper\n")
+    sealed = bridge.raw_stage.identity_payload(
+        {
+            "schema_version": 1,
+            "kind": "runtime-fixture",
+            "helper_source": bridge.raw_stage.file_record(old_helper),
+        }
+    )
+    base_registration = {
+        "source_repository": {"path": str(old_helper.parents[1])},
+        "cache_renderer_runtime": sealed,
+    }
+    monkeypatch.setattr(bridge, "REPO_ROOT", new_root)
+    monkeypatch.setattr(
+        bridge.raw_stage,
+        "validate_cache_renderer_runtime_receipt",
+        lambda receipt, source_repo=None: dict(receipt),
+    )
+    rebound = bridge._rebind_cache_renderer_runtime(base_registration)
+    assert rebound["helper_source"] == bridge.raw_stage.file_record(new_helper)
+    assert rebound["helper_source"]["sha256"] == sealed["helper_source"]["sha256"]
+    assert bridge.raw_stage.identity_valid(rebound)
+    new_helper.write_text("different helper\n")
+    with pytest.raises(bridge.RecurrentFlowBridgeError, match="byte-identical"):
+        bridge._rebind_cache_renderer_runtime(base_registration)
+
+
 def test_history_reader_reads_state_prefix_and_action_slice_once(tmp_path: Path) -> None:
     rows = 100
     archive = tmp_path / "states.npz"
