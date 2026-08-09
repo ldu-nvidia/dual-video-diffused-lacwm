@@ -59,10 +59,30 @@ NOISE_SEEDS = (20260809, 20260810, 20260811, 20260812)
 SCHEMA_VERSION = 1
 KIND_REGISTRATION = "acd_p0_registration"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+APPROVED_ARTIFACT_ROOTS = (
+    Path("/mnt/data1"),
+    Path("/mnt/data2"),
+    Path(
+        "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/"
+        "users/ldu/lacwm_train"
+    ),
+)
 
 
 class ACDPilotError(RuntimeError):
     """An exact-source, lineage, memory, or access contract changed."""
+
+
+def approved_artifact_path(path: Path, label: str) -> Path:
+    """Require an absolute path within one of the three approved site roots."""
+
+    path = path.expanduser()
+    if ".." in path.parts or not path.is_absolute() or not any(
+        path == root or root in path.parents for root in APPROVED_ARTIFACT_ROOTS
+    ):
+        roots = ", ".join(str(root) for root in APPROVED_ARTIFACT_ROOTS)
+        raise ACDPilotError(f"{label} must be under an approved artifact root: {roots}")
+    return path
 
 
 @dataclass(frozen=True)
@@ -491,7 +511,11 @@ def _remote_receipt(repo: Path, commit: str, remote: str) -> dict[str, Any]:
 
 
 def _validate_test_report(path: Path, commit: str) -> dict[str, Any]:
-    report = read_json(path.resolve(strict=True), "ACD exact-source test report")
+    path = approved_artifact_path(path.expanduser(), "exact-source test receipt")
+    path = approved_artifact_path(
+        path.resolve(strict=True), "resolved exact-source test receipt"
+    )
+    report = read_json(path, "ACD exact-source test report")
     if (
         not identity_valid(report)
         or report.get("kind") != "acd_p0_exact_source_test_report"
@@ -508,7 +532,9 @@ def _validate_test_report(path: Path, commit: str) -> dict[str, Any]:
 
 def command_test_report(args: argparse.Namespace) -> int:
     source = clean_source(args.source_repo, args.expected_commit)
-    output = args.output.expanduser()
+    output = approved_artifact_path(
+        args.output.expanduser(), "exact-source test output"
+    )
     python = args.python.expanduser()
     if (
         not output.is_absolute()
@@ -519,6 +545,10 @@ def command_test_report(args: argparse.Namespace) -> int:
         or not os.access(python, os.X_OK)
     ):
         raise ACDPilotError("exact-source test output/runtime is invalid")
+    output = approved_artifact_path(
+        output.parent.resolve(strict=True) / output.name,
+        "resolved exact-source test output",
+    )
     command = [
         str(python),
         "-m",
@@ -602,7 +632,11 @@ def command_test_report(args: argparse.Namespace) -> int:
 
 
 def _validate_memory_receipt(path: Path, commit: str) -> dict[str, Any]:
-    receipt = read_json(path.resolve(strict=True), "ACD memory smoke receipt")
+    path = approved_artifact_path(path.expanduser(), "memory-smoke receipt")
+    path = approved_artifact_path(
+        path.resolve(strict=True), "resolved memory-smoke receipt"
+    )
+    receipt = read_json(path, "ACD memory smoke receipt")
     if (
         not identity_valid(receipt)
         or receipt.get("kind") != "acd_p0_memory_smoke_receipt"
@@ -719,9 +753,13 @@ def command_readiness(args: argparse.Namespace) -> int:
     if args.output is None:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        output = args.output.expanduser()
+        output = approved_artifact_path(args.output.expanduser(), "readiness output")
         if not output.is_absolute() or not output.parent.is_dir():
             raise ACDPilotError("readiness output requires an existing absolute parent")
+        output = approved_artifact_path(
+            output.parent.resolve(strict=True) / output.name,
+            "resolved readiness output",
+        )
         if output.exists() or output.is_symlink():
             raise ACDPilotError("readiness output must be fresh")
         exclusive_json(output, payload)
@@ -731,7 +769,13 @@ def command_readiness(args: argparse.Namespace) -> int:
 
 def _validate_registration_inputs(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     source = clean_source(args.source_repo, args.expected_commit)
-    readiness = read_json(args.readiness_seal.resolve(strict=True), "ACD readiness")
+    readiness_path = approved_artifact_path(
+        args.readiness_seal.expanduser(), "readiness receipt"
+    )
+    readiness_path = approved_artifact_path(
+        readiness_path.resolve(strict=True), "resolved readiness receipt"
+    )
+    readiness = read_json(readiness_path, "ACD readiness")
     if (
         not identity_valid(readiness)
         or readiness.get("kind") != "acd_p0_readiness_seal"
@@ -754,13 +798,11 @@ def command_register(args: argparse.Namespace) -> int:
 
     source, readiness, memory = _validate_registration_inputs(args)
     output = args.output.expanduser()
-    if not output.is_absolute() or not any(
-        root == output or root in output.parents
-        for root in (Path("/lustre"), Path("/mnt/data1"), Path("/mnt/data2"))
-    ):
+    if not output.is_absolute():
         raise ACDPilotError("output must be an absolute approved large-artifact path")
     parent = output.parent.resolve(strict=True)
     output = parent / output.name
+    approved_artifact_path(output, "output")
     if output.exists() or output.is_symlink():
         raise ACDPilotError("registered output root must be fresh")
     if shutil.disk_usage(parent).free < 100 * (1 << 30):
