@@ -67,6 +67,9 @@ def test_endpoint_grid_is_equal_call_raw_only() -> None:
     assert '"only_arrays_indexed"' in source
     assert '"content_bytes_read_for_provenance": False' in source
     assert stage.PARENT_SNAPSHOT_SHA256.startswith("de65e832")
+    assert stage.RENDERER_REGISTRATION_IDENTITY == (
+        "9cc556aba53d1defb69b0049dab67d12a3991decb917015bba5153c16cb8c2b1"
+    )
     assert stage.PARENT_RUN_IDENTITY_SHA256.startswith("d79c3699")
     assert stage.PARENT_CANONICAL_MODEL_STATE_SHA256.startswith("d1231b8b")
     assert stage.PARENT_RESOLVED_CONFIG_SHA256.startswith("ae3ffd27")
@@ -268,6 +271,7 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
         "no claim that val64 is globally",
         "separate Python process",
         "preserve_zero_support",
+        stage.RENDERER_REGISTRATION_IDENTITY,
     ):
         assert token in protocol
     assert "--no-requeue" in launcher
@@ -307,6 +311,7 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "REPLACE_WITH_AUDITOR_ACKNOWLEDGED_40_CHARACTER_COMMIT" in launch_runbook
     assert 'BASH_PREFIX="/bin/bash -lc' in launch_runbook
     assert 'mkdir -p "$(dirname "$CACHE_ROOT")"' in launch_runbook
+    assert "p.validate_renderer_gate" in launch_runbook
     assert launch_runbook.count("--gpus-per-node=1") == 4
     assert "04:00:00" not in launch_runbook
     assert launch_runbook.count("--time=02:00:00") == 4
