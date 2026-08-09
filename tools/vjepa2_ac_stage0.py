@@ -450,6 +450,9 @@ def paired_bootstrap_relative_improvement(
         "point_percent": point,
         "ci95_low_percent": float(low),
         "ci95_high_percent": float(high),
+        "paired_count": int(len(left)),
+        "favorable_count": int(np.sum(left < right)),
+        "favorable_fraction": float(np.mean(left < right)),
     }
 
 
@@ -1213,8 +1216,23 @@ def _summarize(
                     and effect["ci95_low_percent"] > 0.0
                 )
                 effect["passed"] = passed
+                effect["registered_gate"] = True
                 comparisons[f"{mode}/aligned_vs_{control}/h{horizon}"] = effect
                 gates.append(passed)
+            for control in ("logged_raw",):
+                reference_rows = indexed[(mode, control, horizon)]
+                reference = [item["metrics"]["l1"] for item in reference_rows]
+                effect = paired_bootstrap_relative_improvement(aligned, reference)
+                effect["registered_gate"] = False
+                effect["diagnostic_only"] = True
+                comparisons[f"{mode}/aligned_vs_{control}/h{horizon}"] = effect
+            if mode == "causal_autoregressive":
+                reference_rows = indexed[(mode, "persistence", horizon)]
+                reference = [item["metrics"]["l1"] for item in reference_rows]
+                effect = paired_bootstrap_relative_improvement(aligned, reference)
+                effect["registered_gate"] = False
+                effect["diagnostic_only"] = True
+                comparisons[f"{mode}/aligned_vs_persistence/h{horizon}"] = effect
     latency = {
         "encoder_mean_ms": 1000.0 * float(np.mean([row["encoder_seconds"] for row in timings])),
         "encoder_p95_ms": 1000.0 * float(np.quantile([row["encoder_seconds"] for row in timings], 0.95)),

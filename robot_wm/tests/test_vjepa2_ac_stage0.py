@@ -151,6 +151,9 @@ def test_metrics_and_bootstrap_keep_loss_sign() -> None:
     )
     assert effect["point_percent"] == pytest.approx(50.0)
     assert effect["ci95_low_percent"] == pytest.approx(50.0)
+    assert effect["paired_count"] == 4
+    assert effect["favorable_count"] == 4
+    assert effect["favorable_fraction"] == pytest.approx(1.0)
 
 
 def test_official_droid_transform_fallback_is_centered_180_by_243() -> None:
