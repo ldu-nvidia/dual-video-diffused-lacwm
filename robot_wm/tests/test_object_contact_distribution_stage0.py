@@ -6,6 +6,7 @@ import pytest
 pytest.importorskip("cv2")
 
 from tools import object_contact_distribution_stage0 as dist
+from tools import object_contact_distribution_pca_repair as repair
 from tools import object_contact_slot_stage0 as slot
 
 
@@ -110,3 +111,11 @@ def test_remaining_partition_and_shuffle_donors_are_disjoint() -> None:
         donor = by_index[item["donor_manifest_index"]]
         assert donor["episode_dir"] != item["episode_dir"]
         assert donor["motion_stratum"] == item["motion_stratum"]
+
+
+def test_mechanical_pca_hydration_is_exact_for_nonwhitened_transform() -> None:
+    result = repair.synthetic_transform_equivalence()
+    assert result["whiten"] is False
+    assert result["passed"] is True
+    assert result["hydrated_max_abs_difference"] <= 1e-12
+    assert result["explicit_map_max_abs_difference"] <= 1e-12
