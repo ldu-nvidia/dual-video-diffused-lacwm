@@ -9,6 +9,7 @@ import io
 import json
 import math
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -16,21 +17,23 @@ from typing import Any
 from tools import causal_compressibility_ladder as ladder
 
 
-SCHEMA = "vpm-direct-residual-frontier-registration-v1"
-FIT_SCHEMA = "vpm-direct-residual-frontier-fit-v1"
-WEIGHT_SCHEMA = "vpm-direct-residual-frontier-weights-v1"
-ROW_SCHEMA = "vpm-direct-residual-frontier-row-v1"
-ENDPOINT_SCHEMA = "vpm-direct-residual-frontier-endpoint-v1"
-ANALYSIS_SCHEMA = "vpm-direct-residual-frontier-analysis-v1"
-COMPLETE_SCHEMA = "vpm-direct-residual-frontier-complete-v1"
-AUDIT_SCHEMA = "vpm-direct-residual-frontier-audit-v1"
+SCHEMA = "vpm-direct-residual-frontier-registration-v2"
+FIT_SCHEMA = "vpm-direct-residual-frontier-fit-v2"
+WEIGHT_SCHEMA = "vpm-direct-residual-frontier-weights-v2"
+ROW_SCHEMA = "vpm-direct-residual-frontier-row-v2"
+ENDPOINT_SCHEMA = "vpm-direct-residual-frontier-endpoint-v2"
+TIMING_SCHEMA = "vpm-direct-residual-frontier-timing-row-v2"
+ANALYSIS_SCHEMA = "vpm-direct-residual-frontier-analysis-v2"
+COMPLETE_SCHEMA = "vpm-direct-residual-frontier-complete-v2"
+AUDIT_SCHEMA = "vpm-direct-residual-frontier-audit-v2"
 
 ARMS = ("ZERO", "DIRECT_ALIGNED", "DIRECT_SHUFFLED")
 ENDPOINTS = ("VPM_OFF", *ARMS)
 FIT_RANGE = (128, 384)
 CAL_RANGE = (384, 416)
 PRIOR_DEV_RANGE = (416, 480)
-OUTCOME_RANGE = (480, 512)
+OUTCOME_RANGE = (480, 511)
+STRUCTURAL_EXCLUDED_RANGE = (511, 512)
 EXCLUDED_RANGE = (0, 128)
 FIT_NOISE_SEEDS = (20260832, 20260833)
 CAL_NOISE_SEEDS = (20260834, 20260835)
@@ -87,6 +90,7 @@ def _validate_manifest(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "calibration": list(CAL_RANGE),
         "prior_inspected_development": list(PRIOR_DEV_RANGE),
         "fresh_reserve_outcome": list(OUTCOME_RANGE),
+        "excluded_historical_constructor_probe": list(STRUCTURAL_EXCLUDED_RANGE),
     }
     covered: list[int] = []
     for start, stop in ranges.values():
@@ -117,9 +121,9 @@ def _validated_record(record: Mapping[str, Any], label: str) -> dict[str, Any]:
     digest = record.get("sha256")
     if not isinstance(digest, str) or len(digest) != 64:
         raise FrontierError(f"{label} lacks a full SHA-256")
-    # Rehash configs/manifests. The 4.25-GB parent is already content-bound by
-    # its immutable parent registration and is rechecked by the Slurm wrapper.
-    if "snapshot" not in label and ladder.sha256_file(path) != digest:
+    # Rehash every ordinary input, including the 4.25-GB snapshot. Large cache
+    # arrays use the separate metadata-bound record path below.
+    if ladder.sha256_file(path) != digest:
         raise FrontierError(f"{label} digest differs")
     return {"path": str(path), "bytes": path.stat().st_size, "sha256": digest}
 
@@ -158,6 +162,16 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
     parent_path = ladder.canonical_file(
         args.parent_registration, "parent ladder registration"
     )
+    runtime_path = ladder.canonical_file(args.runtime_record, "B200 runtime record")
+    runtime = ladder.read_json(runtime_path)
+    devices = runtime.get("gpus", {}).get("devices", [])
+    if (
+        runtime.get("gpus", {}).get("count") != 1
+        or len(devices) != 1
+        or "B200" not in str(devices[0].get("name", "")).upper()
+        or devices[0].get("capability") != [10, 0]
+    ):
+        raise FrontierError("runtime receipt is not a one-B200 verification")
     parent = ladder.read_json(parent_path)
     if (
         parent.get("schema") != ladder.SCHEMA
@@ -165,6 +179,13 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
         or "VPM" not in parent.get("lineage", {})
     ):
         raise FrontierError("parent ladder registration is invalid")
+    if (
+        not isinstance(args.vpm_snapshot_sha256, str)
+        or len(args.vpm_snapshot_sha256) != 64
+        or args.vpm_snapshot_sha256
+        != parent["inputs"]["vpm_snapshot"].get("sha256")
+    ):
+        raise FrontierError("VPM snapshot digest is not bound to the parent")
     required_inputs = (
         "train_manifest",
         "train_cache_metadata",
@@ -205,6 +226,7 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
             "output_dir": str(output),
             "parent_registration": ladder.file_record(parent_path),
             "parent_registration_identity_sha256": parent["identity_sha256"],
+            "runtime_verification": ladder.file_record(runtime_path),
             "inputs": inputs,
             "cache_arrays": arrays,
             "lineage": {"VPM": parent["lineage"]["VPM"]},
@@ -219,6 +241,14 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
                 "token_sample_count_per_clip_noise": TOKEN_SAMPLE_COUNT,
                 "selection_target": "DIRECT_ALIGNED calibration corrected velocity MSE",
                 "tie_break": "smaller capacity, then larger ridge penalty",
+                "dataset_array_validation_probes": {
+                    "fit": [FIT_RANGE[0], FIT_RANGE[1] - 1],
+                    "calibration": [CAL_RANGE[0], CAL_RANGE[1] - 1],
+                    "fresh_reserve_outcome": [
+                        OUTCOME_RANGE[0],
+                        OUTCOME_RANGE[1] - 1,
+                    ],
+                },
             },
             "selected_manifest_rows": {
                 role: [
@@ -241,11 +271,13 @@ def _prepare_registration(args: argparse.Namespace) -> tuple[Path, dict[str, Any
                 "validation_opened": False,
                 "protected_test_opened": False,
                 "outcome_opened_during_registration": False,
+                "historical_constructor_probe_511_excluded": True,
                 "wandb_enabled": False,
             },
             "claim_boundary": (
                 "ordinary direct residual hard control on one frozen VPM parent; "
-                "not dual diffusion and no validation/protected-test claim"
+                "historical constructor-probe row 511 is excluded; not dual "
+                "diffusion and no validation/protected-test claim"
             ),
         }
     )
@@ -265,12 +297,67 @@ def _load_registration(output: Path) -> dict[str, Any]:
         or ladder.git_output(repo, "status", "--porcelain", "--untracked-files=all")
     ):
         raise FrontierError("registered source state changed")
+    runtime = _validated_record(
+        value.get("runtime_verification", {}), "B200 runtime record"
+    )
+    if runtime != {
+        key: value["runtime_verification"][key]
+        for key in ("path", "bytes", "sha256")
+    }:
+        raise FrontierError("registered runtime receipt changed")
+    parent_record = value.get("parent_registration", {})
+    if _validated_record(parent_record, "parent registration") != {
+        key: parent_record[key] for key in ("path", "bytes", "sha256")
+    }:
+        raise FrontierError("registered parent receipt changed")
     return value
 
 
 def _resolve_input(registration: Mapping[str, Any], key: str) -> Path:
     record = registration["inputs"][key]
     return Path(_validated_record(record, key)["path"])
+
+
+class _IndexAuditedDataset:
+    """Fail before a phase requests a row outside its registered partition."""
+
+    def __init__(self, dataset: Any, allowed: Sequence[int]) -> None:
+        self.dataset = dataset
+        self.allowed = frozenset(int(index) for index in allowed)
+        if not self.allowed:
+            raise FrontierError("dataset phase has no allowed rows")
+        self.access_counts = {index: 0 for index in self.allowed}
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> Any:
+        index = int(index)
+        if index not in self.allowed:
+            raise FrontierError(f"dataset phase attempted forbidden row {index}")
+        self.access_counts[index] += 1
+        return self.dataset[index]
+
+    def assert_exact_accesses(self, expected_per_row: int) -> None:
+        if any(count != expected_per_row for count in self.access_counts.values()):
+            raise FrontierError(
+                f"dataset row-access inventory differs: {self.access_counts}"
+            )
+
+
+def _phase_dataset(
+    config: Any,
+    registration: Mapping[str, Any],
+    index_range: tuple[int, int],
+) -> _IndexAuditedDataset:
+    start, stop = index_range
+    allowed = tuple(range(start, stop))
+    dataset = ladder._no_auxiliary_dataset(
+        config,
+        registration,
+        validation_sample_indices=(start, stop - 1),
+    )
+    return _IndexAuditedDataset(dataset, allowed)
 
 
 def _future_rows(
@@ -296,6 +383,102 @@ def _future_rows(
             rows[arm].append(target_tokens[arm][local, selected])
     return torch.cat(feature_rows), {
         arm: torch.cat(values) for arm, values in rows.items()
+    }
+
+
+def _serving_inputs(
+    model: Any,
+    batch: Mapping[str, Any],
+    *,
+    noise_seed: int,
+) -> dict[str, Any]:
+    """Construct the VPM@1 call from observable history/actions only."""
+    import torch
+
+    rgb = batch["rgb"]
+    history_rgb = rgb[:, : model.num_history_frames]
+    history_latents = model._encode_clip(history_rgb).to(rgb.dtype)
+    if history_latents.shape[2] != model.num_history_latent:
+        raise FrontierError("deployable history latent length differs")
+    latent_frames = model.rgb_tokenizer.latent_temporal_len(
+        model.num_history_frames + model.num_future_frames
+    )
+    video_shape = (
+        rgb.shape[0],
+        history_latents.shape[1],
+        latent_frames,
+        history_latents.shape[3],
+        history_latents.shape[4],
+    )
+    reference = history_latents.new_zeros(video_shape)
+    reference[:, :, : history_latents.shape[2]] = history_latents
+    history_frames = int(history_latents.shape[2])
+    if model._auxiliary_history_frames(history_frames) != 0:
+        raise FrontierError("deployable endpoint requires diffuse-all auxiliary")
+    _, z_control, _ = model._latent_actions(
+        history_rgb,
+        batch["actions"],
+        batch["morphology_index"],
+        latent_frames,
+        history_frames,
+    )
+    z_control = z_control.to(rgb.dtype)
+    context = model._build_context(rgb.shape[0], rgb.device, rgb.dtype)
+    clip_fea = model._build_clip(rgb.shape[0], rgb.device, rgb.dtype)
+    initial_video = model._evaluation_noise(
+        video_shape,
+        device=rgb.device,
+        dtype=rgb.dtype,
+        base_seed=int(noise_seed),
+        sample_ids=batch["clip_index"],
+        stream=0,
+        rank=0,
+    )
+    auxiliary_shape = (
+        rgb.shape[0],
+        int(model.forward_model.tf_token_adapter.tf_channels),
+        *video_shape[2:],
+    )
+    initial_auxiliary = model._evaluation_noise(
+        auxiliary_shape,
+        device=rgb.device,
+        dtype=rgb.dtype,
+        base_seed=int(noise_seed),
+        sample_ids=batch["clip_index"],
+        stream=1,
+        rank=0,
+    )
+    schedule, timesteps, tf_only_steps = model._sampling_schedule(
+        1, device=rgb.device
+    )
+    active_step = int(tf_only_steps)
+    if (
+        active_step != 0
+        or not math.isclose(float(schedule.video[active_step]), 1.0)
+        or not math.isclose(
+            float(schedule.video[active_step + 1]),
+            0.0,
+            rel_tol=0.0,
+            abs_tol=1e-8,
+        )
+    ):
+        raise FrontierError("deployable VPM@1 schedule differs")
+    tf_sigma = schedule.time_frequency[active_step]
+    return {
+        "rgb": history_rgb,
+        "reference": reference,
+        "history_frames": history_frames,
+        "z_control": z_control,
+        "context": context,
+        "clip_fea": clip_fea,
+        "initial_video": initial_video,
+        "initial_auxiliary": initial_auxiliary,
+        "timestep": timesteps[active_step],
+        "tf_sigma": tf_sigma,
+        "tf_batch_sigma": tf_sigma.expand(rgb.shape[0]).to(
+            device=rgb.device, dtype=rgb.dtype
+        ),
+        "tf_clean": None,
     }
 
 
@@ -330,7 +513,7 @@ def _fit_phase(args: argparse.Namespace) -> int:
         Path(registration["cache_arrays"]["actions"]["path"]).resolve(strict=True),
     }
     with ladder.NumpyTargetOpenGuard(target_path) as guard:
-        dataset = ladder._no_auxiliary_dataset(config, registration)
+        dataset = _phase_dataset(config, registration, FIT_RANGE)
         with torch.inference_mode(), torch.autocast(
             device_type="cuda", dtype=torch.bfloat16
         ):
@@ -380,6 +563,7 @@ def _fit_phase(args: argparse.Namespace) -> int:
                     ladder.update_sufficient_statistics(stats, x, y)
                     del batch, prepared, hidden, projected, direct, direct_tokens
         opened = {path.resolve(strict=True) for path in guard.opened}
+    dataset.assert_exact_accesses(len(FIT_NOISE_SEEDS))
     if opened != expected_arrays:
         raise FrontierError(f"fit input graph differs: {sorted(opened)}")
     if stats is None or grid is None or patch_size is None or patch_dim is None:
@@ -398,7 +582,7 @@ def _fit_phase(args: argparse.Namespace) -> int:
     cal_y: list[Any] = []
     cal_calls = 0
     with ladder.NumpyTargetOpenGuard(target_path) as guard:
-        dataset = ladder._no_auxiliary_dataset(config, registration)
+        dataset = _phase_dataset(config, registration, CAL_RANGE)
         with torch.inference_mode(), torch.autocast(
             device_type="cuda", dtype=torch.bfloat16
         ):
@@ -439,6 +623,7 @@ def _fit_phase(args: argparse.Namespace) -> int:
                         )
                         cal_y.append(target[local, selected].cpu().to(torch.float16))
         opened = {path.resolve(strict=True) for path in guard.opened}
+    dataset.assert_exact_accesses(len(CAL_NOISE_SEEDS))
     if opened != expected_arrays:
         raise FrontierError(f"calibration input graph differs: {sorted(opened)}")
     features = torch.cat(cal_x).to(device=device, dtype=torch.float32)
@@ -515,6 +700,11 @@ def _fit_phase(args: argparse.Namespace) -> int:
             "weights": ladder.file_record(output / "adapter_weights.pt"),
             "optimization": {
                 "clip_indices": list(FIT_RANGE),
+                "dataset_array_validation_rows": [
+                    FIT_RANGE[0],
+                    FIT_RANGE[1] - 1,
+                ],
+                "exact_dataset_accesses_per_row": len(FIT_NOISE_SEEDS),
                 "noise_seeds": list(FIT_NOISE_SEEDS),
                 "sampled_future_tokens": int(stats["count"]),
                 "off_wan_invocations": fit_calls,
@@ -523,6 +713,11 @@ def _fit_phase(args: argparse.Namespace) -> int:
             },
             "calibration": {
                 "clip_indices": list(CAL_RANGE),
+                "dataset_array_validation_rows": [
+                    CAL_RANGE[0],
+                    CAL_RANGE[1] - 1,
+                ],
+                "exact_dataset_accesses_per_row": len(CAL_NOISE_SEEDS),
                 "noise_seeds": list(CAL_NOISE_SEEDS),
                 "sampled_future_tokens": int(features.shape[0]),
                 "off_wan_invocations": cal_calls,
@@ -560,7 +755,11 @@ def _load_weights(
         raise FrontierError("fit registration link differs")
     record = fit["weights"]
     path = ladder.canonical_file(record["path"], "adapter weights")
-    if path.parent != output or ladder.sha256_file(path) != record["sha256"]:
+    if (
+        path.parent != output
+        or path.stat().st_size != int(record.get("bytes", -1))
+        or ladder.sha256_file(path) != record["sha256"]
+    ):
         raise FrontierError("adapter weight artifact differs")
     weights = torch.load(path, map_location="cpu", weights_only=True)
     if (
@@ -570,6 +769,61 @@ def _load_weights(
         or set(weights.get("heads", {})) != set(ARMS)
     ):
         raise FrontierError("adapter weight payload differs")
+    selected = fit.get("selected", {})
+    capacity = int(selected.get("capacity", -1))
+    ridge_lambda = float(selected.get("ridge_lambda", float("nan")))
+    heads = weights["heads"]
+    if (
+        fit.get("optimization", {}).get("clip_indices") != list(FIT_RANGE)
+        or fit.get("optimization", {}).get("dataset_array_validation_rows")
+        != [FIT_RANGE[0], FIT_RANGE[1] - 1]
+        or int(
+            fit.get("optimization", {}).get(
+                "exact_dataset_accesses_per_row", -1
+            )
+        )
+        != len(FIT_NOISE_SEEDS)
+        or fit.get("calibration", {}).get("clip_indices") != list(CAL_RANGE)
+        or fit.get("calibration", {}).get("dataset_array_validation_rows")
+        != [CAL_RANGE[0], CAL_RANGE[1] - 1]
+        or int(
+            fit.get("calibration", {}).get(
+                "exact_dataset_accesses_per_row", -1
+            )
+        )
+        != len(CAL_NOISE_SEEDS)
+        or int(fit.get("optimization", {}).get("teacher_calls", -1)) != 0
+        or fit.get("optimization", {}).get("vjepa_target_array_opened") is not False
+        or int(fit.get("calibration", {}).get("teacher_calls", -1)) != 0
+        or fit.get("fresh_reserve_outcome_opened") is not False
+        or fit.get("validation_opened") is not False
+        or fit.get("protected_test_opened") is not False
+        or fit.get("zero_head_exact_zero") is not True
+        or weights.get("projection_seed") != PROJECTION_SEED
+        or weights.get("selected_capacity") != capacity
+        or not math.isclose(
+            float(weights.get("selected_ridge_lambda", float("nan"))),
+            ridge_lambda,
+            rel_tol=0.0,
+            abs_tol=0.0,
+        )
+        or capacity not in CAPACITY_RUNGS
+        or ridge_lambda not in RIDGE_LAMBDAS
+        or any(
+            head.get("arm") != arm
+            or int(head.get("capacity", -1)) != capacity
+            or not math.isclose(
+                float(head.get("ridge_lambda", float("nan"))),
+                ridge_lambda,
+                rel_tol=0.0,
+                abs_tol=0.0,
+            )
+            for arm, head in heads.items()
+        )
+        or len({int(head.get("parameter_count", -1)) for head in heads.values()})
+        != 1
+    ):
+        raise FrontierError("selected adapter capacity/regularization differs")
     return fit, dict(weights)
 
 
@@ -578,8 +832,22 @@ def _event_ms(start: Any, end: Any) -> float:
     return float(start.elapsed_time(end))
 
 
-def _evaluate_phase(args: argparse.Namespace) -> int:
+def _latency_summary(values: Sequence[float]) -> dict[str, float]:
     import numpy as np
+
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim != 1 or not len(array) or not np.isfinite(array).all():
+        raise FrontierError("latency trace is empty or non-finite")
+    if np.any(array < 0):
+        raise FrontierError("latency trace contains a negative value")
+    return {
+        "mean": float(np.mean(array)),
+        "p50": float(np.quantile(array, 0.50)),
+        "p95": float(np.quantile(array, 0.95)),
+    }
+
+
+def _evaluate_phase(args: argparse.Namespace) -> int:
     import torch
 
     if not torch.cuda.is_available():
@@ -608,22 +876,31 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
     wan_invocations = 0
     adapter_timings = {arm: [] for arm in ARMS}
     wan_timings: list[float] = []
+    preparation_timings: list[float] = []
+    integration_timings = {endpoint: [] for endpoint in ENDPOINTS}
     decoder_timings = {endpoint: [] for endpoint in ENDPOINTS}
+    full_aligned_timings: list[float] = []
+    timing_rows: list[dict[str, Any]] = []
     with ladder.NumpyTargetOpenGuard(target_path) as guard:
-        dataset = ladder._no_auxiliary_dataset(config, registration)
+        dataset = _phase_dataset(config, registration, OUTCOME_RANGE)
         with torch.inference_mode(), torch.autocast(
             device_type="cuda", dtype=torch.bfloat16
         ):
             for noise_seed in OUTCOME_NOISE_SEEDS:
                 for start in range(OUTCOME_RANGE[0], OUTCOME_RANGE[1], 2):
-                    indexes = (start, start + 1)
+                    indexes = tuple(
+                        range(start, min(start + 2, OUTCOME_RANGE[1]))
+                    )
                     batch = ladder._batch_samples(dataset, indexes, device)
-                    prepared = ladder._model_inputs(
-                        model,
-                        batch,
-                        noise_seed=noise_seed,
-                        nfe=1,
-                        need_clean_auxiliary=False,
+                    torch.cuda.synchronize()
+                    full_started = time.perf_counter()
+                    preparation_started = time.perf_counter()
+                    prepared = _serving_inputs(
+                        model, batch, noise_seed=noise_seed
+                    )
+                    torch.cuda.synchronize()
+                    preparation_timings.append(
+                        1000.0 * (time.perf_counter() - preparation_started)
                     )
                     before = torch.cuda.Event(enable_timing=True)
                     after = torch.cuda.Event(enable_timing=True)
@@ -646,9 +923,11 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
                         device=device,
                     )
                     first_future = int(positions[0])
-                    velocities = {"VPM_OFF": off_velocity.float()}
-                    residuals = {}
-                    for arm in ARMS:
+                    future_frames = int(model.num_future_frames)
+                    if future_frames != 8 or batch["rgb"].shape[1] < 9:
+                        raise FrontierError("VPM direct future horizon differs")
+
+                    def adapter_velocity(arm: str) -> tuple[Any, Any]:
                         before = torch.cuda.Event(enable_timing=True)
                         after = torch.cuda.Event(enable_timing=True)
                         before.record()
@@ -665,16 +944,90 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
                         )
                         after.record()
                         adapter_timings[arm].append(_event_ms(before, after))
+                        return off_velocity.float() + residual.float(), residual
+
+                    def integrate_decode(endpoint: str, velocity: Any) -> tuple[Any, Any]:
+                        before = torch.cuda.Event(enable_timing=True)
+                        after = torch.cuda.Event(enable_timing=True)
+                        before.record()
+                        final = ladder._one_step_final(
+                            prepared["initial_video"],
+                            velocity,
+                            prepared["reference"],
+                            prepared["history_frames"],
+                        )
+                        after.record()
+                        integration_timings[endpoint].append(_event_ms(before, after))
+                        before = torch.cuda.Event(enable_timing=True)
+                        after = torch.cuda.Event(enable_timing=True)
+                        before.record()
+                        decoded_full = model.rgb_tokenizer.decode_temporal(
+                            final.to(batch["rgb"].dtype),
+                            out_hw=(
+                                batch["rgb"].shape[-2],
+                                batch["rgb"].shape[-1],
+                            ),
+                        )
+                        decoded = ladder._to_uint8_video(
+                            decoded_full[:, :, -future_frames:]
+                        )
+                        after.record()
+                        decoder_timings[endpoint].append(_event_ms(before, after))
+                        ladder._validate_decoded_horizon(
+                            model_future_frames=future_frames,
+                            decoded_frames=decoded_full.shape[2],
+                            raw_frames=batch["rgb"].shape[1],
+                            endpoint=endpoint,
+                        )
+                        return final, decoded
+
+                    # The primary endpoint is materialized first, before any
+                    # target/future encode and before control-only adapters.
+                    aligned_velocity, aligned_residual = adapter_velocity(
+                        "DIRECT_ALIGNED"
+                    )
+                    aligned_final, aligned_decoded = integrate_decode(
+                        "DIRECT_ALIGNED", aligned_velocity
+                    )
+                    torch.cuda.synchronize()
+                    full_aligned_timings.append(
+                        1000.0 * (time.perf_counter() - full_started)
+                    )
+                    velocities = {
+                        "VPM_OFF": off_velocity.float(),
+                        "DIRECT_ALIGNED": aligned_velocity,
+                    }
+                    residuals = {"DIRECT_ALIGNED": aligned_residual}
+                    finals = {"DIRECT_ALIGNED": aligned_final}
+                    decoded_by_endpoint = {"DIRECT_ALIGNED": aligned_decoded}
+                    for arm in ("ZERO", "DIRECT_SHUFFLED"):
+                        velocity, residual = adapter_velocity(arm)
+                        velocities[arm] = velocity
                         residuals[arm] = residual
-                        velocities[arm] = off_velocity.float() + residual.float()
                     if int(torch.count_nonzero(residuals["ZERO"])) != 0:
                         raise FrontierError("ZERO residual is not exact zero")
+                    for endpoint in ("VPM_OFF", "ZERO", "DIRECT_SHUFFLED"):
+                        final, decoded = integrate_decode(
+                            endpoint, velocities[endpoint]
+                        )
+                        finals[endpoint] = final
+                        decoded_by_endpoint[endpoint] = decoded
+                    if not torch.equal(finals["VPM_OFF"], finals["ZERO"]):
+                        raise FrontierError("ZERO final differs from VPM_OFF")
 
+                    # Only after every endpoint has been materialized may the
+                    # evaluator encode clean future RGB and construct targets.
+                    video_clean = model._encode_clip(batch["rgb"]).to(
+                        batch["rgb"].dtype
+                    )
+                    if video_clean.shape != prepared["initial_video"].shape:
+                        raise FrontierError("scoring clean-video grid differs")
+                    video_target = prepared["initial_video"] - video_clean
                     decoded_clean = model.rgb_tokenizer.decode_temporal(
-                        prepared["video_clean"],
+                        video_clean,
                         out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
                     )
-                    future_frames = ladder._validate_decoded_horizon(
+                    ladder._validate_decoded_horizon(
                         model_future_frames=model.num_future_frames,
                         decoded_frames=decoded_clean.shape[2],
                         raw_frames=batch["rgb"].shape[1],
@@ -687,52 +1040,28 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
                         decoded_clean[:, :, -(future_frames + 1) : -future_frames]
                     )
                     raw_video = batch["rgb"].permute(0, 2, 1, 3, 4)
-                    raw_target = ladder._to_uint8_video(
-                        raw_video[:, :, -future_frames:]
-                    )
-                    raw_history = ladder._to_uint8_video(
-                        raw_video[:, :, -(future_frames + 1) : -future_frames]
-                    )
-                    direct_target = prepared["video_target"] - off_velocity
-                    finals = {}
+                    raw_target_exact = raw_video[:, :, -future_frames:]
+                    raw_history_exact = raw_video[
+                        :, :, -(future_frames + 1) : -future_frames
+                    ]
+                    raw_target = ladder._to_uint8_video(raw_target_exact)
+                    raw_history = ladder._to_uint8_video(raw_history_exact)
+                    direct_target = video_target - off_velocity
                     metrics_by_endpoint = {}
                     for endpoint, velocity in velocities.items():
-                        final = ladder._one_step_final(
-                            prepared["initial_video"],
-                            velocity,
-                            prepared["reference"],
-                            prepared["history_frames"],
-                        )
-                        finals[endpoint] = final
-                        before = torch.cuda.Event(enable_timing=True)
-                        after = torch.cuda.Event(enable_timing=True)
-                        before.record()
-                        decoded = ladder._to_uint8_video(
-                            model.rgb_tokenizer.decode_temporal(
-                                final.to(batch["rgb"].dtype),
-                                out_hw=(
-                                    batch["rgb"].shape[-2],
-                                    batch["rgb"].shape[-1],
-                                ),
-                            )[:, :, -future_frames:]
-                        )
-                        after.record()
-                        decoder_timings[endpoint].append(_event_ms(before, after))
                         metrics_by_endpoint[endpoint] = ladder._per_sample_future_metrics(
                             velocity=velocity,
                             base_velocity=off_velocity,
                             direct_residual=direct_target,
-                            final=final,
-                            clean=prepared["video_clean"],
-                            decoded=decoded,
+                            final=finals[endpoint],
+                            clean=video_clean,
+                            decoded=decoded_by_endpoint[endpoint],
                             raw_target=raw_target,
                             raw_history=raw_history,
                             vae_target=vae_target,
                             vae_history=vae_history,
                             history_frames=prepared["history_frames"],
                         )
-                    if not torch.equal(finals["VPM_OFF"], finals["ZERO"]):
-                        raise FrontierError("ZERO final differs from VPM_OFF")
 
                     for endpoint in ENDPOINTS:
                         metrics = metrics_by_endpoint[endpoint]
@@ -769,21 +1098,96 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
                                             "actions": ladder._safe_tensor_sha256(
                                                 batch["actions"][local : local + 1]
                                             ),
+                                            "morphology_index": ladder._safe_tensor_sha256(
+                                                batch["morphology_index"][
+                                                    local : local + 1
+                                                ]
+                                            ),
+                                            "action_control": ladder._safe_tensor_sha256(
+                                                prepared["z_control"][local : local + 1]
+                                            ),
+                                            "auxiliary_noise": ladder._safe_tensor_sha256(
+                                                prepared["initial_auxiliary"][
+                                                    local : local + 1
+                                                ]
+                                            ),
+                                            "raw_history_input": ladder._safe_tensor_sha256(
+                                                batch["rgb"][
+                                                    local : local + 1,
+                                                    : model.num_history_frames,
+                                                ]
+                                            ),
+                                            "history_reference": ladder._safe_tensor_sha256(
+                                                prepared["reference"][local : local + 1]
+                                            ),
+                                            "latent_flow_target": ladder._safe_tensor_sha256(
+                                                video_target[
+                                                    local : local + 1,
+                                                    :,
+                                                    prepared["history_frames"] :,
+                                                ]
+                                            ),
                                             "raw_future_target": ladder._safe_tensor_sha256(
-                                                raw_target[local : local + 1]
+                                                raw_target_exact[local : local + 1]
                                             ),
                                             "raw_history_boundary": ladder._safe_tensor_sha256(
+                                                raw_history_exact[local : local + 1]
+                                            ),
+                                            "scoring_future_uint8": ladder._safe_tensor_sha256(
+                                                raw_target[local : local + 1]
+                                            ),
+                                            "scoring_history_uint8": ladder._safe_tensor_sha256(
                                                 raw_history[local : local + 1]
                                             ),
                                         },
+                                        "scoring_target_constructed_after_all_endpoints": True,
                                         "fresh_reserve_outcome_opened": True,
                                         "validation_opened": False,
                                         "protected_test_opened": False,
                                     }
                                 )
                             )
-                    del batch, prepared, hidden, velocities, residuals, finals
+                    timing_rows.append(
+                        ladder.identity_payload(
+                            {
+                                "schema": TIMING_SCHEMA,
+                                "batch_ordinal": len(timing_rows),
+                                "noise_seed": noise_seed,
+                                "clip_indices": list(indexes),
+                                "batch_size": len(indexes),
+                                "latency_ms": {
+                                    "causal_preparation": preparation_timings[-1],
+                                    "wan": wan_timings[-1],
+                                    "adapter": {
+                                        arm: adapter_timings[arm][-1]
+                                        for arm in ARMS
+                                    },
+                                    "euler": {
+                                        endpoint: integration_timings[endpoint][-1]
+                                        for endpoint in ENDPOINTS
+                                    },
+                                    "decoder": {
+                                        endpoint: decoder_timings[endpoint][-1]
+                                        for endpoint in ENDPOINTS
+                                    },
+                                    "full_aligned_endpoint": full_aligned_timings[-1],
+                                },
+                            }
+                        )
+                    )
+                    del (
+                        batch,
+                        prepared,
+                        hidden,
+                        velocities,
+                        residuals,
+                        finals,
+                        decoded_by_endpoint,
+                        video_clean,
+                        video_target,
+                    )
         opened = {path.resolve(strict=True) for path in guard.opened}
+    dataset.assert_exact_accesses(len(OUTCOME_NOISE_SEEDS))
     if opened != expected_arrays:
         raise FrontierError(f"outcome input graph differs: {sorted(opened)}")
     expected_rows = (
@@ -792,7 +1196,7 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
         * len(ENDPOINTS)
     )
     expected_calls = (
-        (OUTCOME_RANGE[1] - OUTCOME_RANGE[0])
+        (OUTCOME_RANGE[1] - OUTCOME_RANGE[0] + 1)
         // 2
         * len(OUTCOME_NOISE_SEEDS)
     )
@@ -800,6 +1204,8 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
         raise FrontierError("outcome row/Wan accounting differs")
     rows_path = output / "outcome_rows.jsonl"
     ladder.exclusive_jsonl(rows_path, rows)
+    timing_path = output / "timing_rows.jsonl"
+    ladder.exclusive_jsonl(timing_path, timing_rows)
     receipt = ladder.identity_payload(
         {
             "schema": ENDPOINT_SCHEMA,
@@ -807,36 +1213,46 @@ def _evaluate_phase(args: argparse.Namespace) -> int:
             "registration_identity_sha256": registration["identity_sha256"],
             "fit_identity_sha256": fit["identity_sha256"],
             "rows": ladder.file_record(rows_path),
+            "timing_rows": ladder.file_record(timing_path),
+            "timing_row_count": len(timing_rows),
             "row_count": len(rows),
+            "outcome_clip_range": list(OUTCOME_RANGE),
+            "dataset_array_validation_rows": [
+                OUTCOME_RANGE[0],
+                OUTCOME_RANGE[1] - 1,
+            ],
+            "exact_dataset_accesses_per_row": len(OUTCOME_NOISE_SEEDS),
             "shared_wan_invocations": wan_invocations,
             "wan_sample_calls": (OUTCOME_RANGE[1] - OUTCOME_RANGE[0])
             * len(OUTCOME_NOISE_SEEDS),
             "teacher_calls": 0,
             "vjepa_target_array_opened": False,
             "future_target_entered_correction": False,
+            "scoring_target_constructed_after_all_endpoints": True,
             "zero_equals_off_bit_exact": True,
             "adapter_latency_ms_per_batch": {
-                arm: {
-                    "mean": float(np.mean(values)),
-                    "p50": float(np.quantile(values, 0.50)),
-                    "p95": float(np.quantile(values, 0.95)),
-                }
+                arm: _latency_summary(values)
                 for arm, values in adapter_timings.items()
             },
-            "wan_latency_ms_per_batch": {
-                "mean": float(np.mean(wan_timings)),
-                "p50": float(np.quantile(wan_timings, 0.50)),
-                "p95": float(np.quantile(wan_timings, 0.95)),
+            "wan_latency_ms_per_batch": _latency_summary(wan_timings),
+            "causal_preparation_latency_ms_per_batch": _latency_summary(
+                preparation_timings
+            ),
+            "euler_latency_ms_per_batch": {
+                endpoint: _latency_summary(values)
+                for endpoint, values in integration_timings.items()
             },
             "decoder_latency_ms_per_batch": {
-                endpoint: {
-                    "mean": float(np.mean(values)),
-                    "p95": float(np.quantile(values, 0.95)),
-                }
+                endpoint: _latency_summary(values)
                 for endpoint, values in decoder_timings.items()
             },
+            "full_aligned_endpoint_latency_ms_per_batch": _latency_summary(
+                full_aligned_timings
+            ),
             "latency_scope": (
-                "component timing; evaluator clean-target VAE is excluded from serving latency"
+                "synchronized wall time from resident observed-history/action "
+                "preparation through Wan, aligned adapter, Euler update, and "
+                "RGB decode; evaluator clean-target encoding/scoring excluded"
             ),
             "fresh_reserve_outcome_opened": True,
             "validation_opened": False,
@@ -887,10 +1303,33 @@ def _bootstrap_relative(
 
 
 def analyze_rows(
-    rows: Sequence[Mapping[str, Any]], *, adapter_p95_ms: float
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    adapter_p95_ms: float,
+    registered_samples: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     import numpy as np
 
+    adapter_p95_ms = float(adapter_p95_ms)
+    if not math.isfinite(adapter_p95_ms) or adapter_p95_ms < 0:
+        raise FrontierError("adapter p95 latency must be finite and nonnegative")
+    registered = {
+        int(sample.get("clip_index", -1)): (
+            sample.get("clip_id"),
+            sample.get("episode_dir"),
+        )
+        for sample in registered_samples
+    }
+    if (
+        set(registered) != set(range(*OUTCOME_RANGE))
+        or len(registered) != len(registered_samples)
+        or any(
+            not isinstance(clip_id, str)
+            or not isinstance(episode_dir, str)
+            for clip_id, episode_dir in registered.values()
+        )
+    ):
+        raise FrontierError("registered reserve identity inventory differs")
     expected = {
         (endpoint, clip, seed)
         for endpoint in ENDPOINTS
@@ -913,11 +1352,17 @@ def analyze_rows(
             or int(row.get("teacher_calls", -1)) != 0
             or row.get("vjepa_target_array_opened") is not False
             or row.get("future_target_entered_correction") is not False
+            or row.get("scoring_target_constructed_after_all_endpoints") is not True
             or row.get("fresh_reserve_outcome_opened") is not True
             or row.get("validation_opened") is not False
             or row.get("protected_test_opened") is not False
         ):
             raise FrontierError("outcome row violates serving/split contract")
+        if (
+            row.get("clip_id"),
+            row.get("episode_dir"),
+        ) != registered.get(key[1]):
+            raise FrontierError("outcome row differs from registered reserve identity")
         metrics = row.get("metrics")
         tensor_hashes = row.get("tensor_sha256")
         required_metrics = {
@@ -929,8 +1374,16 @@ def analyze_rows(
             "initial_video",
             "final_video",
             "actions",
+            "morphology_index",
+            "action_control",
+            "auxiliary_noise",
+            "raw_history_input",
+            "history_reference",
+            "latent_flow_target",
             "raw_future_target",
             "raw_history_boundary",
+            "scoring_future_uint8",
+            "scoring_history_uint8",
         }
         if (
             not isinstance(metrics, Mapping)
@@ -953,8 +1406,16 @@ def analyze_rows(
             for field in (
                 "initial_video",
                 "actions",
+                "morphology_index",
+                "action_control",
+                "auxiliary_noise",
+                "raw_history_input",
+                "history_reference",
+                "latent_flow_target",
                 "raw_future_target",
                 "raw_history_boundary",
+                "scoring_future_uint8",
+                "scoring_history_uint8",
             ):
                 if len(
                     {
@@ -1038,7 +1499,7 @@ def analyze_rows(
         latent["relative_improvement_percent"] >= 0.0
         and latent["paired_episode_bootstrap_95_percent"][0] > -1.0
     )
-    gates["adapter_p95_below_1ms"] = float(adapter_p95_ms) < 1.0
+    gates["adapter_p95_below_1ms"] = adapter_p95_ms < 1.0
     gates["zero_equals_off_bit_exact"] = True
     gates["one_wan_call_feature_free_serving"] = True
     gates["fresh_reserve_only_no_validation_or_test"] = True
@@ -1051,7 +1512,7 @@ def analyze_rows(
             "noise_seeds_per_episode": len(seeds),
             "aggregates": aggregates,
             "comparisons": comparisons,
-            "adapter_p95_ms_per_batch": float(adapter_p95_ms),
+            "adapter_p95_ms_per_batch": adapter_p95_ms,
             "gates": {**gates, "all_passed": passed},
             "decision": (
                 "ADVANCE_VPM_DIRECT_RESIDUAL"
@@ -1066,10 +1527,89 @@ def analyze_rows(
     )
 
 
-def _analyze_phase(args: argparse.Namespace) -> int:
-    output = ladder.canonical_directory(args.output_dir, "output directory")
-    registration = _load_registration(output)
-    fit, _weights = _load_weights(output, registration)
+def _validated_timing_trace(
+    output: Path, endpoint: Mapping[str, Any]
+) -> tuple[Path, float]:
+    record = endpoint.get("timing_rows", {})
+    path = ladder.canonical_file(record.get("path", ""), "timing rows")
+    if (
+        path.parent != output
+        or path.stat().st_size != int(record.get("bytes", -1))
+        or ladder.sha256_file(path) != record.get("sha256")
+    ):
+        raise FrontierError("timing-row artifact differs")
+    rows = ladder.read_jsonl(path)
+    expected = []
+    for noise_seed in OUTCOME_NOISE_SEEDS:
+        for start in range(OUTCOME_RANGE[0], OUTCOME_RANGE[1], 2):
+            expected.append(
+                (
+                    noise_seed,
+                    list(range(start, min(start + 2, OUTCOME_RANGE[1]))),
+                )
+            )
+    if len(rows) != len(expected) or int(
+        endpoint.get("timing_row_count", -1)
+    ) != len(expected):
+        raise FrontierError("timing-row inventory differs")
+    preparation = []
+    wan = []
+    full = []
+    adapter = {arm: [] for arm in ARMS}
+    euler = {name: [] for name in ENDPOINTS}
+    decoder = {name: [] for name in ENDPOINTS}
+    for ordinal, (row, (noise_seed, clip_indices)) in enumerate(
+        zip(rows, expected, strict=True)
+    ):
+        values = row.get("latency_ms", {})
+        if (
+            row.get("schema") != TIMING_SCHEMA
+            or not ladder.identity_valid(row)
+            or int(row.get("batch_ordinal", -1)) != ordinal
+            or int(row.get("noise_seed", -1)) != noise_seed
+            or row.get("clip_indices") != clip_indices
+            or int(row.get("batch_size", -1)) != len(clip_indices)
+            or set(values.get("adapter", {})) != set(ARMS)
+            or set(values.get("euler", {})) != set(ENDPOINTS)
+            or set(values.get("decoder", {})) != set(ENDPOINTS)
+        ):
+            raise FrontierError("timing row schema/inventory differs")
+        preparation.append(float(values.get("causal_preparation", float("nan"))))
+        wan.append(float(values.get("wan", float("nan"))))
+        full.append(float(values.get("full_aligned_endpoint", float("nan"))))
+        for arm in ARMS:
+            adapter[arm].append(float(values["adapter"][arm]))
+        for endpoint_name in ENDPOINTS:
+            euler[endpoint_name].append(float(values["euler"][endpoint_name]))
+            decoder[endpoint_name].append(float(values["decoder"][endpoint_name]))
+    summaries = {
+        "adapter_latency_ms_per_batch": {
+            arm: _latency_summary(values) for arm, values in adapter.items()
+        },
+        "wan_latency_ms_per_batch": _latency_summary(wan),
+        "causal_preparation_latency_ms_per_batch": _latency_summary(preparation),
+        "euler_latency_ms_per_batch": {
+            name: _latency_summary(values) for name, values in euler.items()
+        },
+        "decoder_latency_ms_per_batch": {
+            name: _latency_summary(values) for name, values in decoder.items()
+        },
+        "full_aligned_endpoint_latency_ms_per_batch": _latency_summary(full),
+    }
+    if any(endpoint.get(key) != value for key, value in summaries.items()):
+        raise FrontierError("endpoint latency summary differs from timing trace")
+    if any(value <= 0 for value in full):
+        raise FrontierError("full aligned endpoint latency must be positive")
+    return path, summaries["adapter_latency_ms_per_batch"]["DIRECT_ALIGNED"][
+        "p95"
+    ]
+
+
+def _validated_endpoint_receipt(
+    output: Path,
+    registration: Mapping[str, Any],
+    fit: Mapping[str, Any],
+) -> tuple[dict[str, Any], Path, Path, float]:
     endpoint = ladder.read_json(output / "endpoint_complete.json")
     if (
         endpoint.get("schema") != ENDPOINT_SCHEMA
@@ -1079,14 +1619,66 @@ def _analyze_phase(args: argparse.Namespace) -> int:
         or endpoint.get("fit_identity_sha256") != fit["identity_sha256"]
     ):
         raise FrontierError("endpoint receipt differs")
-    rows_path = ladder.canonical_file(endpoint["rows"]["path"], "outcome rows")
-    if rows_path.parent != output or ladder.sha256_file(rows_path) != endpoint["rows"]["sha256"]:
-        raise FrontierError("outcome rows artifact differs")
-    rows = ladder.read_jsonl(rows_path)
-    adapter_p95 = float(
-        endpoint["adapter_latency_ms_per_batch"]["DIRECT_ALIGNED"]["p95"]
+    outcome_count = OUTCOME_RANGE[1] - OUTCOME_RANGE[0]
+    expected_rows = outcome_count * len(OUTCOME_NOISE_SEEDS) * len(ENDPOINTS)
+    expected_batch_calls = ((outcome_count + 1) // 2) * len(
+        OUTCOME_NOISE_SEEDS
     )
-    analysis = analyze_rows(rows, adapter_p95_ms=adapter_p95)
+    full_latency = endpoint.get("full_aligned_endpoint_latency_ms_per_batch", {})
+    full_latency_values = [
+        float(full_latency.get(key, float("nan")))
+        for key in ("mean", "p50", "p95")
+    ]
+    if (
+        int(endpoint.get("row_count", -1)) != expected_rows
+        or endpoint.get("outcome_clip_range") != list(OUTCOME_RANGE)
+        or endpoint.get("dataset_array_validation_rows")
+        != [OUTCOME_RANGE[0], OUTCOME_RANGE[1] - 1]
+        or int(endpoint.get("exact_dataset_accesses_per_row", -1))
+        != len(OUTCOME_NOISE_SEEDS)
+        or int(endpoint.get("shared_wan_invocations", -1))
+        != expected_batch_calls
+        or int(endpoint.get("wan_sample_calls", -1))
+        != outcome_count * len(OUTCOME_NOISE_SEEDS)
+        or int(endpoint.get("teacher_calls", -1)) != 0
+        or endpoint.get("vjepa_target_array_opened") is not False
+        or endpoint.get("future_target_entered_correction") is not False
+        or endpoint.get("scoring_target_constructed_after_all_endpoints")
+        is not True
+        or endpoint.get("zero_equals_off_bit_exact") is not True
+        or endpoint.get("fresh_reserve_outcome_opened") is not True
+        or endpoint.get("validation_opened") is not False
+        or endpoint.get("protected_test_opened") is not False
+        or not all(math.isfinite(value) and value > 0 for value in full_latency_values)
+    ):
+        raise FrontierError("endpoint call/access accounting differs")
+    rows_path = ladder.canonical_file(endpoint["rows"]["path"], "outcome rows")
+    if (
+        rows_path.parent != output
+        or rows_path.stat().st_size != int(endpoint["rows"].get("bytes", -1))
+        or ladder.sha256_file(rows_path) != endpoint["rows"]["sha256"]
+    ):
+        raise FrontierError("outcome rows artifact differs")
+    timing_path, aligned_adapter_p95 = _validated_timing_trace(output, endpoint)
+    return endpoint, rows_path, timing_path, aligned_adapter_p95
+
+
+def _analyze_phase(args: argparse.Namespace) -> int:
+    output = ladder.canonical_directory(args.output_dir, "output directory")
+    registration = _load_registration(output)
+    fit, _weights = _load_weights(output, registration)
+    endpoint, rows_path, _timing_path, adapter_p95 = _validated_endpoint_receipt(
+        output, registration, fit
+    )
+    rows = ladder.read_jsonl(rows_path)
+    registered_samples = registration["selected_manifest_rows"][
+        "fresh_reserve_outcome"
+    ]
+    analysis = analyze_rows(
+        rows,
+        adapter_p95_ms=adapter_p95,
+        registered_samples=registered_samples,
+    )
     analysis = ladder.identity_payload(
         {
             **analysis,
@@ -1107,6 +1699,9 @@ def _analyze_phase(args: argparse.Namespace) -> int:
             "analysis": ladder.file_record(output / "analysis.json"),
             "decision": analysis["decision"],
             "outcome_row_count": len(rows),
+            "eligible_outcome_episode_count": OUTCOME_RANGE[1]
+            - OUTCOME_RANGE[0],
+            "historical_constructor_probe_511_excluded": True,
             "teacher_calls": 0,
             "vjepa_target_array_opens": 0,
             "fresh_reserve_outcome_opened": True,
@@ -1131,7 +1726,9 @@ def _audit_phase(args: argparse.Namespace) -> int:
     output = ladder.canonical_directory(args.output_dir, "output directory")
     registration = _load_registration(output)
     fit, _weights = _load_weights(output, registration)
-    endpoint = ladder.read_json(output / "endpoint_complete.json")
+    endpoint, rows_path, timing_path, adapter_p95 = _validated_endpoint_receipt(
+        output, registration, fit
+    )
     analysis = ladder.read_json(output / "analysis.json")
     complete = ladder.read_json(output / "run_complete.json")
     for value, schema in (
@@ -1148,14 +1745,37 @@ def _audit_phase(args: argparse.Namespace) -> int:
         or complete.get("endpoint_identity_sha256") != endpoint["identity_sha256"]
         or complete.get("analysis_identity_sha256") != analysis["identity_sha256"]
         or complete.get("decision") != analysis["decision"]
+        or int(complete.get("outcome_row_count", -1))
+        != (OUTCOME_RANGE[1] - OUTCOME_RANGE[0])
+        * len(OUTCOME_NOISE_SEEDS)
+        * len(ENDPOINTS)
+        or int(complete.get("eligible_outcome_episode_count", -1))
+        != OUTCOME_RANGE[1] - OUTCOME_RANGE[0]
+        or complete.get("historical_constructor_probe_511_excluded") is not True
+        or int(complete.get("teacher_calls", -1)) != 0
+        or int(complete.get("vjepa_target_array_opens", -1)) != 0
+        or complete.get("fresh_reserve_outcome_opened") is not True
+        or complete.get("validation_opened") is not False
+        or complete.get("protected_test_opened") is not False
     ):
         raise FrontierError("completion identity links differ")
-    rows = ladder.read_jsonl(output / "outcome_rows.jsonl")
+    analysis_record = complete.get("analysis", {})
+    analysis_path = ladder.canonical_file(
+        analysis_record.get("path", ""), "audited analysis"
+    )
+    if (
+        analysis_path != output / "analysis.json"
+        or analysis_path.stat().st_size != int(analysis_record.get("bytes", -1))
+        or ladder.sha256_file(analysis_path) != analysis_record.get("sha256")
+    ):
+        raise FrontierError("audited analysis receipt differs")
+    rows = ladder.read_jsonl(rows_path)
     recomputed = analyze_rows(
         rows,
-        adapter_p95_ms=float(
-            endpoint["adapter_latency_ms_per_batch"]["DIRECT_ALIGNED"]["p95"]
-        ),
+        adapter_p95_ms=adapter_p95,
+        registered_samples=registration["selected_manifest_rows"][
+            "fresh_reserve_outcome"
+        ],
     )
     for key in ("aggregates", "comparisons", "gates", "decision"):
         if recomputed[key] != analysis[key]:
@@ -1165,6 +1785,7 @@ def _audit_phase(args: argparse.Namespace) -> int:
         "fit.json",
         "adapter_weights.pt",
         "outcome_rows.jsonl",
+        "timing_rows.jsonl",
         "endpoint_complete.json",
         "analysis.json",
         "run_complete.json",
@@ -1185,7 +1806,13 @@ def _audit_phase(args: argparse.Namespace) -> int:
             },
             "row_inventory_recomputed": True,
             "paired_hashes_recomputed": True,
+            "timing_trace_recomputed": True,
             "zero_noop_recomputed": True,
+            "role_scoped_dataset_access_receipts_validated": True,
+            "historical_constructor_probe_511_excluded": True,
+            "runtime_verification_sha256": registration[
+                "runtime_verification"
+            ]["sha256"],
             "teacher_calls": 0,
             "vjepa_target_array_opens": 0,
             "fresh_reserve_outcome_opened": True,
@@ -1210,6 +1837,8 @@ def parser() -> argparse.ArgumentParser:
     fit.add_argument("--repo-root", required=True)
     fit.add_argument("--expected-source-commit", required=True)
     fit.add_argument("--parent-registration", required=True)
+    fit.add_argument("--vpm-snapshot-sha256", required=True)
+    fit.add_argument("--runtime-record", required=True)
     fit.add_argument("--output-dir", required=True)
     for command in ("evaluate", "analyze", "audit"):
         commands.add_parser(command).add_argument("--output-dir", required=True)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ class ABCVideoResidualAnchorDataset(Dataset):
         expected_manifest_sha256: str,
         expected_rgb_sha256: str,
         expected_actions_sha256: str,
+        validation_sample_indices: Sequence[int] | None = None,
         seed: int = 0,
         infinite: bool = True,
         transform: Any = None,
@@ -51,6 +53,19 @@ class ABCVideoResidualAnchorDataset(Dataset):
         self.expected_manifest_sha256 = str(expected_manifest_sha256)
         self.expected_rgb_sha256 = str(expected_rgb_sha256)
         self.expected_actions_sha256 = str(expected_actions_sha256)
+        if validation_sample_indices is None:
+            validation_sample_indices = (0, self.expected_clip_count - 1)
+        self.validation_sample_indices = tuple(
+            sorted({int(index) for index in validation_sample_indices})
+        )
+        if (
+            not self.validation_sample_indices
+            or any(
+                index < 0 or index >= self.expected_clip_count
+                for index in self.validation_sample_indices
+            )
+        ):
+            raise ValueError("array validation sample indices are invalid")
         if self.expected_split not in {"train", "val"}:
             raise ValueError("residual-anchor dataset permits only train or val")
         with Path(self.clip_manifest).open(encoding="utf-8") as handle:
@@ -162,7 +177,7 @@ class ABCVideoResidualAnchorDataset(Dataset):
     def _validate_arrays(self) -> None:
         rgbs = self._open_rgbs()
         actions = self._open_actions()
-        for index in sorted({0, self.expected_clip_count - 1}):
+        for index in self.validation_sample_indices:
             rgb = np.asarray(rgbs[index])
             action = np.asarray(actions[index])
             if (

@@ -56,7 +56,7 @@ done
 [[ -f "$PARENT_REGISTRATION" && ! -L "$PARENT_REGISTRATION" ]] || \
   die "parent registration is invalid"
 [[ ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || die "output must be fresh"
-EXPECTED_BASENAME="vpm-direct-residual-fit256-outcome32-seed20260832-${EXPECTED_COMMIT:0:7}-v1"
+EXPECTED_BASENAME="vpm-direct-residual-fit256-outcome31-seed20260832-${EXPECTED_COMMIT:0:7}-v2"
 [[ "$(basename "$OUTPUT_DIR")" == "$EXPECTED_BASENAME" ]] || \
   die "output basename must be $EXPECTED_BASENAME"
 
@@ -87,6 +87,8 @@ COMMON=("$PYTHON_BIN" "$REPO_ROOT/tools/vpm_direct_residual_frontier.py")
   --repo-root "$REPO_ROOT" \
   --expected-source-commit "$EXPECTED_COMMIT" \
   --parent-registration "$PARENT_REGISTRATION" \
+  --vpm-snapshot-sha256 "$VPM_SHA256" \
+  --runtime-record "$RUNTIME_RECORD" \
   --output-dir "$OUTPUT_DIR"
 
 "${COMMON[@]}" evaluate --output-dir "$OUTPUT_DIR"

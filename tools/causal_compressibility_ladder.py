@@ -764,7 +764,12 @@ def _target_dataset(config: Any) -> Any:
     return dataset
 
 
-def _no_auxiliary_dataset(config: Any, registration: Mapping[str, Any]) -> Any:
+def _no_auxiliary_dataset(
+    config: Any,
+    registration: Mapping[str, Any],
+    *,
+    validation_sample_indices: Sequence[int] | None = None,
+) -> Any:
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
 
@@ -788,10 +793,26 @@ def _no_auxiliary_dataset(config: Any, registration: Mapping[str, Any]) -> Any:
     abc.expected_manifest_sha256 = registration["inputs"]["train_manifest"]["sha256"]
     abc.expected_rgb_sha256 = arrays["rgb"]["sha256"]
     abc.expected_actions_sha256 = arrays["actions"]["sha256"]
+    if validation_sample_indices is not None:
+        abc.validation_sample_indices = [
+            int(index) for index in validation_sample_indices
+        ]
+    # The training config may retry a rejected sample at a random global row.
+    # Exact-index research probes must never substitute across partitions.
+    dataset_config.future_validity = {"enabled": False, "max_retries": 0}
     dataset = instantiate(dataset_config)
     child = dataset.datasets["ABC"]
     if child.auxiliary_target_array_opened is not False:
         raise LadderError("RGB/action-only dataset reports an auxiliary array open")
+    if (
+        dataset.future_validity.enabled is not False
+        or int(dataset.future_validity.max_retries) != 0
+    ):
+        raise LadderError("RGB/action-only dataset retained validity substitution")
+    if validation_sample_indices is not None and tuple(
+        child.validation_sample_indices
+    ) != tuple(sorted({int(index) for index in validation_sample_indices})):
+        raise LadderError("RGB/action-only validation probes differ")
     return dataset
 
 
