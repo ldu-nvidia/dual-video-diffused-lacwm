@@ -749,7 +749,7 @@ def _fit_phase(args: argparse.Namespace) -> int:
     if any(
         int(torch.count_nonzero(heads[str(dose)]["ZERO"][name])) != 0
         for dose in DOSES
-        for name in ("weight", "bias")
+        for name in ("weight", "mean_y")
     ):
         raise HaarError("ZERO head is not exactly zero")
     weights = {
