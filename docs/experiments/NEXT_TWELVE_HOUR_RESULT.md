@@ -25,7 +25,7 @@ causal and low-NFE gates.
 | Early latent subspace forcing | yes | matched two-call NFE screen | lowpass redundant with VPM; HH slightly better; aligned path 22.1% slower | `NO_GO_GENERIC_EARLY_SUBSPACE` |
 | Raw predicted robot flow | yes | frozen v7 RAW-FLOW versus matched FLOW-OFF, unmodified VPM parent, and shuffled/held/time-shifted controls at NFE 1/2/4 | NFE-1 top decoded MSE +1.587% versus matched-off, but temporal +0.201% is uncertain, LPIPS is -1.672%, all-frame guardrails fail, the parent is better, and causal controls do not attribute the gain to correct flow | `STOP_FIXED_RAW_FLOW` |
 | Feature-free adjacent consistency | yes | RF-control versus consistency, 400 updates, full objective/readout factorial at NFE 1/2/4 | closest selectable point is NFE-4: temporal +4.963%, but decoded -22.009%, LPIPS -97.295%, and latent -55.963%; no NFE passes | `NO_GO_ACD` |
-| Recurrent delta robot flow | yes | frozen fit384 predictor on the full 55-episode renderer-endpoint-unopened D405 census; three flow-superiority plus six spatial-NI gates | flow EPE +41.880% versus raw, +34.705% versus absolute ridge, +88.274% versus shuffled; all nine Holm-controlled gates pass | `GO_RECURRENT_DELTA_WAN_SCREEN` |
+| Recurrent delta robot flow | yes | frozen fit384 predictor on the full 55-episode renderer-endpoint-unopened D405 census; three flow-superiority plus six spatial-NI gates | EPE reduction 41.880% versus raw, 34.705% versus absolute ridge, 88.274% versus shuffled; all nine Holm-controlled gates pass | `GO_RECURRENT_DELTA_WAN_SCREEN` |
 
 ## Operational evidence
 
@@ -244,9 +244,10 @@ its file SHA-256 is
 `f1e542193a31e764e063bf6ab8ebfa5c4d7fe49cc267ae65893f044acbb18c14`.
 The rebound cache-runtime receipt is
 `f0c831c9db48bec33c215fbff34281f9bdfc0f976c11acabecedbf6656a8100d`;
-it preserves the raw-v7 runtime identity
-`8cb5b92d5fde78e2379a72e33f2d9cd6bc76afc43b0c7b16ab200f7a1330e99`
-while changing only the byte-identical helper's canonical checkout path.
+it records raw-v7 receipt identity
+`8cb5b92d5fde78e2379a72e33f2d9cd6bc76afc43b0c7b16ab200f7a1330e99d`
+as its base, then reseals after changing only the byte-identical helper's
+canonical checkout path.
 
 An independent source audit found and blocked an alternate-checkout provenance
 gap before materialization. The repaired bridge requires registration, build,
@@ -309,6 +310,15 @@ diagnostic. Its identity is
 and file SHA-256 is
 `29cbc6c4e0df57a51cd50d11eaac8c38e19c36f48942e7a8fd3a0927a3f47233`.
 
+Stored cache telemetry gives only a component-level speed bound. The sum of
+nine per-pose renderer timers for one aligned trajectory averaged 51.16 ms in train and 44.48 ms in
+validation (p95 57.62 / 58.28 ms) on the allocated B200. This excludes state
+ingestion, recurrent prediction, packing, Wan, decode, and serving overhead;
+the cache job also rendered a hold control. It therefore neither establishes
+5--10 Hz generation nor rules it out. The earlier measured NFE-1 Wan path, not
+geometry rendering, is the larger measured component in this evidence set, but
+the two timings are not an end-to-end serving benchmark.
+
 ## Claim boundary
 
 The completed screens support a narrower and more useful conclusion: clean
@@ -322,9 +332,9 @@ positive claim requires an inference-available state, a matched stronger
 baseline, a prospective low-NFE endpoint, action sensitivity, and a gain large
 enough to survive uncertainty and complete latency accounting.
 
-The recurrent delta-response robot-state predictor has now cleared that
-prerequisite. The exact fit384 model was frozen and evaluated on the complete
-55-episode renderer-endpoint-unopened D405 census. Mean rendered robot-flow EPE
+The recurrent delta-response robot-state predictor has now cleared the causal
+renderer prerequisite. The exact fit384 model was frozen and evaluated on the
+complete 55-episode renderer-endpoint-unopened D405 census. Mean rendered robot-flow EPE
 fell from `4.628886` to `2.690298` pixels versus raw planned commands
 (`+41.880%`), from `4.120211` to `2.690298` versus absolute ridge (`+34.705%`),
 and from `22.943593` to `2.690298` versus episode-shuffled commands
@@ -356,3 +366,24 @@ recurrent-field training; otherwise stop without spending another full training
 pair. A full Causal-rCM/Flash-WAM-style consistency recipe remains a separate
 baseline-reproduction project; this 400-update ACD-P0 result must not be
 generalized to those untested methods.
+
+Interpret that substitution conservatively. The recurrent/raw cache shift is
+modest enough that gross support/scale mismatch is not the obvious confound,
+but the frozen raw-flow checkpoint previously changed decoded and temporal MSE
+by only `+0.213%` and `+0.122%` when its condition was toggled on. A negative
+substitution therefore rejects usefulness through that frozen adapter; it does
+not show that the recurrent field is inaccurate. Any later condition-dropout,
+flow-reconstruction, or stronger-gating recipe would be a separately
+preregistered generator-utilization hypothesis, not a posthoc rescue of this
+screen.
+
+The raw Stage-1 controller cannot safely launch this screen unchanged: it
+hard-codes raw schemas, arm names, endpoints, trace kinds, and v5/v7 lineage.
+The smallest safe next controller must freeze the exact Holm family, score
+future-latent NMSE with the immutable parent tokenizer, prove cross-arm initial
+adapter equality, assert recurrent family/schema/SHA before update zero, and
+seal the complete transitive source inventory. The zero-training NFE-1 grid is
+48 distinct validation episodes x four noises x seven endpoints = 1,344 rows
+and 672 two-sample Wan batches. Only after that evaluation-only controller and
+its independent readiness audit exist should the frozen raw adapter be tested;
+matched recurrent training remains a later, separately paired stage.
