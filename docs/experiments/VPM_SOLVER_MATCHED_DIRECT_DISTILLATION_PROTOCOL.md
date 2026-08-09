@@ -2,8 +2,10 @@
 
 Date frozen: 2026-08-09
 
-Status: prospective source-only pilot; no registration, data access, training,
-evaluation, W&B write, or Slurm submission is authorized
+Status: prospective, implemented pilot. No research job has been launched from
+this worktree. Registration and Slurm entrypoints are fail-closed behind an
+exact-source test receipt, a one-B200 memory receipt, and a fresh explicit
+user-authorization receipt. W&B is disabled.
 
 Source base:
 `92fd9ed8480f12084015c043f1fd5dfcfe40205a`
@@ -56,8 +58,9 @@ Euler. ACD-P0 changes all four defining elements:
 2. the target is a separate **EMA student**, not the current low-clock branch;
 3. the loss matches a **Karras-boundary consistency function**, not raw clean
    predictions; and
-4. deployment reads that consistency function directly, with an explicitly
-   defined multi-call re-noising sampler.
+4. deployment evaluates both objective-compatible readouts and the complete
+   objective-by-readout diagnostic cross, rather than silently handicapping
+   the RF control with an untrained boundary map.
 
 The old result therefore does not answer this question. Conversely, an ACD-P0
 failure rejects only this fixed teacher-forced port and budget.
@@ -145,10 +148,12 @@ student optimizer step:
 bar_theta <- 0.995 bar_theta + 0.005 theta.
 ```
 
-The update covers every floating model parameter and buffer in a stable,
-name-matched order; integer/bool buffers are copied. The teacher is never
-updated. Tests require the EMA update to occur after—not before—the target
-forward and optimizer step.
+The update covers only source parameters with `requires_grad=true` in a stable,
+name-matched order. Frozen backbone/VAE parameters and all buffers are copied
+bit-exactly from the online model; applying EMA arithmetic to already-equal
+frozen floating tensors is forbidden because rounding alone can create drift.
+The teacher is never updated. Tests require the EMA update to occur after—not
+before—the target forward and successful optimizer step.
 
 ## Frozen teacher and matched arms
 
@@ -173,6 +178,15 @@ parameter groups, and never reachable from the public deployment sampler.
 Student checkpoints contain separately labelled online and EMA states; the
 teacher state is represented only by its immutable parent identity, not
 serialized again.
+
+Registration also composes each arm through the registered Python/Hydra
+runtime with every interpolation resolved. The complete semantic mapping—not
+only selected fields—is hashed into the arm identity. This binds inherited
+AMP/dtype, optimizer epsilon/weight decay, scheduler final LR, LoRA
+rank/alpha/dropout, data-loader semantics, and all other job fields. The live
+job recomputes this digest before trainer construction; the emitted
+`.hydra/config.yaml`, trace header, snapshot, and independent completion
+receipt must all agree.
 
 Both arms execute one teacher, one online-student, and one EMA-target Wan call
 per training update. The sole objective difference is:
@@ -208,15 +222,32 @@ gradient clipping at 1.0, and no gradient accumulation. There is no trainer
 validation, visualization, early stopping, loss/EMA/stride sweep, resume, or
 checkpoint selection. W&B is disabled.
 
+The actual 512-clip training RGB and action NumPy files are byte-hashed and
+schema-checked at registration. Rank zero repeats both complete byte hashes
+before each arm and broadcasts a fail-closed receipt before any dataset worker
+starts. Metadata-carried digest strings alone are not accepted. Validation
+array bytes remain unopened until the global endpoint-materialization barrier.
+
 Every update seals rank-combined hashes for clip ID, actions, clean latent,
 Gaussian noise, rejected and accepted clock draws, start/end indices, sigmas
 and timesteps, source state, teacher-stepped state, online/EMA consistency
-outputs, RF and consistency targets, exact three-call count, teacher-state
-identity, EMA-state identity before/after update, and RNG state before each Wan
-call. Paired-arm analysis fails unless the common fields match for all 400
-updates.
+outputs, RF and consistency targets, exact three-call count, deterministic
+teacher/EMA state probes before/after update, and RNG state before each Wan
+call. Complete named-tensor state hashes plus exact parameter/buffer counts are
+sealed at initialization and the final endpoint; the immutable teacher full
+hash must match at both boundaries. Paired-arm analysis compares only the
+treatment-invariant clip/action/clean/noise/clock/source/teacher-step/call/RNG
+fields for all 400 updates. EMA/teacher probes must additionally be bit-exact
+across all eight ranks at every update. Complete initial and final
+student/teacher/EMA state receipts are gathered from all ranks and compared.
+Online/EMA outputs and post-update EMA states are
+treatment outcomes and must not be required to match after the arms diverge.
+The trainer appends exactly one hash-chained `phase=optimizer_update` record
+directly after each successful optimizer/EMA transaction. Validation or logger
+callbacks cannot create audit rows. An AMP-skipped optimizer step fails before
+EMA and invalidates the run.
 
-## Deployment consistency sampler
+## Objective-compatible deployment and 2x2 readout audit
 
 The evaluator constructs only the online or EMA **student**. Its public sampler
 accepts exactly five observed RGB frames, planned actions, morphology, fixed
@@ -224,7 +255,7 @@ null context, and sample-keyed Gaussian streams. It has no teacher, target,
 clean-future, feature, or cache argument.
 
 For a fixed native NFE grid `1=sigma_0>...>sigma_K=0`, start with
-sample-keyed `x_0~N(0,I)`. At call `k`, compute
+sample-keyed `x_0~N(0,I)`. The consistency readout computes
 
 ```text
 z_hat_k = F_theta(x_k,sigma_k).
@@ -239,9 +270,42 @@ x_(k+1) = (1-sigma_(k+1)) z_hat_k + sigma_(k+1) eta_(k+1).
 
 The observed history prefix is overwritten by the same formula using the
 history reference. This is the standard consistency-style re-noising analogue
-for the repository's linear RF path. Reusing the initial noise at every call is
-a preregistered diagnostic, not the primary endpoint. Ordinary Euler sampling
-from the same checkpoint is also diagnostic and cannot promote the method.
+for the repository's linear RF path. The rCM release commit
+`ed3cb14dd936f92cdc9f9381af7369991509b41f` provides evidence for this
+re-noising structure, but its ordinary RF clean estimate is not substituted
+for the Flash-WAM Karras map optimized here. No alternative noise-reuse
+diagnostic is registered in P0.
+
+The native RF readout instead advances the same initial state once per call:
+
+```text
+x_(k+1) = x_k + (sigma_(k+1)-sigma_k) v_theta(x_k,sigma_k,c).
+```
+
+Its observed history is reset after every step to the known RF corruption path
+using the *initial* sample-keyed noise. At NFE 1 this returns exactly
+`x-sigma*v` because the appended terminal is `sigma=0`. This is the compatible
+primary deployment for the RF-MSE control and freshly replayed parent.
+
+The frozen endpoint family is the full 2x2 objective-by-readout cross for both
+online and EMA students:
+
+| Training objective | Primary compatible readout | Nonselectable cross-readout diagnostic |
+|---|---|---|
+| `ACD-RF-CONT` RF MSE | native RF Euler | Karras `F` plus re-noising |
+| `ACD-CONS` pseudo-Huber | Karras `F` plus re-noising | native RF Euler |
+
+The fresh parent uses native RF Euler only. Cross-readout diagnostics can
+explain whether an outcome comes from the learned objective or the sampler,
+but cannot promote `GO_ACD` or select an NFE. All readouts consume the same
+registered Gaussian stream; native RF deliberately uses only its first slice.
+
+Three additional nonselectable action interventions use the primary EMA
+readout for candidate/control and native RF for the parent. Planned action
+sequences are permuted by the smallest cyclic validation-index offset for
+which every donor belongs to a different episode. RGB history, noise, model
+state, and NFE remain aligned. These endpoints measure whether a quality gain
+collapsed action sensitivity; they are not extra candidate variants.
 
 At NFE `K`, an independent hook must observe exactly `K` student Wan calls.
 Teacher calls, feature calls, target-cache reads, and pre-barrier future-RGB
@@ -251,8 +315,8 @@ passed to the unchanged causal Wan decoder.
 ## Evaluation and fixed gates
 
 All 64 development clips and four preregistered noise seeds are evaluated at
-NFE `{1,2,4}` for online and EMA endpoints of both arms plus a freshly replayed
-frozen VPM parent. The protected split remains closed. Metrics are future
+NFE `{1,2,4}` for the full online/EMA 2x2 family above plus a freshly replayed
+frozen VPM parent under native RF. The protected split remains closed. Metrics are future
 latent NMSE, decoded RGB MSE, decoded temporal-difference MSE, LPIPS, PSNR,
 complete latency (history VAE, action path, Wan calls, re-noising, decode), and
 peak allocated/reserved memory. Timing uses counterbalanced endpoint order,
@@ -262,18 +326,22 @@ Positive relative improvement means lower error. Clip/noise pairs are the
 resampling unit. The analyzer uses 10,000 paired bootstraps with seed 20260809
 and one-sided Bonferroni lower bounds across the frozen NFE/metric family.
 
-An NFE passes only if the candidate EMA endpoint satisfies all of:
+An NFE passes only if the candidate EMA **consistency-readout** endpoint
+satisfies all of:
 
-1. decoded and temporal MSE improve at least 3% over `ACD-RF-CONT` EMA with
-   simultaneous lower bounds at least 1%;
+1. decoded and temporal MSE improve at least 3% over the objective-compatible
+   `ACD-RF-CONT` EMA native-RF endpoint with simultaneous lower bounds at
+   least 1%;
 2. latent NMSE and LPIPS have nonnegative point improvements over the control
    and simultaneous lower bounds above -1%;
-3. decoded and temporal MSE beat the freshly replayed parent VPM@1 frontier
+3. decoded and temporal MSE beat the freshly replayed parent native-RF VPM@1 frontier
    with strictly positive simultaneous lower bounds, while latent and LPIPS
    meet the same -1% noninferiority bounds;
 4. candidate online-versus-EMA conclusions agree in sign for all primary
-   metrics, and aligned-versus-episode-shuffled action sensitivity does not
-   regress more than 1% from the parent;
+   metrics. For decoded and temporal MSE, define action sensitivity as
+   `100*(M_shuffled-M_aligned)/M_shuffled`; its candidate-minus-parent@1
+   difference must have point estimate and simultaneous one-sided lower bound
+   no worse than -1 percentage point;
 5. exact deployment call/access identities pass, and complete p95 latency is
    no more than 5% above the parameter-identical control at equal NFE; and
 6. no selection or metric uses the protected split.
@@ -302,9 +370,10 @@ No job is authorized by this document. The maximum proposed allocation is:
 
 | Phase | Allocations | B200/allocation | Time limit | Maximum B200-hours |
 |---|---:|---:|---:|---:|
+| full-geometry three-copy memory smoke | 1 | 1 | 1 h | 1 |
 | matched 400-update training | 2 | 8 | 6 h | 96 |
 | paired NFE 1/2/4 evaluation/timing | 1 | 8 | 2 h | 16 |
-| **total** | 3 |  |  | **112** |
+| **total** | 4 |  |  | **113** |
 
 Three model copies per rank make peak-memory preflight mandatory before any
 full run. The output ceiling is 100 GiB on approved Lustre or
@@ -315,9 +384,11 @@ protected-test accesses all equal zero.
 The existing few-step audit shows that the current parent's NFE 2 is mixed and
 NFE 4 is materially worse than VPM@1. This does not invalidate local
 consistency training, but it means the frozen teacher is not already a
-quality-dominant multi-step oracle. Readiness is therefore
-`READY_SOURCE_BLOCKED_EXECUTION_REVIEW`, and any future launch requires an
-explicit decision to test local consistency despite that known limitation.
+quality-dominant multi-step oracle. This is a scientific risk and a mandatory
+interpretation caveat, not a hidden execution override. Before memory smoke,
+readiness is `READY_SOURCE_MEMORY_PREFLIGHT_REQUIRED`; only exact-source tests
+plus a passing memory receipt can produce `READY_FOR_REGISTRATION`. Every
+submission still requires a phase-specific, fresh user-authorization receipt.
 
 ## Stop rules
 
@@ -332,4 +403,3 @@ explicit decision to test local consistency despite that known limitation.
 - P0 does not test self-forced DMD, full Causal-rCM, full Flash-WAM, decoder
   distillation, long-horizon rollout, multi-seed generalization, or closed-loop
   DAgger utility.
-

@@ -1,0 +1,38 @@
+defaults:
+  - dual_explicit_action_dit_vjepa
+  - _self_
+
+_target_: lam.adjacent_consistency_model.AdjacentConsistencyVPM
+
+# Preserve the faithful VPM auxiliary topology as an exact no-op. ACD-P0 is a
+# feature-free solver/distillation comparator, not a second dual feature arm.
+time_frequency_transform: null
+dual_diffusion:
+  enabled: true
+  auxiliary_history_mode: diffuse_all
+  tf_channels: 64
+  head_condition_on_tf_clock: true
+  condition_mode: "off"
+  condition_on_tf: false
+  condition_on_tf_clock: false
+  schedule_mode: aligned
+  tf_lead_logit: 0.0
+  tf_loss_weight: 0.0
+  video_only_control: false
+  parameter_matched_control: true
+  state_gate_init: 0.0
+  state_gate_trainable: true
+  clock_gate_init: 0.0
+  clock_gate_trainable: true
+  capture_latent_trajectories: false
+  artifact_batch_limit: null
+  evaluation_nfe_steps: [1, 2, 4]
+  evaluation_condition_sources: [autonomous]
+
+adjacent_consistency:
+  arm_mode: rf_control
+  stride: 500
+  sigma_data: 0.5
+  huber_c: 0.001
+  ema_decay: 0.995
+  protocol_version: acd-p0-v1
