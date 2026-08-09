@@ -2,8 +2,8 @@
 
 Date frozen: 2026-08-08
 
-Status: **prospective; no fresh score-pool RGB or measured-state outcome may be
-opened before the registration and execution source are committed**
+Status: **frozen prospectively and completed; see
+`TRAJECTORY_CONSISTENT_RENDERER_GATE_RESULT.md`**
 
 ## Question and claim boundary
 
