@@ -171,10 +171,11 @@ def _first_local_crc32(path: Path) -> int:
 def _rewrite_numpy_force_zip64_as_legacy_redundant_extra(path: Path) -> None:
     """Emulate the NumPy layout used by the immutable ABC state archives.
 
-    Current NumPy writes ZIP64 sentinels/version 45 in each local header.
-    Older NumPy wrote the same 20-byte ZIP64 size extra redundantly beside
-    ordinary 32-bit sizes/version 20; its central directory also uses version
-    20 and no extra.  Rewriting only metadata preserves every NPY payload byte.
+    Some NumPy versions write ZIP64 sentinels/version 45 in each local header;
+    NumPy 2.0 already writes the legacy representation used by the immutable
+    ABC files.  Normalize either input to the same 20-byte redundant ZIP64 size
+    extra beside ordinary 32-bit sizes/version 20.  Rewriting only metadata
+    preserves every NPY payload byte.
     """
 
     content = bytearray(path.read_bytes())
@@ -183,8 +184,6 @@ def _rewrite_numpy_force_zip64_as_legacy_redundant_extra(path: Path) -> None:
     for expected_name in stage.STATE_ARCHIVE_MEMBERS:
         fields = list(local.unpack_from(content, offset))
         assert fields[0] == b"PK\x03\x04"
-        assert fields[1] == 45
-        assert fields[7] == fields[8] == 0xFFFFFFFF
         name_bytes, extra_bytes = fields[9], fields[10]
         variable_start = offset + local.size
         variable = content[
@@ -196,9 +195,15 @@ def _rewrite_numpy_force_zip64_as_legacy_redundant_extra(path: Path) -> None:
             extra, expected_name
         )
         assert payload_bytes == compressed_bytes
-        struct.pack_into("<H", content, offset + 4, 20)
-        struct.pack_into("<L", content, offset + 18, compressed_bytes)
-        struct.pack_into("<L", content, offset + 22, payload_bytes)
+        if fields[1] == 45:
+            assert fields[7] == fields[8] == 0xFFFFFFFF
+            struct.pack_into("<H", content, offset + 4, 20)
+            struct.pack_into("<L", content, offset + 18, compressed_bytes)
+            struct.pack_into("<L", content, offset + 22, payload_bytes)
+        else:
+            assert fields[1] == 20
+            assert fields[7] == compressed_bytes
+            assert fields[8] == payload_bytes
         offset = variable_start + name_bytes + extra_bytes + payload_bytes
 
     eocd_offset = len(content) - stage._ZIP_EOCD.size
