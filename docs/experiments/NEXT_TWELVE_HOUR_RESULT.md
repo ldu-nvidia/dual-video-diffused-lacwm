@@ -1,0 +1,223 @@
+# Next twelve-hour dual-video diffusion result
+
+Status: final evidence ledger; both prospectively registered paths are
+terminal and the frozen analyses have been reproduced.
+
+## Question
+
+Can an inference-available auxiliary state improve low-NFE robotic video
+generation, or is the apparent gain limited to privileged clean-future
+conditioning? The program compares causal feature proposals against direct,
+feature-free controls and advances only mechanisms that survive prospective
+causal and low-NFE gates.
+
+## Evidence matrix
+
+| Mechanism | Inference-available input | Prospective test | Observed result | Decision |
+|---|---|---|---|---|
+| Clean V-JEPA residual | no | privileged-residual repair versus equal-capacity direct residual and VPM@1 | repairs an intentionally weak endpoint, but direct residual is 27--46% better and VPM@1 is substantially better | `STOP_PRIVILEGED_NOT_CAUSALLY_COMPRESSIBLE` |
+| Direct residual on VPM@1 | yes | frozen 256/31 frontier | decoded MSE +0.50%; temporal MSE -0.44%; registered intervals fail | `STOP_VPM_DIRECT_RESIDUAL` |
+| V-JEPA2-AC action alignment | yes | aligned action versus causal controls, RTX and B200 replication | 0.7--2.0% aligned-action effect; controls below 5% gate | `STOP_VJEPA2_AC` |
+| Object/contact distribution | yes | 12 registered gates | 12/12 gates fail | `CLOSE` |
+| Fixed Haar detail | yes | matched low-frequency/detail screen | decoded +0.164%; temporal +0.104% | too small to advance |
+| Learned QMF | yes | basis-reduction plus generation screen | basis reduction 1.534% versus 5%; generated detail +0.155%/+0.103% | `STOP_NO_HAAR_ADVANTAGE` |
+| Early latent subspace forcing | yes | matched two-call NFE screen | lowpass redundant with VPM; HH slightly better; aligned path 22.1% slower | `NO_GO_GENERIC_EARLY_SUBSPACE` |
+| Raw predicted robot flow | yes | frozen v7 RAW-FLOW versus matched FLOW-OFF, unmodified VPM parent, and shuffled/held/time-shifted controls at NFE 1/2/4 | NFE-1 top decoded MSE +1.587% versus matched-off, but temporal +0.201% is uncertain, LPIPS is -1.672%, all-frame guardrails fail, the parent is better, and causal controls do not attribute the gain to correct flow | `STOP_FIXED_RAW_FLOW` |
+| Feature-free adjacent consistency | yes | RF-control versus consistency, 400 updates, full objective/readout factorial at NFE 1/2/4 | closest selectable point is NFE-4: temporal +4.963%, but decoded -22.009%, LPIPS -97.295%, and latent -55.963%; no NFE passes | `NO_GO_ACD` |
+
+## Operational evidence
+
+The raw-flow v7 repair reproduced all eight cache arrays byte-for-byte, all
+576 train/validation rows, all 2,000 per-update input hashes, the complete
+1,686-tensor schema, every frozen tensor, and update-zero forward loss. The
+first backward gradient differed slightly across different B200 nodes, with
+loss divergence starting at update two. The registered historical gate was
+bitwise equality, so v7 remains a failed operational repair and contributes no
+efficacy endpoint. Raw-flow v8 therefore treated the immutable v7 pair as the
+prospective paired realization, without retroactively adding a numerical
+tolerance or selecting from v5 outcomes. Before evaluation it independently
+replayed all 2,000 causal input hashes, 9,200 input/probe/order values, 7,200
+finite-output checks, and both complete model schemas. The frozen evaluation
+then scored 4,032 rows (48 episode clusters, four noise seeds, NFE 1/2/4) and
+passed its artifact audit.
+
+At primary NFE-1, RAW-FLOW versus matched FLOW-OFF improved top decoded MSE by
+1.587% (episode-cluster bootstrap 95% CI [0.251%, 2.754%]), but top temporal
+MSE improved only 0.201% ([-0.482%, 0.832%]) and LPIPS worsened 1.672%
+([-2.674%, -0.790%]). All-frame decoded and temporal guardrails failed. Against
+the unmodified VPM parent, RAW-FLOW was worse in top decoded MSE (-0.679%),
+LPIPS (-2.423%), latent NMSE (-2.817%), and all-frame decoded MSE (-4.552%).
+The same RAW-FLOW checkpoint changed 100% of latent and decoded output hashes
+when flow was toggled off, but the effects were only +0.213% decoded and
++0.122% temporal; episode-shuffled, held-current, and time-shifted controls did
+not establish correct-flow attribution. NFE-4 worsened both all-frame decoded
+MSE (-1.373%) and temporal MSE (-0.728%) relative to matched-off. This supports
+the mechanism-specific `STOP_FIXED_RAW_FLOW`, not a claim against learned,
+recurrent, hybrid, or measured-geometry conditions.
+
+ACD memory preflight job `507938` passed on source
+`6063ec53d42faf13bb30d2e1c0ed2f30350ef183`. It executed one full synthetic
+`[1,13,3,180,960]` transaction with one frozen teacher, one online student,
+and one EMA target. Peak reserved memory was 15,919,480,832 bytes (8.31% of
+device memory), leaving 175,583,657,984 bytes headroom. The production mask
+contained three valid views, five history frames, eight future frames, two
+future latent tokens, and 92,160 expanded future elements; no dataset,
+endpoint, protected test, or W&B state was opened.
+
+The final preregistered ACD study used source `6063ec5`, registration identity
+`5e0ce96ca050d32b9e992587274f15dd2c239d72d9e4db0a0393c9a457ff6aa7`, and
+separate exactly paired jobs: RF-control `507946` and adjacent-consistency
+`507947`. Both completed all 400 updates with finite losses, one frozen teacher,
+one online student, one EMA target, and zero auxiliary-feature calls. The frozen
+pair validator replayed 8,000 treatment-invariant comparisons (400 updates by
+20 fields) with zero mismatches, both 401-line trace hash chains, all initial
+and final states, and all model-call counts. RF-control snapshot SHA-256 is
+`44beb6ca6ee6f75415692efb09cbd1e402e2ca9e907665d93624fbae8387c5db`;
+consistency snapshot SHA-256 is
+`6d3277ea846aed80f91f56290a3f18d01e18aed6da0af048af4b80e5d387390e`.
+Evaluation job `507964` compared both arms at NFE 1/2/4 with four noise seeds,
+native and consistency readouts, LPIPS, and an action-shuffle control. It
+completed `0:0` in 31m58s.
+
+The sealed training traces show that the candidate did optimize its named
+objective: mean consistency loss fell from `0.20697` over updates 1--100 to
+`0.10799` over updates 301--400 (`-47.8%`). Its diagnostic RF loss increased
+from `0.14890` to `0.91225` (`6.13x`), while RF-control loss was essentially
+flat (`0.09531` to `0.09598`). Thus a negative endpoint should not be described
+as a stalled optimizer, and blindly extending the same objective would not be
+justified; the frozen consistency readout must demonstrate that it compensates
+for the sacrificed parent velocity field.
+
+## Feature-free adjacent consistency result
+
+The frozen decision is **`NO_GO_ACD`**; no NFE passed. Positive percentages
+below favor `CONS_EMA_CONSISTENCY`; negative percentages mean that the
+consistency candidate is worse than the equal-NFE `RF_EMA_NATIVE_RF` control.
+The bounds are the registered simultaneous one-sided lower bounds.
+
+| NFE | Decoded MSE | Temporal MSE | LPIPS | Video-latent NMSE | candidate/control p95 | Pass |
+|---:|---:|---:|---:|---:|---:|---|
+| 1 | -44.353% / -54.153% | -8.720% / -10.261% | -79.717% / -87.485% | -87.578% / -96.353% | 0.9914 | no |
+| 2 | -44.715% / -54.072% | -8.818% / -10.428% | -80.759% / -89.045% | -88.037% / -96.781% | 0.9861 | no |
+| 4 | -22.009% / -29.694% | **+4.963% / +3.356%** | -97.295% / -108.121% | -55.963% / -63.707% | 0.9998 | no |
+
+Against the fresh parent at NFE-1, the candidate was also worse at every NFE.
+At NFE-1 its decoded, temporal, LPIPS, and latent effects were -45.090%,
+-8.878%, -79.869%, and -88.233%; at NFE-4 they were -50.946%, -13.153%,
+-45.532%, and -93.485%. P95 latency parity passed at all three NFEs: candidate
+times were 0.41054, 0.48904, and 0.64791 seconds per two-sample batch.
+
+The full 2x2 objective/readout factorial localizes the failure. Applying the
+consistency readout to the RF-trained model was very poor. Consistency training
+partly repaired that readout, but its native-RF path deteriorated as the sealed
+training trace predicted. The best diagnostic--not selectable--was the online
+consistency model at NFE-4: temporal MSE improved 6.180% versus online RF, but
+decoded MSE, LPIPS, and latent NMSE worsened 2.258%, 17.778%, and 14.418%.
+This is a temporal-only tradeoff, not a better quality frontier. The saved
+qualitative evidence shows the same failure as visible spatial
+smearing/mosaicing rather than a metric-only disagreement.
+
+The Boolean action guard passed only because it was a relative non-degradation
+guard. Actual action sensitivity was essentially zero: at NFE-1, shuffled
+actions changed parent decoded/temporal MSE by -0.0131%/-0.0036% and candidate
+MSE by +0.0144%/-0.0004%. Even at NFE-4 the candidate effects were only
++0.1165%/-0.0125%. Aligned-to-shuffled actions changed both latent and decoded
+hashes for 256/256 pairs at every NFE, so the action path is computationally
+active; it simply has no demonstrated target-aligned quality sensitivity. No
+action-controllability conclusion is supported.
+
+The evaluation inventory contains exactly 9,216 rows (64 clips x four noises x
+12 endpoints x three NFEs), 43,680 observed Wan calls, and zero teacher,
+feature, protected-test, or W&B calls. All 4,608 batch endpoints were
+materialized and hash-closed before future RGB was opened. Independent replay
+validated all 9,233 identity payloads, all file hashes, all row pairings, and
+the exact frozen analysis. Analyzer-bound use was 9.18363 B200-hours; full
+Slurm accounting including memory smoke and startup/teardown was approximately
+9.7422 B200-hours. Artifact use was 16,543,983,840 bytes. Both remained within
+the registered ceiling. Inventory
+identity is `1d13287243b01101a9112647e20681f9804592444ecc2def177c981a428efb9c`;
+analysis identity is
+`caf55629f5914fe52250fe395d5fe63f8c223d750ad44968915bb3a8eb34e826`
+(file SHA-256
+`a14b9af6c6b871e6d8f68ee3550ecdcfa86f35a22742d841d314dc5cf946457c`).
+
+This remains a one-training-seed, 64-clip development screen. Its frozen
+bootstrap treats four clip/noise pairs as separate resampling units rather
+than clustering all noises within 64 clips, so its intervals may be optimistic.
+The action gate has no absolute sensitivity floor. It measures neither FVD,
+long-horizon rollout, closed-loop DAgger utility, nor 5--10 Hz serving. A
+six-second read-only `nvidia-smi` step was recorded inside the allocation; no
+primary timing distribution had a value above twice its median, and the quality
+failure is invariant to latency. These limitations do not rescue ACD-P0, but
+they bound the claim against broader consistency methods.
+
+## Canonical evidence
+
+Raw-flow v8 canonical root:
+
+```text
+/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/
+  lacwm_train/artifacts/dual_video_diffusion/raw_physics_flow_stage1/
+  raw-physics-flow-stage1-20260809-3424c73-v8-exploratory
+```
+
+Its registration, inventory, analysis, and audit identities are respectively
+`83582e7ebe5cd3857831508f4fbec4734fc38e50d60d7a63614330bddc167209`,
+`232506d33d292fd23842b0a85ddf960f27fd6bdde449008ba377ebfb52f3dabd`,
+`721724ccef367a9c7e17986780d8be7c54e5374d4df9bf81aeb30ec374316c27`, and
+`92f29b7d088e086f5337b8574e6b8ac37ce5184facd4fa015004dfe1a7a71edc`.
+
+ACD-P0 canonical root:
+
+```text
+/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/
+  lacwm_train/artifacts/dual_video_diffusion/acd_p0/
+  acd-p0-20260809-6063ec5-v7
+```
+
+The official result files are `acd_p0_result.json` and `acd_p0_result.md` at
+that root. A local post-run visual contact sheet is stored outside Git at
+`artifacts/acd_p0/acd-p0-20260809-6063ec5-v7/acd_p0_contact_sheet.png`, with
+SHA-256 `223225be4855456b969c42d7eb15da6a4bb7c56a2214cc10c847c2a4a505cde5`.
+
+## Claim boundary
+
+The completed screens support a narrower and more useful conclusion: clean
+future features contain a strong high-noise oracle signal, but no tested
+inference-causal TF, semantic, residual, fixed-subspace, action, or fixed-flow
+mechanism has converted it into a material, attributed gain over VPM@1. This
+rejects the broad claim that an arbitrary auxiliary state supplies a
+Latent-Forcing-like video advantage. It does not reject dual diffusion,
+structured learned causal fields, or full consistency methods in general. A
+positive claim requires an inference-available state, a matched stronger
+baseline, a prospective low-NFE endpoint, action sensitivity, and a gain large
+enough to survive uncertainty and complete latency accounting.
+
+The only remaining auxiliary with a large causal effect is the recurrent
+delta-response robot-state predictor: on 24 fresh clips it reduced rendered
+robot-flow EPE by 47.25% versus raw commands and 40.78% versus the absolute
+ridge, with 24/24 favorable clips. It did not receive a generator handoff
+because four spatial-retention intervals crossed zero. Because ACD-P0 is
+negative, the next justified experiment is a separately preregistered, larger
+fresh spatial non-inferiority confirmation of recurrent delta. Only a joint
+flow-plus-spatial pass may authorize an equal-Wan-call recurrent-flow screen
+against VPM@1 with
+off, shuffled, held, and wrong-time controls. ACD-P0 is negative, so that
+recurrent-delta confirmation is now the highest-priority causal-auxiliary test.
+
+## Final handoff
+
+Raw-flow v8 is terminal at `STOP_FIXED_RAW_FLOW`; ACD-P0 is terminal at
+`NO_GO_ACD`. Do not extend the same ACD objective merely because its training
+loss was still falling, and do not launch a stochastic object/contact residual
+that was conditional on raw-flow success.
+
+Next, preregister the 55 still-unopened D405 train episodes (or a larger new
+population) for a recurrent-delta spatial non-inferiority confirmation. Preserve
+the already established motion gates and define practical spatial margins
+before opening those outcomes. If the joint renderer gate passes, run one
+equal-call generator screen against VPM@1 with recurrent-flow off, aligned,
+episode-shuffled, held-current, and wrong-time controls. If it fails, close the
+deterministic geometry branch. A full Causal-rCM/Flash-WAM-style consistency
+recipe remains a separate baseline-reproduction project; this 400-update
+ACD-P0 result must not be generalized to those untested methods.
