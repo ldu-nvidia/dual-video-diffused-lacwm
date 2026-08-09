@@ -304,5 +304,6 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "prepared only; do not execute" in launch_runbook
     assert "REPLACE_WITH_AUDITOR_ACKNOWLEDGED_40_CHARACTER_COMMIT" in launch_runbook
     assert 'BASH_PREFIX="/bin/bash -lc' in launch_runbook
+    assert 'mkdir -p "$(dirname "$CACHE_ROOT")"' in launch_runbook
     assert "--parent-source-repo $PARENT_SOURCE_REPO" in launch_runbook
     assert "--dependency=afterok:$FLOW_OFF_JOB:$RAW_FLOW_JOB" in launch_runbook
