@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
@@ -373,6 +374,92 @@ def test_public_deployable_capture_is_target_blind_and_restores_configuration():
         model.capture_latent_trajectories,
         model.artifact_batch_limit,
     )
+
+
+def _path_guard() -> Path:
+    return (
+        Path(probe.__file__).resolve().parent
+        / "slurm"
+        / "vpm_invertible_multirate_paths.sh"
+    )
+
+
+def test_launcher_path_guard_creates_only_missing_parent_then_redirects(tmp_path):
+    grandparent = tmp_path / "artifacts" / "dual_video_diffusion"
+    grandparent.mkdir(parents=True)
+    parent = grandparent / "vpm_invertible_multirate_probe"
+    output = parent / "run-v2"
+    runtime = Path(f"{output}.runtime_verification.json")
+    prefix = f"{parent}/"
+    command = """
+source "$1"
+prepare_vpm_invertible_multirate_artifact_parent "$2" "$3" "$4"
+(set -o noclobber; printf '%s\n' '{"runtime":"ok"}' > "$3")
+"""
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(_path_guard()), str(output), str(runtime), prefix],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert parent.is_dir() and not parent.is_symlink()
+    assert not output.exists()
+    assert runtime.read_text(encoding="utf-8") == '{"runtime":"ok"}\n'
+    assert sorted(path.name for path in parent.iterdir()) == [runtime.name]
+
+
+@pytest.mark.parametrize("existing", ("output", "runtime"))
+def test_launcher_path_guard_refuses_existing_run_paths_without_mutation(
+    tmp_path, existing
+):
+    grandparent = tmp_path / "artifacts" / "dual_video_diffusion"
+    parent = grandparent / "vpm_invertible_multirate_probe"
+    parent.mkdir(parents=True)
+    output = parent / "run-v2"
+    runtime = Path(f"{output}.runtime_verification.json")
+    protected = output if existing == "output" else runtime
+    if existing == "output":
+        protected.mkdir()
+        marker = protected / "marker"
+    else:
+        marker = protected
+    marker.write_text("do-not-overwrite", encoding="utf-8")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; prepare_vpm_invertible_multirate_artifact_parent "$2" "$3" "$4"',
+            "bash",
+            str(_path_guard()),
+            str(output),
+            str(runtime),
+            f"{parent}/",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert marker.read_text(encoding="utf-8") == "do-not-overwrite"
+    if existing == "output":
+        assert not runtime.exists()
+    else:
+        assert not output.exists()
+
+
+def test_full_launcher_uses_guard_before_runtime_redirection_and_requires_v2():
+    launcher = (
+        Path(probe.__file__).resolve().parent
+        / "slurm"
+        / "vpm_invertible_multirate_probe.sbatch"
+    ).read_text(encoding="utf-8")
+    guard = "prepare_vpm_invertible_multirate_artifact_parent"
+    redirect = '> "$RUNTIME_RECORD"'
+    assert guard in launcher
+    assert launcher.index(guard) < launcher.index(redirect)
+    assert "${EXPECTED_COMMIT:0:7}-v2" in launcher
+    assert 'mkdir -p "$OUTPUT_DIR"' not in launcher
 
 
 def _analysis_fixture(*, shuffled_equals_primary: bool = False):

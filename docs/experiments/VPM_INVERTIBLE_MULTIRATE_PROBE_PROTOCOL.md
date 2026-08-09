@@ -60,6 +60,24 @@ counter. Both final latents and decoded uint8 tensors must be bit-exact. The
 three public Wan calls and four parity-only decoder calls are untimed preflight
 work and are explicitly excluded from endpoint call and latency accounting.
 
+### Pre-registration launcher incident
+
+Slurm job `507690` (source `3ec42b8`) failed on 2026-08-09 after 11 seconds,
+before registration, model loading, cache opening, or any experimental
+endpoint. The shell attempted to redirect the B200 runtime receipt into the
+canonical experiment-family directory before that parent existed. `sacct`
+reported `FAILED`, exit `1:0`; the run output and runtime receipt remained
+absent. Therefore this was a launch-path incident, not an experimental attempt,
+and it consumed no row, seed, target, result, or statistical look.
+
+The sealed repair moves any later attempt to fresh commit-derived `v2` paths.
+A source-only path guard verifies the grandparent and canonical family path,
+creates exactly that one family directory with plain `mkdir`, never creates the
+run directory, and rechecks that both the output and runtime sidecar are fresh.
+Regression tests execute the formerly failing redirection from a missing
+parent and prove that existing output/runtime paths are rejected without
+mutation.
+
 ## Exact future-only, view-isolated transform
 
 The pinned VPM latent has shape `[B,16,4,24,120]`. The first two latent frames
