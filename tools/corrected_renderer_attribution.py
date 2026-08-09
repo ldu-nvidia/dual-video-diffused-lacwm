@@ -1119,8 +1119,7 @@ def robot_flow_error(
         & (oracle_target_xy[:, 1] <= height - 1.0)
     )
     primary = valid_os & oracle_target_in_frame & (oracle_motion >= min_oracle_motion_px)
-    if int(primary.sum()) < 10:
-        raise AttributionError(f"oracle moving-flow support has only {int(primary.sum())} pixels")
+    primary_count = int(primary.sum())
     candidate_valid = valid_cs & valid_ct
     diagonal = math.hypot(width, height)
     epe = np.full(len(x), diagonal, dtype=np.float64)
@@ -1129,15 +1128,30 @@ def robot_flow_error(
         candidate_flow[jointly_valid] - oracle_flow[jointly_valid], axis=1
     )
     values = epe[primary]
+    if primary_count < 10:
+        return {
+            "robot_flow_epe_px": None,
+            "robot_flow_epe_p95_px": None,
+            "robot_flow_epe_sum_px": 0.0,
+            "oracle_flow_magnitude_px": None,
+            "candidate_projection_valid_fraction": None,
+            "oracle_source_reprojection_rmse_px": float(np.sqrt(np.mean(reprojection**2))),
+            "oracle_source_sample_count": float(len(x)),
+            "oracle_moving_flow_sample_count": float(primary_count),
+            "oracle_target_in_frame_fraction": float(oracle_target_in_frame.mean()),
+            "flow_transition_scored": False,
+        }
     return {
         "robot_flow_epe_px": float(values.mean()),
         "robot_flow_epe_p95_px": float(np.percentile(values, 95)),
+        "robot_flow_epe_sum_px": float(values.sum()),
         "oracle_flow_magnitude_px": float(oracle_motion[primary].mean()),
         "candidate_projection_valid_fraction": float(candidate_valid[primary].mean()),
         "oracle_source_reprojection_rmse_px": float(np.sqrt(np.mean(reprojection**2))),
         "oracle_source_sample_count": float(len(x)),
         "oracle_moving_flow_sample_count": float(primary.sum()),
         "oracle_target_in_frame_fraction": float(oracle_target_in_frame.mean()),
+        "flow_transition_scored": True,
     }
 
 
@@ -1187,14 +1201,36 @@ def aggregate_clip_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if len(arm_rows) != 8:
                 raise AttributionError(f"{clip_id}/{arm} has {len(arm_rows)} rows")
             metric_names = sorted(arm_rows[0]["metrics"])
+            flow_count = float(
+                np.sum(
+                    [row["metrics"]["oracle_moving_flow_sample_count"] for row in arm_rows]
+                )
+            )
+            if flow_count < 10:
+                raise AttributionError(f"{clip_id}/{arm} has no identifiable robot-flow support")
+            aggregated_metrics: dict[str, float] = {}
+            for name in metric_names:
+                if name == "robot_flow_epe_px":
+                    aggregated_metrics[name] = float(
+                        np.sum([row["metrics"]["robot_flow_epe_sum_px"] for row in arm_rows])
+                        / flow_count
+                    )
+                    continue
+                values = [row["metrics"][name] for row in arm_rows]
+                numeric = [float(value) for value in values if value is not None]
+                if not numeric:
+                    continue
+                if name in {"robot_flow_epe_sum_px", "oracle_moving_flow_sample_count"}:
+                    aggregated_metrics[name] = float(np.sum(numeric))
+                elif name == "flow_transition_scored":
+                    aggregated_metrics[name] = float(np.sum(numeric))
+                else:
+                    aggregated_metrics[name] = float(np.mean(numeric))
             aggregates.append(
                 {
                     "clip_id": clip_id,
                     "arm": arm,
-                    "metrics": {
-                        name: float(np.mean([row["metrics"][name] for row in arm_rows]))
-                        for name in metric_names
-                    },
+                    "metrics": aggregated_metrics,
                     "protected_test_accessed": False,
                 }
             )
@@ -1532,6 +1568,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "type": "rendered geom-local point transport on oracle-visible articulated support",
                 "pixel_stride": FLOW_PIXEL_STRIDE,
                 "minimum_oracle_motion_px": FLOW_MIN_ORACLE_MOTION_PX,
+                "minimum_transition_pixels": 10,
+                "zero_support_transition_policy": (
+                    "exclude symmetrically for all arms; pool clip EPE by qualifying oracle pixels"
+                ),
                 "far_depth": far_depth,
                 "moving_geom_ids": sorted(moving_geoms),
                 "static_arm_bases_excluded": True,
@@ -1681,10 +1721,11 @@ def audit(output: Path) -> dict[str, Any]:
         raise AttributionError("bundle count differs")
     for row in frame_rows:
         metrics = row["metrics"]
-        if metrics["oracle_moving_flow_sample_count"] < 10:
-            raise AttributionError("flow support below frozen minimum")
         if metrics["oracle_source_reprojection_rmse_px"] > 1e-5:
             raise AttributionError("flow source reprojection audit failed")
+    for row in clip_rows:
+        if row["metrics"]["oracle_moving_flow_sample_count"] < 10:
+            raise AttributionError("clip flow support below frozen minimum")
     false_flags = sum(
         require_false_flags(document, name) for name, document in documents.items()
     )
