@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 from pathlib import Path
 import sys
@@ -22,6 +24,10 @@ def _load(name: str, relative: str):
 
 
 stage = _load("physics_flow_stage1_test", "tools/physics_flow_stage1.py")
+cache_runtime = _load(
+    "physics_flow_cache_runtime_test",
+    "tools/physics_flow_cache_runtime.py",
+)
 snapshot_receipt = _load(
     "snapshot_model_state_receipt_test",
     "tools/snapshot_model_state_receipt.py",
@@ -34,6 +40,7 @@ parent_parity_tool = _load(
     "physics_flow_parent_parity_test",
     "tools/physics_flow_parent_parity.py",
 )
+abc_probe = sys.modules["tools.abc_d405_nominal_geometry_probe"]
 
 
 def test_endpoint_grid_is_equal_call_raw_only() -> None:
@@ -179,6 +186,272 @@ def test_support_weighted_pool_and_bottom_padding() -> None:
     np.testing.assert_array_equal(pooled[:, 23], 0.0)
 
 
+def test_cache_python_identity_preserves_venv_symlink_entry(tmp_path: Path) -> None:
+    shared = tmp_path / "shared" / "bin" / "python3.10"
+    shared.parent.mkdir(parents=True)
+    shared.write_bytes(b"pinned interpreter\n")
+    shared.chmod(0o700)
+    model_entry = tmp_path / "model" / "bin" / "python"
+    model_entry.parent.mkdir(parents=True)
+    model_entry.symlink_to(shared)
+    cache_entry = tmp_path / "cache" / "bin" / "python"
+    cache_entry.parent.mkdir(parents=True)
+    cache_entry.symlink_to(model_entry)
+
+    identity = cache_runtime.python_entry_identity(cache_entry)
+
+    assert identity["entry_path"] == str(cache_entry)
+    assert identity["entry_is_symlink"] is True
+    assert identity["symlink_chain"] == [
+        {"path": str(cache_entry), "link_target": str(model_entry)},
+        {"path": str(model_entry), "link_target": str(shared)},
+    ]
+    assert identity["resolved_executable"]["path"] == str(shared)
+    # Regression: resolving before execution would select the model/shared
+    # environment rather than the cache virtual environment.
+    assert Path(identity["entry_path"]) != Path(identity["entry_path"]).resolve()
+
+
+def test_cache_runtime_declares_complete_mcap_decode_stack() -> None:
+    assert stage.CACHE_RUNTIME_CALIBRATION_PREFLIGHT_TRAIN_INDEX == 1
+    assert stage.CACHE_RUNTIME_CALIBRATION_PREFLIGHT_IDENTITY == (
+        "abc8d36380d88196e2cde46b24a57c52994fc6b518af028b89f75fffc1ee346c"
+    )
+    assert stage.CACHE_RUNTIME_DISTRIBUTIONS == {
+        "lz4": "4.4.5",
+        "mcap": "1.4.0",
+        "mcap-protobuf-support": "0.5.4",
+        "mujoco": "3.3.7",
+        "numpy": "2.0.1",
+        "protobuf": "7.35.1",
+        "zstandard": "0.25.0",
+    }
+    assert stage.CACHE_RUNTIME_IMPORT_NAMES == {
+        "lz4": "lz4",
+        "mcap": "mcap",
+        "mcap-protobuf-support": "mcap_protobuf",
+        "mujoco": "mujoco",
+        "numpy": "numpy",
+        "protobuf": "google.protobuf",
+        "zstandard": "zstandard",
+    }
+
+
+def test_calibration_preflight_requires_registered_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calibration = {
+        "camera_type": stage.CAMERA_TYPE,
+        "camera_width": 640,
+        "camera_height": 480,
+        "distortion_model": "plumb_bob",
+        "frame_id": "top_camera",
+        "K": [1.0] * 9,
+        "D": [0.0] * 5,
+        "R": [1.0] * 9,
+        "P": [1.0] * 12,
+        "topics": ["/top-camera", "/top-camera-info"],
+        "episode_metadata": {"top_camera_type": stage.CAMERA_TYPE},
+    }
+    monkeypatch.setattr(
+        abc_probe,
+        "_decode_top_calibration",
+        lambda _: calibration,
+    )
+    raw_mcap = tmp_path / "episode.mcap"
+    raw_mcap.write_bytes(b"zstd fixture")
+    identity = hashlib.sha256(
+        cache_runtime.canonical_json(calibration)
+    ).hexdigest()
+
+    receipt = cache_runtime._calibration_preflight(raw_mcap, identity)
+
+    assert receipt["passed"] is True
+    assert receipt["calibration_identity_sha256"] == identity
+    assert receipt["future_rgb_message_decoded"] is False
+    with pytest.raises(cache_runtime.CacheRuntimeError):
+        cache_runtime._calibration_preflight(raw_mcap, "0" * 64)
+
+
+def test_cache_runtime_receipt_rejects_symlink_or_record_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        stage,
+        "CACHE_RUNTIME_RECORD_AMBIGUITIES",
+        {name: [] for name in stage.CACHE_RUNTIME_DISTRIBUTIONS},
+    )
+    monkeypatch.setattr(
+        stage,
+        "CACHE_RUNTIME_RECORD_INVENTORIES",
+        {name: {} for name in stage.CACHE_RUNTIME_DISTRIBUTIONS},
+    )
+    shared = tmp_path / "shared" / "python3.10"
+    shared.parent.mkdir()
+    shared.write_bytes(b"interpreter\n")
+    shared.chmod(0o700)
+    prefix = tmp_path / "cache"
+    entry = prefix / "bin" / "python"
+    entry.parent.mkdir(parents=True)
+    entry.symlink_to(shared)
+    pyvenv = prefix / "pyvenv.cfg"
+    pyvenv.write_text("version = 3.10.20\n")
+    site_packages = prefix / "lib" / "python3.10" / "site-packages"
+    site_packages.mkdir(parents=True)
+    packages = {}
+    native_files = {}
+    for name, version in stage.CACHE_RUNTIME_DISTRIBUTIONS.items():
+        module = site_packages / name / "__init__.py"
+        module.parent.mkdir()
+        module_bytes = f"# {name} {version}\n".encode()
+        module.write_bytes(module_bytes)
+        native = module.parent / f"_{name}.so"
+        native_bytes = f"native {name} {version}\n".encode()
+        native.write_bytes(native_bytes)
+        native_files[name] = native
+        record = site_packages / f"{name}-{version}.dist-info" / "RECORD"
+        record.parent.mkdir()
+        rows = []
+        for relative, content in (
+            (f"{name}/__init__.py", module_bytes),
+            (f"{name}/_{name}.so", native_bytes),
+        ):
+            encoded = (
+                base64.urlsafe_b64encode(hashlib.sha256(content).digest())
+                .decode()
+                .rstrip("=")
+            )
+            rows.append(f"{relative},sha256={encoded},{len(content)}")
+        rows.append(f"{name}-{version}.dist-info/RECORD,,")
+        record.write_text("\n".join(rows) + "\n")
+        packages[name] = {
+            "distribution": name,
+            "import_name": stage.CACHE_RUNTIME_IMPORT_NAMES[name],
+            "version": version,
+            "module": stage.file_record(module),
+            "distribution_record": stage.file_record(record),
+            "verified_record_inventory": cache_runtime.verify_distribution_record(
+                record, prefix
+            ),
+        }
+    helper = tmp_path / "physics_flow_cache_runtime.py"
+    helper.write_text("# receipt helper\n")
+    raw_mcap = tmp_path / "episode.mcap"
+    raw_mcap.write_bytes(b"registered calibration fixture\n")
+    raw_mcap_stat = raw_mcap.stat()
+    receipt = stage.identity_payload(
+        {
+            "schema_version": stage.CACHE_RENDERER_RUNTIME_SCHEMA_VERSION,
+            "kind": stage.CACHE_RENDERER_RUNTIME_KIND,
+            "python_entry": cache_runtime.python_entry_identity(entry),
+            "pyvenv_cfg": stage.file_record(pyvenv),
+            "python": {
+                "sys_executable": str(entry),
+                "sys_prefix": str(prefix),
+                "sys_base_prefix": str(shared.parent.parent),
+                "version": "3.10.20",
+                "platform": "test",
+                "no_user_site": True,
+            },
+            "packages": packages,
+            "renderer_preflight": {
+                "passed": True,
+                "headless_backend": "egl",
+                "render_shape": [8, 8, 3],
+                "render_dtype": "uint8",
+                "mujoco_library_version": "3.3.7",
+            },
+            "calibration_preflight": {
+                "passed": True,
+                "raw_mcap": {
+                    "path": str(raw_mcap),
+                    "bytes": raw_mcap_stat.st_size,
+                    "mtime_ns": raw_mcap_stat.st_mtime_ns,
+                    "device": raw_mcap_stat.st_dev,
+                    "inode": raw_mcap_stat.st_ino,
+                    "content_digest_computed": False,
+                },
+                "calibration_identity_sha256": "a" * 64,
+                "camera_type": stage.CAMERA_TYPE,
+                "camera_width": 640,
+                "camera_height": 480,
+                "intrinsic_count": 9,
+                "topics": ["/top-camera", "/top-camera-info"],
+                "registered_d405_calibration_decoded": True,
+                "future_rgb_message_decoded": False,
+                "protected_test_accessed": False,
+            },
+            "helper_source": stage.file_record(helper),
+            "protected_test_accessed": False,
+        }
+    )
+    assert stage.validate_cache_renderer_runtime_receipt(receipt) == receipt
+
+    # The RECORD itself remains bit-identical; mutation of a declared native
+    # library must still fail the static replay.
+    native_files["mujoco"].write_bytes(b"mutated native library\n")
+    with pytest.raises(stage.PhysicsFlowStage1Error):
+        stage.validate_cache_renderer_runtime_receipt(receipt)
+
+
+def test_record_verifier_only_allows_content_bound_duplicate_pyc(
+    tmp_path: Path,
+) -> None:
+    prefix = tmp_path / "venv"
+    site_packages = prefix / "lib" / "python3.10" / "site-packages"
+    bytecode = site_packages / "demo" / "__pycache__" / "module.pyc"
+    bytecode.parent.mkdir(parents=True)
+    observed = b"observed generated bytecode"
+    declared = b"wheel build bytecode"
+    bytecode.write_bytes(observed)
+    source = site_packages / "demo" / "__init__.py"
+    source_bytes = b"# demo\n"
+    source.write_bytes(source_bytes)
+    record = site_packages / "demo-1.0.dist-info" / "RECORD"
+    record.parent.mkdir()
+    encoded = (
+        base64.urlsafe_b64encode(hashlib.sha256(declared).digest())
+        .decode()
+        .rstrip("=")
+    )
+    source_encoded = (
+        base64.urlsafe_b64encode(hashlib.sha256(source_bytes).digest())
+        .decode()
+        .rstrip("=")
+    )
+    record.write_text(
+        f"demo/__init__.py,sha256={source_encoded},{len(source_bytes)}\n"
+        "demo/__pycache__/module.pyc,,\n"
+        f"demo/__pycache__/module.pyc,sha256={encoded},{len(declared)}\n"
+        "demo-1.0.dist-info/RECORD,,\n"
+    )
+
+    inventory = cache_runtime.verify_distribution_record(record, prefix)
+
+    assert inventory["duplicate_entry_count"] == 1
+    assert inventory["ambiguous_duplicate_entries"] == [
+        {
+            "path": "demo/__pycache__/module.pyc",
+            "bytes": len(observed),
+            "sha256": hashlib.sha256(observed).hexdigest(),
+            "declared_sha256": hashlib.sha256(declared).hexdigest(),
+            "declared_bytes": len(declared),
+            "duplicate_unhashed_declaration": True,
+        }
+    ]
+
+    unique = site_packages / "demo" / "native.so"
+    unique.write_bytes(b"mutated")
+    record.write_text(
+        record.read_text()
+        + f"demo/native.so,sha256={encoded},{len(declared)}\n"
+    )
+    with pytest.raises(cache_runtime.CacheRuntimeError):
+        cache_runtime.verify_distribution_record(record, prefix)
+
+
 def test_support_weighting_does_not_attenuate_motion() -> None:
     native = np.zeros((4, 180, 320), dtype=np.float32)
     native[0, 0:4, 0:4] = 0.4
@@ -299,6 +572,13 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     launch_runbook = (
         ROOT / "docs/experiments/PHYSICS_FLOW_STAGE1_LAUNCH_RUNBOOK.md"
     ).read_text()
+    stage_source = (ROOT / "tools/physics_flow_stage1.py").read_text()
+    cache_runtime_source = (
+        ROOT / "tools/physics_flow_cache_runtime.py"
+    ).read_text()
+    corrected_source = (
+        ROOT / "tools/corrected_renderer_attribution.py"
+    ).read_text()
     assert "model.sample_future_deployable(" in parent_adapter
     assert "model.sample_future_deployable(" in parent_parity
     assert "rgb[index, 0:5]" in parent_parity
@@ -307,9 +587,50 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "physics_flow_stage1" not in parent_reference
     assert "implementation_repo" in parent_reference
     assert "historical_preserve_zero_support_attribute_absent" in parent_reference
+    corrected_preamble = corrected_source.split("def extract_rows", 1)[0]
+    assert "stage0_nominal_tracking_residual" not in corrected_preamble
+    assert "stage0_nominal_tracking_residual" in corrected_source.split(
+        "def extract_rows", 1
+    )[1]
     assert "prepared only; do not execute" in launch_runbook
     assert "REPLACE_WITH_AUDITOR_ACKNOWLEDGED_40_CHARACTER_COMMIT" in launch_runbook
     assert 'BASH_PREFIX="/bin/bash -lc' in launch_runbook
+    assert "CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python" in launch_runbook
+    assert "PYTHONNOUSERSITE=1" in launch_runbook
+    assert "--cache-python $CACHE_PYTHON_BIN" in launch_runbook
+    assert launch_runbook.count("-20260808-$SHORT-v2") == 3
+    assert "-20260808-$SHORT-v1" not in launch_runbook
+    assert launch_runbook.count(
+        "$CACHE_PYTHON_BIN tools/physics_flow_stage1.py build-cache"
+    ) == 2
+    assert "$CACHE_PYTHON_BIN tools/physics_flow_stage1.py audit-cache" not in launch_runbook
+    register_body = stage_source.split("def command_register_cache", 1)[1].split(
+        "def validate_cache_registration", 1
+    )[0]
+    assert register_body.index("_register_cache_renderer_runtime") < register_body.index(
+        "output.mkdir(mode=0o700)"
+    )
+    assert register_body.index("train = _scan_split") < register_body.index(
+        "_register_cache_renderer_runtime"
+    )
+    assert "--calibration-mcap" in stage_source
+    assert "expected_calibration_identity_sha256" in stage_source
+    for token in (
+        '"mcap-protobuf-support": "mcap_protobuf"',
+        '"protobuf": "google.protobuf"',
+        '"lz4": "lz4"',
+        '"zstandard": "zstandard"',
+        "_calibration_preflight(",
+    ):
+        assert token in cache_runtime_source
+    assert '"tools/abc_d405_nominal_geometry_probe.py"' in stage_source
+    assert '"tools/corrected_renderer_attribution.py"' in stage_source
+    build_body = stage_source.split("def command_build_cache", 1)[1].split(
+        "def load_cache_metadata", 1
+    )[0]
+    assert build_body.index("enforce_current_cache_renderer_runtime") < build_body.index(
+        "split_root.mkdir(mode=0o700)"
+    )
     assert 'mkdir -p "$(dirname "$CACHE_ROOT")"' in launch_runbook
     assert "p.validate_renderer_gate" in launch_runbook
     assert launch_runbook.count("--gpus-per-node=1") == 4

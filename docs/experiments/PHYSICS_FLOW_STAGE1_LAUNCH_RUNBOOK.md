@@ -34,6 +34,10 @@ SOURCE_MIRROR=$BASE/src/dual-video-diffused-lacwm
 SOURCE_REPO=$BASE/src/worktrees/raw-physics-flow-stage1-$SHORT
 PARENT_SOURCE_REPO=$BASE/src/vjepa2-faithful-cascade-656086686dae/dual-video-diffused-lacwm
 PYTHON_BIN=$BASE/envs/lacwm-b200-py310/bin/python
+# Cache rendering is the sole consumer of this isolated MuJoCo venv. Keep the
+# lexical symlink path: resolving it before execution silently selects the
+# LACWM venv and drops MuJoCo from sys.path.
+CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python
 WAN_DIR=$BASE/wan_fun_1.3b_control
 VIDEOX_HOME=$BASE/VideoX-Fun-1d6d9c3
 OFFICIAL_ABC=$BASE/src/amazon-far-abc-6bc6586
@@ -58,9 +62,9 @@ LPIPS_PREFLIGHT_LOG=$PREFLIGHT/lpips_pin-507388.log
 CAUSAL_LADDER=$BASE/artifacts/dual_video_diffusion/causal_compressibility_ladder/causal-compressibility-train256-dev64-seed20260820-4d4db76-v1/registration.json
 DIRECT_FRONTIER=$BASE/artifacts/dual_video_diffusion/vpm_direct_residual_frontier/vpm-direct-residual-fit256-outcome31-seed20260832-4f75f9c-v2
 
-CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v1
-STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v1
-LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v1
+CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v2
+STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v2
+LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v2
 REGISTRATION=$STUDY_ROOT/registration.json
 ```
 
@@ -79,6 +83,17 @@ test "$(sha256sum "$PARENT_CONFIG" | awk '{print $1}')" = ae3ffd27146883917472b8
 test "$(sha256sum "$LINEAGE_FAILED_LOG" | awk '{print $1}')" = 18bff874df2ae79bae614520ce80d3dd2d223a86d31bf1c8cc5ad24e05f10714
 test "$(sha256sum "$LINEAGE_COMPARISON_LOG" | awk '{print $1}')" = 048bcddd35ecd2458e5b17f28a48a8a4967111dbb888e8cd2bc9d5ff669c0e2a
 test "$(sha256sum "$LPIPS_PREFLIGHT_LOG" | awk '{print $1}')" = db37a417618afa1156cb7226140993755279191edfef8a0c628d550de20fc6af
+test -L "$CACHE_PYTHON_BIN"
+test "$(readlink "$CACHE_PYTHON_BIN")" = "$BASE/envs/lacwm-b200-py310/bin/python"
+test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/pyvenv.cfg" | awk '{print $1}')" = a85cf62de5c2c623fdc358933f86f50e58d93f41b580f097d3b1f6f66c5b67ab
+test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/mujoco-3.3.7.dist-info/RECORD" | awk '{print $1}')" = b403cad508902f2ea3c1106ee827cc89599e8bd3d156f5602703531ab1c1e250
+test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/numpy-2.0.1.dist-info/RECORD" | awk '{print $1}')" = dca51d52189d5aff4cdc2da2b4c2883c9c35ebd7e8d1cc30856b3b05c5b4bf59
+test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/mcap-1.4.0.dist-info/RECORD" | awk '{print $1}')" = b6c95f80a91a66103f55c58a92a0da30871e9b012beaf05a805bccdde95cdd16
+test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/mcap_protobuf_support-0.5.4.dist-info/RECORD" | awk '{print $1}')" = 84dbce795b6b9f8ad82135443f25df5a028355805ef29668a940a31ce036d36c
+test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/protobuf-7.35.1.dist-info/RECORD" | awk '{print $1}')" = cb998781253fda25fd95558ea6a87879ca4897cbdcf79da2709264c8da4ce3ea
+test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/lz4-4.4.5.dist-info/RECORD" | awk '{print $1}')" = 6ae8e7c253be6063a94f74d4478f5c3cad56e021346068851d2c7ad52ec712c0
+test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/lib/python3.10/site-packages/zstandard-0.25.0.dist-info/RECORD" | awk '{print $1}')" = 264b11507cd20241c4a087e7c2bc5f5c5a39f7ba6e589f1e509338f3fc35ce0d
+test "$(sha256sum "$(readlink -f "$CACHE_PYTHON_BIN")" | awk '{print $1}')" = 49b2c58e9fddd98ff9b53f6f7613a91db9053f858c89cae5dcd25ee7828bc0d6
 test ! -e "$SOURCE_REPO"
 test ! -e "$CACHE_ROOT"
 test ! -e "$STUDY_ROOT"
@@ -111,10 +126,17 @@ script before using `pipefail` or sourcing the B200 activation helper. Large
 artifacts remain on Lustre. No protected test split is named anywhere in the
 chain. The cluster's `batch` partition requires a GPU request even for the
 CPU-dominant registration and sealing stages, so all four wrapped jobs request
-one B200 and leave it otherwise unused where appropriate.
+one B200 and leave it otherwise unused where appropriate. Registration, cache
+auditing/sealing, training, and evaluation execute with `PYTHON_BIN`.
+Registration launches one pre-output child preflight through the unresolved
+`CACHE_PYTHON_BIN` symlink. It imports and content-verifies the complete direct
+MCAP/protobuf/codec stack, performs an EGL render, and decodes the deterministic
+first registered train-D405 calibration from its zstd MCAP, requiring the
+LACWM-registration and cache-runtime calibration identities to match. Only the
+two cache builders execute their main process with that cache-only runtime.
 
 ```bash
-BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME MUJOCO_GL=egl; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO;"
+BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME MUJOCO_GL=egl; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO;"
 
 REGISTER_JOB=$(sbatch --parsable \
   --job-name=pf-register-$SHORT \
@@ -125,6 +147,7 @@ REGISTER_JOB=$(sbatch --parsable \
   --exclude=pool0-0081,pool0-0089 \
   --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py register-cache \
     --output $CACHE_ROOT --source-repo $SOURCE_REPO \
+    --cache-python $CACHE_PYTHON_BIN \
     --expected-commit $EXPECTED_COMMIT --official-abc-root $OFFICIAL_ABC \
     --renderer-gate $RENDERER_GATE --train-manifest $TRAIN_MANIFEST \
     --val-manifest $VAL_MANIFEST --train-cache-metadata $TRAIN_RGB_METADATA \
@@ -138,7 +161,7 @@ CACHE_TRAIN_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
   --mem=256G --time=02:00:00 --partition=batch \
   --account=coreai_chef_posttrain --qos=short --no-requeue \
   --exclude=pool0-0081,pool0-0089 \
-  --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py build-cache \
+  --wrap="$BASH_PREFIX $CACHE_PYTHON_BIN tools/physics_flow_stage1.py build-cache \
     --registration $CACHE_ROOT/cache_registration.json --split train'")
 
 CACHE_VAL_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
@@ -148,7 +171,7 @@ CACHE_VAL_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
   --mem=256G --time=02:00:00 --partition=batch \
   --account=coreai_chef_posttrain --qos=short --no-requeue \
   --exclude=pool0-0081,pool0-0089 \
-  --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py build-cache \
+  --wrap="$BASH_PREFIX $CACHE_PYTHON_BIN tools/physics_flow_stage1.py build-cache \
     --registration $CACHE_ROOT/cache_registration.json --split val'")
 
 SEAL_JOB=$(sbatch --parsable \

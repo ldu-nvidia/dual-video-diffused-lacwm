@@ -70,6 +70,19 @@ from tools.corrected_renderer_attribution import (  # noqa: E402
     render_pose,
     transport_local_points,
 )
+from tools.physics_flow_cache_runtime import (  # noqa: E402
+    EXPECTED_DISTRIBUTIONS as CACHE_RUNTIME_DISTRIBUTIONS,
+    EXPECTED_IMPORT_NAMES as CACHE_RUNTIME_IMPORT_NAMES,
+    EXPECTED_AMBIGUOUS_RECORD_ENTRIES as CACHE_RUNTIME_RECORD_AMBIGUITIES,
+    EXPECTED_RECORD_INVENTORIES as CACHE_RUNTIME_RECORD_INVENTORIES,
+    RUNTIME_KIND as CACHE_RENDERER_RUNTIME_KIND,
+    SCHEMA_VERSION as CACHE_RENDERER_RUNTIME_SCHEMA_VERSION,
+    CacheRuntimeError,
+    collect_runtime_receipt,
+    lexical_absolute,
+    python_entry_identity,
+    verify_distribution_record,
+)
 
 
 SCHEMA_VERSION = 2
@@ -250,6 +263,10 @@ TRAIN_ACTIONS_SHA256 = (
 VAL_ACTIONS_SHA256 = (
     "552a5cf0af156868d2866dfacabe102fc6b5cd24580bb377953e35a14625306a"
 )
+CACHE_RUNTIME_CALIBRATION_PREFLIGHT_TRAIN_INDEX = 1
+CACHE_RUNTIME_CALIBRATION_PREFLIGHT_IDENTITY = (
+    "abc8d36380d88196e2cde46b24a57c52994fc6b518af028b89f75fffc1ee346c"
+)
 
 CACHE_SCHEMA = "raw-physics-flow-cache-v2"
 CACHE_REGISTRATION_KIND = "raw_physics_flow_cache_registration"
@@ -387,6 +404,273 @@ def file_record(path: Path, *, digest: bool = True) -> dict[str, Any]:
     if digest:
         result["sha256"] = sha256_file(path)
     return result
+
+
+def _absolute_file_record_matches(record: Any, label: str) -> Path:
+    if not isinstance(record, Mapping):
+        raise PhysicsFlowStage1Error(f"{label} record is invalid")
+    path = Path(str(record.get("path", "")))
+    if (
+        not path.is_absolute()
+        or not path.is_file()
+        or path.is_symlink()
+        or record.get("bytes") != path.stat().st_size
+        or record.get("sha256") != sha256_file(path)
+    ):
+        raise PhysicsFlowStage1Error(f"{label} file differs")
+    return path.resolve(strict=True)
+
+
+def validate_cache_renderer_runtime_receipt(
+    receipt: Any,
+    *,
+    source_repo: Path | None = None,
+) -> dict[str, Any]:
+    """Statically replay the sealed cache-only interpreter/package identity."""
+
+    if (
+        not isinstance(receipt, Mapping)
+        or not identity_valid(receipt)
+        or receipt.get("schema_version")
+        != CACHE_RENDERER_RUNTIME_SCHEMA_VERSION
+        or receipt.get("kind") != CACHE_RENDERER_RUNTIME_KIND
+        or receipt.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("cache renderer runtime receipt differs")
+    python_entry = receipt.get("python_entry")
+    if not isinstance(python_entry, Mapping):
+        raise PhysicsFlowStage1Error("cache renderer Python entry is invalid")
+    try:
+        observed_entry = python_entry_identity(
+            Path(str(python_entry.get("entry_path", "")))
+        )
+    except CacheRuntimeError as exc:
+        raise PhysicsFlowStage1Error("cache renderer Python entry changed") from exc
+    if observed_entry != python_entry:
+        raise PhysicsFlowStage1Error("cache renderer Python symlink chain changed")
+    python_runtime = receipt.get("python")
+    if not isinstance(python_runtime, Mapping):
+        raise PhysicsFlowStage1Error("cache renderer Python runtime is invalid")
+    prefix = Path(str(python_runtime.get("sys_prefix", "")))
+    entry_path = lexical_absolute(Path(str(python_entry["entry_path"])))
+    if (
+        prefix != entry_path.parent.parent
+        or python_runtime.get("sys_executable") != str(entry_path)
+        or python_runtime.get("no_user_site") is not True
+    ):
+        raise PhysicsFlowStage1Error("cache renderer virtual environment differs")
+    pyvenv = _absolute_file_record_matches(
+        receipt.get("pyvenv_cfg"), "cache renderer pyvenv.cfg"
+    )
+    if pyvenv != prefix / "pyvenv.cfg":
+        raise PhysicsFlowStage1Error("cache renderer pyvenv.cfg is noncanonical")
+    packages = receipt.get("packages")
+    if not isinstance(packages, Mapping) or set(packages) != set(
+        CACHE_RUNTIME_DISTRIBUTIONS
+    ):
+        raise PhysicsFlowStage1Error("cache renderer package inventory differs")
+    for name, expected_version in CACHE_RUNTIME_DISTRIBUTIONS.items():
+        package = packages.get(name)
+        if (
+            not isinstance(package, Mapping)
+            or package.get("distribution") != name
+            or package.get("import_name") != CACHE_RUNTIME_IMPORT_NAMES[name]
+            or package.get("version") != expected_version
+        ):
+            raise PhysicsFlowStage1Error(f"cache renderer {name} package differs")
+        module = _absolute_file_record_matches(
+            package.get("module"), f"cache renderer {name} module"
+        )
+        record = _absolute_file_record_matches(
+            package.get("distribution_record"),
+            f"cache renderer {name} distribution RECORD",
+        )
+        if prefix.resolve(strict=True) not in module.parents or prefix.resolve(
+            strict=True
+        ) not in record.parents:
+            raise PhysicsFlowStage1Error(
+                f"cache renderer {name} escaped its virtual environment"
+            )
+        try:
+            observed_inventory = verify_distribution_record(record, prefix)
+        except CacheRuntimeError as exc:
+            raise PhysicsFlowStage1Error(
+                f"cache renderer {name} installed files differ"
+            ) from exc
+        if package.get("verified_record_inventory") != observed_inventory:
+            raise PhysicsFlowStage1Error(
+                f"cache renderer {name} verified RECORD inventory differs"
+            )
+        if (
+            observed_inventory.get("ambiguous_duplicate_entries")
+            != CACHE_RUNTIME_RECORD_AMBIGUITIES[name]
+            or observed_inventory.get(
+                "all_unambiguous_declared_sha256_entries_verified"
+            )
+            is not True
+        ):
+            raise PhysicsFlowStage1Error(
+                f"cache renderer {name} RECORD ambiguity differs"
+            )
+        if any(
+            observed_inventory.get(key) != expected
+            for key, expected in CACHE_RUNTIME_RECORD_INVENTORIES[name].items()
+        ):
+            raise PhysicsFlowStage1Error(
+                f"cache renderer {name} pinned RECORD inventory differs"
+            )
+        if (
+            name in {"mujoco", "numpy"}
+            and observed_inventory.get("native_library_count", 0) < 1
+        ):
+            raise PhysicsFlowStage1Error(
+                f"cache renderer {name} has no verified native libraries"
+            )
+    preflight = receipt.get("renderer_preflight")
+    if (
+        not isinstance(preflight, Mapping)
+        or preflight.get("passed") is not True
+        or preflight.get("headless_backend") != "egl"
+        or preflight.get("render_shape") != [8, 8, 3]
+        or preflight.get("render_dtype") != "uint8"
+        or preflight.get("mujoco_library_version") != "3.3.7"
+    ):
+        raise PhysicsFlowStage1Error("cache renderer EGL preflight differs")
+    calibration = receipt.get("calibration_preflight")
+    raw_mcap = calibration.get("raw_mcap") if isinstance(calibration, Mapping) else None
+    if not isinstance(raw_mcap, Mapping):
+        raise PhysicsFlowStage1Error("cache renderer calibration preflight is invalid")
+    mcap_path = Path(str(raw_mcap.get("path", "")))
+    if (
+        not mcap_path.is_absolute()
+        or not mcap_path.is_file()
+        or mcap_path.is_symlink()
+    ):
+        raise PhysicsFlowStage1Error("cache renderer calibration MCAP changed")
+    mcap_stat = mcap_path.stat()
+    calibration_topics = calibration.get("topics")
+    if (
+        calibration.get("passed") is not True
+        or calibration.get("registered_d405_calibration_decoded") is not True
+        or calibration.get("future_rgb_message_decoded") is not False
+        or calibration.get("protected_test_accessed") is not False
+        or calibration.get("camera_type") != CAMERA_TYPE
+        or calibration.get("camera_width") != 640
+        or calibration.get("camera_height") != 480
+        or calibration.get("intrinsic_count") != 9
+        or not isinstance(calibration_topics, list)
+        or not {"/top-camera", "/top-camera-info"}.issubset(calibration_topics)
+        or SHA256_RE.fullmatch(
+            str(calibration.get("calibration_identity_sha256", ""))
+        )
+        is None
+        or raw_mcap.get("bytes") != mcap_stat.st_size
+        or raw_mcap.get("mtime_ns") != mcap_stat.st_mtime_ns
+        or raw_mcap.get("device") != mcap_stat.st_dev
+        or raw_mcap.get("inode") != mcap_stat.st_ino
+        or raw_mcap.get("content_digest_computed") is not False
+    ):
+        raise PhysicsFlowStage1Error("cache renderer calibration preflight differs")
+    helper = _absolute_file_record_matches(
+        receipt.get("helper_source"), "cache renderer receipt helper"
+    )
+    if source_repo is not None:
+        expected_helper = (
+            source_repo.resolve(strict=True)
+            / "tools"
+            / "physics_flow_cache_runtime.py"
+        )
+        if helper != expected_helper or file_record(expected_helper) != receipt.get(
+            "helper_source"
+        ):
+            raise PhysicsFlowStage1Error("cache renderer receipt helper changed")
+    return dict(receipt)
+
+
+def _register_cache_renderer_runtime(
+    cache_python: Path,
+    source_repo: Path,
+    calibration_mcap: Path,
+    expected_calibration_identity_sha256: str,
+) -> dict[str, Any]:
+    """Run the cache-only interpreter without resolving away its venv symlink."""
+
+    try:
+        entry = lexical_absolute(cache_python)
+    except CacheRuntimeError as exc:
+        raise PhysicsFlowStage1Error("cache renderer Python path is invalid") from exc
+    helper = source_repo / "tools" / "physics_flow_cache_runtime.py"
+    if not helper.is_file() or helper.is_symlink():
+        raise PhysicsFlowStage1Error("cache renderer receipt helper is unavailable")
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "MUJOCO_GL": "egl",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    completed = subprocess.run(
+        # Do not resolve ``entry``: CPython uses the lexical symlink to select
+        # the cache virtual environment and its site-packages.
+        [
+            str(entry),
+            str(helper),
+            "--python-entry",
+            str(entry),
+            "--calibration-mcap",
+            str(calibration_mcap),
+            "--expected-calibration-identity-sha256",
+            expected_calibration_identity_sha256,
+        ],
+        cwd=source_repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    if completed.returncode:
+        raise PhysicsFlowStage1Error(
+            "cache renderer import/version/EGL preflight failed: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    try:
+        receipt = json.loads(
+            [line for line in completed.stdout.splitlines() if line.strip()][-1]
+        )
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise PhysicsFlowStage1Error("cache renderer runtime receipt is invalid") from exc
+    return validate_cache_renderer_runtime_receipt(
+        receipt,
+        source_repo=source_repo,
+    )
+
+
+def enforce_current_cache_renderer_runtime(
+    registration: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require a cache builder to run inside the exact registered venv."""
+
+    registered = validate_cache_renderer_runtime_receipt(
+        registration.get("cache_renderer_runtime"),
+        source_repo=Path(registration["source_repository"]["path"]),
+    )
+    try:
+        observed = collect_runtime_receipt(
+            Path(registered["python_entry"]["entry_path"]),
+            Path(registered["calibration_preflight"]["raw_mcap"]["path"]),
+            registered["calibration_preflight"][
+                "calibration_identity_sha256"
+            ],
+        )
+    except CacheRuntimeError as exc:
+        raise PhysicsFlowStage1Error(
+            "current cache builder runtime failed its import/version/EGL preflight"
+        ) from exc
+    if observed != registered:
+        raise PhysicsFlowStage1Error("current cache builder runtime is not registered")
+    return observed
 
 
 def noncontent_file_stat(path: Path) -> dict[str, Any]:
@@ -868,6 +1152,33 @@ def command_register_cache(args: argparse.Namespace) -> int:
     val_episode = {row["episode_dir"] for row in val_rows}
     if train_episode & val_episode:
         raise PhysicsFlowStage1Error("train/validation episodes overlap")
+    calibration_probe = next(
+        (
+            descriptor
+            for descriptor in train["descriptors"]
+            if descriptor["d405_eligible"]
+        ),
+        None,
+    )
+    if calibration_probe is None:
+        raise PhysicsFlowStage1Error("train cache has no D405 runtime preflight row")
+    if (
+        calibration_probe["clip_index"]
+        != CACHE_RUNTIME_CALIBRATION_PREFLIGHT_TRAIN_INDEX
+        or calibration_probe["calibration_identity_sha256"]
+        != CACHE_RUNTIME_CALIBRATION_PREFLIGHT_IDENTITY
+    ):
+        raise PhysicsFlowStage1Error("registered D405 runtime preflight row changed")
+    # Registration itself remains in the full LACWM runtime. A child entered
+    # through the cache venv symlink proves packages, EGL rendering, and an
+    # actual registered D405/protobuf/zstd calibration decode before the cache
+    # output root is created.
+    cache_renderer_runtime = _register_cache_renderer_runtime(
+        args.cache_python,
+        Path(source["path"]),
+        Path(calibration_probe["raw_mcap"]),
+        str(calibration_probe["calibration_identity_sha256"]),
+    )
     output.mkdir(mode=0o700)
     registration = identity_payload(
         {
@@ -877,6 +1188,7 @@ def command_register_cache(args: argparse.Namespace) -> int:
             "created_at_utc": now(),
             "output_root": str(output),
             "source_repository": source,
+            "cache_renderer_runtime": cache_renderer_runtime,
             "official_abc_repository": official,
             "renderer_prerequisite": renderer,
             "inputs": {
@@ -994,6 +1306,41 @@ def validate_cache_registration(path: Path) -> dict[str, Any]:
     )
     if observed_source != source:
         raise PhysicsFlowStage1Error("cache source repository changed after registration")
+    cache_runtime = validate_cache_renderer_runtime_receipt(
+        registration.get("cache_renderer_runtime"),
+        source_repo=Path(source["path"]),
+    )
+    splits = registration.get("splits")
+    train_split = splits.get("train") if isinstance(splits, Mapping) else None
+    train_descriptors = (
+        train_split.get("descriptors", [])
+        if isinstance(train_split, Mapping)
+        else []
+    )
+    calibration_probe = next(
+        (
+            descriptor
+            for descriptor in train_descriptors
+            if isinstance(descriptor, Mapping)
+            and descriptor.get("d405_eligible") is True
+        ),
+        None,
+    )
+    calibration_receipt = cache_runtime["calibration_preflight"]
+    if (
+        calibration_probe is None
+        or calibration_receipt["raw_mcap"]["path"]
+        != calibration_probe.get("raw_mcap")
+        or calibration_receipt["calibration_identity_sha256"]
+        != calibration_probe.get("calibration_identity_sha256")
+        or calibration_probe.get("clip_index")
+        != CACHE_RUNTIME_CALIBRATION_PREFLIGHT_TRAIN_INDEX
+        or calibration_receipt["calibration_identity_sha256"]
+        != CACHE_RUNTIME_CALIBRATION_PREFLIGHT_IDENTITY
+    ):
+        raise PhysicsFlowStage1Error(
+            "cache renderer calibration probe is not the first registered train D405 row"
+        )
     official = registration.get("official_abc_repository", {})
     observed_official = clean_repository(
         Path(str(official.get("path", ""))),
@@ -1375,6 +1722,9 @@ def _load_split_registration(
 
 def command_build_cache(args: argparse.Namespace) -> int:
     registration = validate_cache_registration(args.registration)
+    # This is deliberately before creating the split root: a wrong interpreter,
+    # package mutation, or broken EGL backend leaves no partial cache split.
+    cache_renderer_runtime = enforce_current_cache_renderer_runtime(registration)
     split = args.split
     expected_count = TRAIN_COUNT if split == "train" else VAL_COUNT
     split_root = Path(registration["output_root"]) / split
@@ -1616,6 +1966,9 @@ def command_build_cache(args: argparse.Namespace) -> int:
             "renderer_analysis_identity_sha256": RENDERER_ANALYSIS_IDENTITY,
             "renderer_decision": RENDERER_DECISION,
             "renderer_family": "raw_geometry_scaffold",
+            "cache_renderer_runtime_identity_sha256": cache_renderer_runtime[
+                "identity_sha256"
+            ],
             "split": split,
             "clip_count": expected_count,
             "d405_count": registration["splits"][split]["d405_count"],
@@ -1648,6 +2001,9 @@ def command_build_cache(args: argparse.Namespace) -> int:
             "status": "completed",
             "split": split,
             "cache_registration_identity_sha256": registration["identity_sha256"],
+            "cache_renderer_runtime_identity_sha256": cache_renderer_runtime[
+                "identity_sha256"
+            ],
             "cache_metadata_identity_sha256": metadata["identity_sha256"],
             "metadata": file_record(split_root / "metadata.json"),
             "arrays": arrays_records,
@@ -1677,6 +2033,10 @@ def load_cache_metadata(path: Path, *, split: str | None = None) -> dict[str, An
         != RENDERER_ANALYSIS_IDENTITY
         or metadata.get("renderer_decision") != RENDERER_DECISION
         or metadata.get("renderer_family") != "raw_geometry_scaffold"
+        or SHA256_RE.fullmatch(
+            str(metadata.get("cache_renderer_runtime_identity_sha256", ""))
+        )
+        is None
         or metadata.get("causal_inputs_only") is not True
         or metadata.get("future_rgb_opened") is not False
         or metadata.get("future_measured_state_opened") is not False
@@ -1728,6 +2088,9 @@ def audit_cache(metadata_path: Path, *, write: bool) -> dict[str, Any]:
     registration = validate_cache_registration(registration_path)
     if metadata["cache_registration_identity_sha256"] != registration["identity_sha256"]:
         raise PhysicsFlowStage1Error("cache registration identity linkage differs")
+    runtime_identity = registration["cache_renderer_runtime"]["identity_sha256"]
+    if metadata["cache_renderer_runtime_identity_sha256"] != runtime_identity:
+        raise PhysicsFlowStage1Error("cache renderer runtime linkage differs")
     split = str(metadata["split"])
     expected_count = TRAIN_COUNT if split == "train" else VAL_COUNT
     descriptors = registration["splits"][split]["descriptors"]
@@ -1868,6 +2231,8 @@ def audit_cache(metadata_path: Path, *, write: bool) -> dict[str, Any]:
         or completion.get("split") != split
         or completion.get("cache_metadata_identity_sha256")
         != metadata["identity_sha256"]
+        or completion.get("cache_renderer_runtime_identity_sha256")
+        != runtime_identity
         or completion.get("protected_test_accessed") is not False
     ):
         raise PhysicsFlowStage1Error("cache completion receipt differs")
@@ -1879,6 +2244,7 @@ def audit_cache(metadata_path: Path, *, write: bool) -> dict[str, Any]:
             "audited_at_utc": now(),
             "split": split,
             "cache_registration_identity_sha256": registration["identity_sha256"],
+            "cache_renderer_runtime_identity_sha256": runtime_identity,
             "cache_metadata_identity_sha256": metadata["identity_sha256"],
             "cache_completion_identity_sha256": completion["identity_sha256"],
             "clip_count": expected_count,
@@ -2037,7 +2403,11 @@ def _study_source_files(repo: Path) -> dict[str, Any]:
         "docs/experiments/PHYSICS_FLOW_WAN_SCREEN_PROTOCOL.md",
         "docs/experiments/PHYSICS_FLOW_PARENT_LINEAGE.md",
         "docs/experiments/PHYSICS_FLOW_STAGE1_LAUNCH_RUNBOOK.md",
+        "docs/experiments/PHYSICS_FLOW_STAGE1_RUNTIME_REPAIR.md",
         "tools/physics_flow_stage1.py",
+        "tools/physics_flow_cache_runtime.py",
+        "tools/abc_d405_nominal_geometry_probe.py",
+        "tools/corrected_renderer_attribution.py",
         "tools/physics_flow_stage1_evaluate.py",
         "tools/physics_flow_parent_vpm.py",
         "tools/physics_flow_parent_parity.py",
@@ -2276,6 +2646,8 @@ def command_register_study(args: argparse.Namespace) -> int:
         or val_metadata["source_commit"] != args.expected_commit
         or train_metadata["cache_registration_identity_sha256"]
         != val_metadata["cache_registration_identity_sha256"]
+        or train_metadata["cache_renderer_runtime_identity_sha256"]
+        != val_metadata["cache_renderer_runtime_identity_sha256"]
     ):
         raise PhysicsFlowStage1Error("flow caches and study source are not co-frozen")
     cache_registration = read_json(
@@ -2453,6 +2825,9 @@ def command_register_study(args: argparse.Namespace) -> int:
             "source_files": source_files,
             "cache_registration_identity_sha256": train_metadata[
                 "cache_registration_identity_sha256"
+            ],
+            "cache_renderer_runtime": cache_registration[
+                "cache_renderer_runtime"
             ],
             "renderer_prerequisite": cache_registration["renderer_prerequisite"],
             "flow_caches": {"train": train_cache, "val": val_cache},
@@ -2797,6 +3172,10 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         Path(source["path"]), source["git_commit"], "study source"
     ) != source:
         raise PhysicsFlowStage1Error("study source changed after registration")
+    validate_cache_renderer_runtime_receipt(
+        registration.get("cache_renderer_runtime"),
+        source_repo=Path(source["path"]),
+    )
     for relative, record in registration["source_files"].items():
         observed = file_record(Path(source["path"]) / relative)
         if observed != record:
@@ -4176,6 +4555,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_cache = subparsers.add_parser("register-cache")
     register_cache.add_argument("--output", type=Path, required=True)
     register_cache.add_argument("--source-repo", type=Path, required=True)
+    register_cache.add_argument("--cache-python", type=Path, required=True)
     register_cache.add_argument("--expected-commit", required=True)
     register_cache.add_argument("--official-abc-root", type=Path, required=True)
     register_cache.add_argument("--renderer-gate", type=Path, required=True)

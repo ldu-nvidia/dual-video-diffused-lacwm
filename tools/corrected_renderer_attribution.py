@@ -48,9 +48,6 @@ from tools.abc_d405_nominal_geometry_probe import (
     set_observed_pose,
     silhouette_boundary,
 )
-from tools.stage0_nominal_tracking_residual import construct_clip_arrays
-
-
 SCHEMA_VERSION = 1
 MANIFEST_COUNT = 512
 FIT_STOP = 384
@@ -420,6 +417,11 @@ def extract_rows(
     *,
     role: str,
 ) -> tuple[dict[str, np.ndarray], list[dict[str, Any]], list[np.ndarray], list[np.ndarray]]:
+    # Cache-only consumers import this module for geometry helpers and should
+    # not need the attribution-fit sklearn/scipy stack. Keep it local to the
+    # only training-data path that constructs residual-fit arrays.
+    from tools.stage0_nominal_tracking_residual import construct_clip_arrays
+
     arrays: dict[str, list[np.ndarray]] = {
         name: []
         for name in (
