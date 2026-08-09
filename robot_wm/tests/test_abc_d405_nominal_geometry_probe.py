@@ -1,7 +1,9 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -10,6 +12,7 @@ from tools.abc_d405_nominal_geometry_probe import (
     build_robot_only_xml,
     cache14_to_official14,
     edge_alignment_metrics,
+    _read_video_frames,
     nonwrapping_shift_pairs,
     paired_bootstrap_mean_ci,
     require_train_row,
@@ -19,6 +22,54 @@ from tools.abc_d405_nominal_geometry_probe import (
 
 
 class ABCD405NominalGeometryProbeTest(unittest.TestCase):
+    def test_video_reader_restarts_sequentially_after_bad_random_seek(self):
+        class FakeCapture:
+            def __init__(self, random_access: bool):
+                self.random_access = random_access
+                self.position = 0
+
+            def isOpened(self):
+                return True
+
+            def set(self, _property, value):
+                self.position = int(value)
+                return True
+
+            def get(self, _property):
+                return float(self.position)
+
+            def read(self):
+                if self.random_access and self.position >= 5:
+                    self.position = 1
+                    return False, None
+                value = self.position
+                self.position += 1
+                return True, np.full((2, 3, 3), value, dtype=np.uint8)
+
+            def release(self):
+                return None
+
+        class FakeCV2:
+            CAP_PROP_POS_FRAMES = 1
+            COLOR_BGR2RGB = 2
+
+            def __init__(self):
+                self.open_count = 0
+
+            def VideoCapture(self, _path):
+                self.open_count += 1
+                return FakeCapture(random_access=self.open_count == 1)
+
+            @staticmethod
+            def cvtColor(frame, _conversion):
+                return frame
+
+        fake_cv2 = FakeCV2()
+        with patch.dict(sys.modules, {"av": None, "cv2": fake_cv2}):
+            frames = _read_video_frames(Path("synthetic.mp4"), [2, 5, 7])
+        self.assertEqual(fake_cv2.open_count, 2)
+        np.testing.assert_array_equal(frames[:, 0, 0, 0], [2, 5, 7])
+
     def test_cache_action_permutation_matches_official_order(self):
         cache = np.arange(14, dtype=np.float32)
         official = cache14_to_official14(cache)
