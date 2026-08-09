@@ -8,17 +8,23 @@ from torch import nn
 
 from robot_wm.modeling.low_nfe.adjacent_consistency import (
     AdjacentConsistencyError,
+    CANONICAL_MODEL_STATE_HASH_ALGORITHM,
+    RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
     adjacent_clock_pair,
+    canonical_model_state_sha256,
     consistency_output,
     ema_update_module_,
     karras_boundary_scalings,
     masked_pseudo_huber,
+    model_state_hash_receipt,
     module_state_receipt,
     predicted_clean,
     rectified_flow_euler_step,
     rectified_flow_noisy_state,
+    require_model_state_hashes,
     restore_history_forward_path,
     validate_shift5_rf_clock,
+    tensor_state_sha256,
 )
 
 
@@ -160,3 +166,44 @@ def test_full_state_receipt_detects_unsampled_state_change() -> None:
     second = module_state_receipt(model)
     assert first["sha256"] != second["sha256"]
     assert first["parameter_values"] == second["parameter_values"]
+
+
+def test_canonical_and_runtime_state_hashes_are_not_interchangeable() -> None:
+    state = {
+        "block.weight": torch.arange(12, dtype=torch.float32).reshape(3, 4),
+        "block.counter": torch.tensor([7], dtype=torch.int64),
+    }
+    canonical = canonical_model_state_sha256(state)
+    runtime = tensor_state_sha256(state)
+    receipt = model_state_hash_receipt(state)
+
+    assert canonical == (
+        "bb1e8957eab4a8107d2f85ae0b8c93a66a857ad5978fea749e42a222cd18af61"
+    )
+    assert runtime == (
+        "3d0166ccfd33e7478e10b0cdfb3188d2cdc18fa58859fcead3abecdf2f910812"
+    )
+    assert canonical != runtime
+    assert receipt == {
+        "canonical_model_state_sha256": canonical,
+        "canonical_hash_algorithm": CANONICAL_MODEL_STATE_HASH_ALGORITHM,
+        "runtime_tensor_state_sha256": runtime,
+        "runtime_hash_algorithm": RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
+        "state_tensors": 2,
+        "state_values": 13,
+    }
+    assert require_model_state_hashes(
+        state,
+        expected_canonical_sha256=canonical,
+        expected_runtime_sha256=runtime,
+        label="test state",
+    ) == receipt
+    # Regression for the original failure: comparing the runtime algorithm's
+    # output to the canonical lineage value must fail explicitly.
+    with pytest.raises(AdjacentConsistencyError, match="runtime tensor-state"):
+        require_model_state_hashes(
+            state,
+            expected_canonical_sha256=canonical,
+            expected_runtime_sha256=canonical,
+            label="cross-algorithm comparison",
+        )

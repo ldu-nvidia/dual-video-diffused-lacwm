@@ -184,6 +184,8 @@ def test_training_wrapper_binds_exact_registered_hydra_semantics() -> None:
         'export ACD_P0_ARM_CONFIG_SEMANTIC_SHA256="$ARM_CONFIG_SEMANTIC_SHA256"'
         in wrapper
     )
+    assert "ACD_P0_PARENT_CANONICAL_MODEL_STATE_SHA256" in wrapper
+    assert "ACD_P0_PARENT_RUNTIME_TENSOR_STATE_SHA256" in wrapper
     assert "arm_config_semantic_sha256" in (
         SLURM / "adjacent_consistency_workflow.py"
     ).read_text(encoding="utf-8")

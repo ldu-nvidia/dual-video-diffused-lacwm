@@ -12,7 +12,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 from torch import Tensor, nn
@@ -20,6 +20,10 @@ from torch import Tensor, nn
 
 class AdjacentConsistencyError(RuntimeError):
     """A frozen clock, boundary, mask, or EMA contract was violated."""
+
+
+CANONICAL_MODEL_STATE_HASH_ALGORITHM = "snapshot_model_state_receipt_v1"
+RUNTIME_TENSOR_STATE_HASH_ALGORITHM = "tensor_state_sha256_v1"
 
 
 @dataclass(frozen=True)
@@ -72,12 +76,58 @@ def tensor_sha256(value: Tensor) -> str:
     return hashlib.sha256(header + raw).hexdigest()
 
 
-def tensor_state_sha256(state: dict[str, Tensor]) -> str:
+def _validated_named_tensor_state(
+    state: Mapping[str, Tensor], *, label: str
+) -> list[tuple[str, Tensor]]:
+    if not isinstance(state, Mapping) or not state:
+        raise AdjacentConsistencyError(f"{label} must be a nonempty tensor mapping")
+    result: list[tuple[str, Tensor]] = []
+    for name in sorted(state):
+        value = state[name]
+        if not isinstance(name, str) or not name or not isinstance(value, Tensor):
+            raise AdjacentConsistencyError(
+                f"{label} must contain only named tensors"
+            )
+        result.append((name, value.detach().contiguous().cpu()))
+    return result
+
+
+def canonical_model_state_sha256(state: Mapping[str, Tensor]) -> str:
+    """Reproduce ``snapshot_model_state_receipt_v1`` exactly.
+
+    This is the historical checkpoint-lineage hash.  It intentionally remains
+    distinct from :func:`tensor_state_sha256`, the in-process runtime hash.
+    """
+
+    digest = hashlib.sha256()
+    for name, value in _validated_named_tensor_state(
+        state, label="canonical model state"
+    ):
+        item = {
+            "name": name,
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+        }
+        digest.update(
+            json.dumps(
+                item,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+        digest.update(b"\0")
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def tensor_state_sha256(state: Mapping[str, Tensor]) -> str:
     """Hash a complete named tensor state, including names/dtypes/shapes."""
 
     digest = hashlib.sha256()
-    for name in sorted(state):
-        value = state[name].detach().contiguous().cpu()
+    for name, value in _validated_named_tensor_state(
+        state, label="runtime tensor state"
+    ):
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(value.dtype).encode("ascii"))
@@ -90,6 +140,40 @@ def tensor_state_sha256(state: dict[str, Tensor]) -> str:
     return digest.hexdigest()
 
 
+def model_state_hash_receipt(state: Mapping[str, Tensor]) -> dict[str, int | str]:
+    """Seal both non-interchangeable hashes for one exact tensor state."""
+
+    items = _validated_named_tensor_state(state, label="model state")
+    normalized = {name: value for name, value in items}
+    return {
+        "canonical_model_state_sha256": canonical_model_state_sha256(normalized),
+        "canonical_hash_algorithm": CANONICAL_MODEL_STATE_HASH_ALGORITHM,
+        "runtime_tensor_state_sha256": tensor_state_sha256(normalized),
+        "runtime_hash_algorithm": RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
+        "state_tensors": len(items),
+        "state_values": sum(int(value.numel()) for _name, value in items),
+    }
+
+
+def require_model_state_hashes(
+    state: Mapping[str, Tensor],
+    *,
+    expected_canonical_sha256: str,
+    expected_runtime_sha256: str,
+    label: str,
+) -> dict[str, int | str]:
+    """Fail closed unless each state hash matches its own named algorithm."""
+
+    receipt = model_state_hash_receipt(state)
+    if receipt["canonical_model_state_sha256"] != expected_canonical_sha256:
+        raise AdjacentConsistencyError(
+            f"{label} canonical checkpoint-lineage hash differs"
+        )
+    if receipt["runtime_tensor_state_sha256"] != expected_runtime_sha256:
+        raise AdjacentConsistencyError(f"{label} runtime tensor-state hash differs")
+    return receipt
+
+
 def module_state_receipt(module: nn.Module) -> dict[str, int | str]:
     """Return a full-value hash and exact parameter/buffer capacity counts."""
 
@@ -98,6 +182,7 @@ def module_state_receipt(module: nn.Module) -> dict[str, int | str]:
     state = module.state_dict()
     return {
         "sha256": tensor_state_sha256(state),
+        "hash_algorithm": RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
         "state_tensors": len(state),
         "state_values": sum(int(value.numel()) for value in state.values()),
         "parameter_tensors": len(parameters),
