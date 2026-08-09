@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import hashlib
 import json
 import math
@@ -343,6 +344,11 @@ CACHE_REGISTRATION_KIND = "raw_physics_flow_cache_registration"
 CACHE_METADATA_KIND = "raw_physics_flow_cache_metadata"
 CACHE_AUDIT_KIND = "raw_physics_flow_cache_audit"
 STUDY_REGISTRATION_KIND = "raw_physics_flow_stage1_registration"
+V8_EVALUATION_REGISTRATION_KIND = (
+    "raw_physics_flow_stage1_frozen_v7_evaluation_registration"
+)
+V8_INPUT_REPLAY_KIND = "raw_physics_flow_v8_causal_input_replay_gate"
+V8_INPUT_REPLAY_FILENAME = "v7_v5_causal_input_replay_gate.json"
 STUDY_ANALYSIS_KIND = "raw_physics_flow_stage1_analysis"
 STUDY_AUDIT_KIND = "raw_physics_flow_stage1_audit"
 V5_NUMERIC_REFERENCE_KIND = "raw_physics_flow_v5_numeric_reference"
@@ -357,6 +363,101 @@ V5_STUDY_ROOT = (
     "lacwm_train/artifacts/dual_video_diffusion/raw_physics_flow_stage1/"
     "raw-physics-flow-stage1-20260808-e632344-v5"
 )
+V7_SOURCE_COMMIT = "19717d33a70c344629deff968c2b2309f7083005"
+V7_CACHE_ROOT = (
+    "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/"
+    "lacwm_train/artifacts/dual_video_diffusion/raw_physics_flow_cache/"
+    "raw-physics-flow-cache-20260808-19717d3-v7"
+)
+V7_STUDY_ROOT = (
+    "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/"
+    "lacwm_train/artifacts/dual_video_diffusion/raw_physics_flow_stage1/"
+    "raw-physics-flow-stage1-20260808-19717d3-v7"
+)
+V7_LOG_ROOT = (
+    "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/"
+    "lacwm_train/logs/dual_video_diffusion/"
+    "raw-physics-flow-stage1-20260808-19717d3-v7"
+)
+V7_STUDY_REGISTRATION = {
+    "bytes": 69_183,
+    "sha256": "82c6b16c59454835be90889451bfd6c365c6e93499c5861d206dc2791a37e786",
+    "identity_sha256": (
+        "97ae6f05b3917a78f42f3e861a12bdfbf68f49d0b154d458afe8d218688a71ca"
+    ),
+}
+V7_CACHE_REGISTRATION = {
+    "bytes": 3_141_058,
+    "sha256": "a1af8831819455207b5b9a47fe33b2da5a50cbd9d21c24b96646e553a4f8c0a8",
+}
+V7_EVALUATION_FAILURE_LOG = {
+    "bytes": 5_589,
+    "sha256": "9aea10af872bfa81389553da9a2d8045cf7cf0ff1ebbc849d8d9184220263d44",
+    "job_id": 507846,
+    "exit_code": "2:0",
+}
+V7_TRAINING_ARMS = {
+    "FLOW-OFF": {
+        "run_name": "physics-flow-off-strict-v7-seed1234-u000200",
+        "run_identity_sha256": (
+            "1fd246ba5a89bdfee59238cca958554a0477c0daa94755628fe2be4f23755ea8"
+        ),
+        "arm_plan": {
+            "bytes": 1_426,
+            "sha256": "2c3802b19d40a52345c25efb22c0a3679aacf03fb1761cad86fa941a44b7f998",
+        },
+        "trace": {
+            "bytes": 415_667,
+            "sha256": "b2940508ae3f902338c96763e6bf01db7cf6a2107eefb249a0aa47ab8c54210f",
+        },
+        "completion": {
+            "bytes": 214,
+            "sha256": "841823e8e3530b48c17ab0d187596860f158e248a040055f05a6335f6a647384",
+        },
+        "resolved_config": {
+            "bytes": 8_789,
+            "sha256": "78d76f16f8b99ebfd283082e545dc86c6ab8cc8675d19acd3587e6999a6e2f04",
+        },
+        "training_complete": {
+            "bytes": 509,
+            "sha256": "c001dba0625309339b6791dca1baf368fafb5b2a184bf7ddfe58ace8a9e5d94f",
+        },
+        "snapshot": {
+            "bytes": 4_248_290_554,
+            "sha256": "7e754497526da41a812ad89d7f76e5043a19b0dbf15bbe24686f35494498c21c",
+        },
+    },
+    "RAW-FLOW": {
+        "run_name": "physics-flow-raw-strict-v7-seed1234-u000200",
+        "run_identity_sha256": (
+            "92dc6ce6262bc93a116205098375d31460a41a6d2b11dcfca3c23dea37c956ae"
+        ),
+        "arm_plan": {
+            "bytes": 1_424,
+            "sha256": "5d734e9de2b625b638c84a96d7d040b9135d7c40e069c003a1e984a17b1044be",
+        },
+        "trace": {
+            "bytes": 415_641,
+            "sha256": "0c700884e9839281c1f682800191773f038069ba6c4c0cca80121080d5e58d2c",
+        },
+        "completion": {
+            "bytes": 214,
+            "sha256": "80abaad7960792504cd557843a43413f86e8a7ea8e061d4fa52825ebc69e8449",
+        },
+        "resolved_config": {
+            "bytes": 8_788,
+            "sha256": "1bca26cd0c515d573584a1c3c94b57ef1128e2d9c38990508a74f3a3f0563b41",
+        },
+        "training_complete": {
+            "bytes": 509,
+            "sha256": "2672e52135c96247a2d768c666b6bf7b2726921a31df84e282c56c50bdda3696",
+        },
+        "snapshot": {
+            "bytes": 4_248_290_554,
+            "sha256": "d37093b7877c8893a557cc806fd40e312377ec66de19f0b8435d659f43ab298f",
+        },
+    },
+}
 V5_CACHE_REGISTRATION = {
     "bytes": 767_589,
     "sha256": "6a91a46c9f8da312239441582b753f4748d677346235a6903229b6b388b31f46",
@@ -2391,6 +2492,194 @@ def _validated_v5_study_reference(
     )
 
 
+def _validated_v7_frozen_reference(
+    study_root: Path,
+    cache_root: Path,
+    *,
+    verify_snapshot_digests: bool,
+) -> dict[str, Any]:
+    """Bind the failed v7 training artifacts without changing its decision."""
+
+    study_root = study_root.expanduser()
+    cache_root = cache_root.expanduser()
+    if (
+        not study_root.is_absolute()
+        or not cache_root.is_absolute()
+        or not study_root.is_dir()
+        or not cache_root.is_dir()
+        or study_root.is_symlink()
+        or cache_root.is_symlink()
+    ):
+        raise PhysicsFlowStage1Error("v7 study/cache references must be regular directories")
+    study_root = study_root.resolve(strict=True)
+    cache_root = cache_root.resolve(strict=True)
+    if str(study_root) != V7_STUDY_ROOT or str(cache_root) != V7_CACHE_ROOT:
+        raise PhysicsFlowStage1Error("v7 frozen reference path is noncanonical")
+    registration_record = _pinned_reference_file(
+        study_root / "registration.json",
+        V7_STUDY_REGISTRATION,
+        "v7 study registration",
+    )
+    cache_registration_record = _pinned_reference_file(
+        cache_root / "cache_registration.json",
+        V7_CACHE_REGISTRATION,
+        "v7 cache registration",
+    )
+    registration = read_json(
+        Path(registration_record["path"]), "v7 study registration"
+    )
+    if (
+        not identity_valid(registration)
+        or registration.get("kind") != STUDY_REGISTRATION_KIND
+        or registration.get("identity_sha256")
+        != V7_STUDY_REGISTRATION["identity_sha256"]
+        or registration.get("source_repository", {}).get("git_commit")
+        != V7_SOURCE_COMMIT
+        or Path(str(registration.get("output_root", ""))).resolve(strict=True)
+        != study_root
+        or registration.get("generator_outcome_opened") is not False
+        or registration.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("v7 study registration differs")
+    source = registration["source_repository"]
+    if clean_repository(
+        Path(source["path"]), V7_SOURCE_COMMIT, "v7 frozen source"
+    ) != source:
+        raise PhysicsFlowStage1Error("v7 frozen source changed")
+
+    cache_registration = read_json(
+        Path(cache_registration_record["path"]), "v7 cache registration"
+    )
+    if (
+        not identity_valid(cache_registration)
+        or Path(str(cache_registration.get("output_root", ""))).resolve(strict=True)
+        != cache_root
+        or cache_registration.get("source_repository", {}).get("git_commit")
+        != V7_SOURCE_COMMIT
+        or cache_registration.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("v7 cache registration differs")
+
+    arms: dict[str, Any] = {}
+    for arm in ARMS:
+        expected = V7_TRAINING_ARMS[arm.code]
+        run_root = study_root / "training" / expected["run_name"]
+        artifact = {
+            "run_dir": str(run_root.resolve(strict=True)),
+            "run_name": expected["run_name"],
+            "run_identity_sha256": expected["run_identity_sha256"],
+            "arm_plan": _pinned_reference_file(
+                study_root / "arm_plans" / f"{arm.code.lower()}.json",
+                expected["arm_plan"],
+                f"v7 {arm.code} arm plan",
+            ),
+            "trace": _pinned_reference_file(
+                run_root / "physics_flow_training_trace.jsonl",
+                expected["trace"],
+                f"v7 {arm.code} trace",
+            ),
+            "completion": _pinned_reference_file(
+                run_root / "physics_flow_training_trace_complete.json",
+                expected["completion"],
+                f"v7 {arm.code} completion",
+            ),
+            "resolved_config": _pinned_reference_file(
+                run_root / ".hydra" / "config.yaml",
+                expected["resolved_config"],
+                f"v7 {arm.code} resolved config",
+            ),
+            "training_complete": _pinned_reference_file(
+                run_root / "training_complete.json",
+                expected["training_complete"],
+                f"v7 {arm.code} training completion",
+            ),
+            "snapshot": _pinned_reference_file(
+                run_root / "snapshot.pt",
+                expected["snapshot"],
+                f"v7 {arm.code} snapshot",
+                verify_digest=verify_snapshot_digests,
+            ),
+        }
+        if (
+            registration.get("arm_run_identity_sha256", {}).get(arm.code)
+            != expected["run_identity_sha256"]
+        ):
+            raise PhysicsFlowStage1Error(f"v7 {arm.code} run identity differs")
+        arms[arm.code] = artifact
+
+    cache_arrays = 0
+    for split in ("train", "val"):
+        receipt = registration.get("flow_caches", {}).get(split)
+        if not isinstance(receipt, Mapping):
+            raise PhysicsFlowStage1Error(f"v7 {split} cache receipt is absent")
+        for source_name in CACHE_SOURCES:
+            path = _absolute_file_record_matches(
+                receipt.get("arrays", {}).get(source_name),
+                f"v7 {split} {source_name} cache array",
+            )
+            if path.parent != cache_root / split:
+                raise PhysicsFlowStage1Error("v7 cache array path differs")
+            cache_arrays += 1
+        for key in ("metadata", "audit", "row_lineage"):
+            path = _absolute_file_record_matches(
+                receipt.get(key), f"v7 {split} cache {key}"
+            )
+            if path.parent != cache_root / split:
+                raise PhysicsFlowStage1Error("v7 cache artifact path differs")
+    if cache_arrays != 8:
+        raise PhysicsFlowStage1Error("v7 requires exactly eight cache arrays")
+
+    failure_log = _pinned_reference_file(
+        Path(V7_LOG_ROOT) / "eval-507846.out",
+        V7_EVALUATION_FAILURE_LOG,
+        "v7 evaluation failure log",
+    )
+    failure_text = Path(failure_log["path"]).read_text(encoding="utf-8")
+    if "deterministic metrics differ from v5 at 0" not in failure_text:
+        raise PhysicsFlowStage1Error("v7 terminal failure cause differs")
+    absent = (
+        study_root / "training_pairing.json",
+        study_root / PARENT_PARITY_FILENAME,
+        study_root / PARENT_HISTORICAL_REFERENCE_FILENAME,
+        study_root / "evaluation",
+        study_root / "analysis",
+    )
+    if any(path.exists() or path.is_symlink() for path in absent):
+        raise PhysicsFlowStage1Error("v7 must retain zero downstream outcome artifacts")
+    return identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "raw_physics_flow_v7_frozen_failure_reference",
+            "status": "STOP_EXACT_REPAIR_EQUIVALENCE",
+            "scientific_outcome_reference": False,
+            "source_commit": V7_SOURCE_COMMIT,
+            "study_root": str(study_root),
+            "cache_root": str(cache_root),
+            "study_registration": registration_record,
+            "study_registration_identity_sha256": registration["identity_sha256"],
+            "cache_registration": cache_registration_record,
+            "flow_caches": registration["flow_caches"],
+            "parent": registration["parent"],
+            "parent_performance_lineage": registration[
+                "parent_performance_lineage"
+            ],
+            "runtime": registration["runtime"],
+            "evaluation_contract": registration["evaluation_contract"],
+            "primary_gate": registration["primary_gate"],
+            "arms": arms,
+            "evaluation_failure_log": failure_log,
+            "evaluation_failure_job_id": 507846,
+            "evaluation_failure_exit_code": "2:0",
+            "training_pairing_absent": True,
+            "parent_sampler_parity_absent": True,
+            "evaluation_directory_absent": True,
+            "scoring_artifacts_absent": True,
+            "analysis_artifacts_absent": True,
+            "protected_test_accessed": False,
+        }
+    )
+
+
 def exclusive_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -4381,6 +4670,7 @@ def _study_source_files(repo: Path) -> dict[str, Any]:
         "docs/experiments/PHYSICS_FLOW_WAN_SCREEN_PROTOCOL.md",
         "docs/experiments/PHYSICS_FLOW_PARENT_LINEAGE.md",
         "docs/experiments/PHYSICS_FLOW_STAGE1_LAUNCH_RUNBOOK.md",
+        "docs/experiments/PHYSICS_FLOW_STAGE1_V7_INPUT_REPLAY_FAILURE.md",
         "docs/experiments/PHYSICS_FLOW_STAGE1_RUNTIME_REPAIR.md",
         "tools/physics_flow_stage1.py",
         "tools/physics_flow_cache_runtime.py",
@@ -4998,7 +5288,138 @@ def command_register_study(args: argparse.Namespace) -> int:
     return 0
 
 
-def validate_study_registration(path: Path) -> dict[str, Any]:
+def command_register_frozen_v7_evaluation(args: argparse.Namespace) -> int:
+    """Prospectively register evaluation of immutable failed-v7 checkpoints."""
+
+    output = args.output.expanduser().absolute()
+    if output.exists() or output.is_symlink() or not output.parent.is_dir():
+        raise PhysicsFlowStage1Error("fresh v8 evaluation registration root required")
+    source = clean_repository(
+        args.source_repo.expanduser().resolve(strict=True),
+        args.expected_commit,
+        "v8 evaluation source",
+    )
+    source_files = _study_source_files(Path(source["path"]))
+    v7_reference = _validated_v7_frozen_reference(
+        args.v7_study_root,
+        args.v7_cache_root,
+        verify_snapshot_digests=False,
+    )
+    v5_reference = _validated_v5_study_reference(
+        args.v5_reference_study_root,
+        verify_snapshot_digests=False,
+    )
+    validate_main_python_runtime_receipt(
+        v7_reference.get("runtime", {}).get("python_runtime")
+    )
+    lpips_log = v7_reference.get("runtime", {}).get("lpips_preflight_log")
+    if (
+        not isinstance(lpips_log, Mapping)
+        or file_record(Path(str(lpips_log.get("path", "")))) != lpips_log
+    ):
+        raise PhysicsFlowStage1Error("frozen v7 LPIPS runtime evidence changed")
+    replay_gate = _v7_v5_causal_input_replay(v7_reference, v5_reference)
+    if (
+        replay_gate.get("exact_causal_input_hash_comparisons") != 2_000
+        or replay_gate.get("exact_cache_array_comparisons") != 8
+    ):
+        raise PhysicsFlowStage1Error(
+            "v8 requires 2,000 causal hashes and eight exact cache arrays"
+        )
+
+    parent = copy.deepcopy(v7_reference["parent"])
+    parent["native_sampler_source"] = source_files[
+        PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE
+    ]
+    for relative in PARENT_TRANSITIVE_SOURCE_FILES:
+        parent["transitive_runtime_source_delta"]["current"][relative] = {
+            "file": source_files[relative],
+            "git_blob": PARENT_CURRENT_TRANSITIVE_BLOBS[relative],
+        }
+    evaluation_contract = copy.deepcopy(v7_reference["evaluation_contract"])
+    evaluation_contract["prospective_scope"] = (
+        "new v8 exploratory evaluation of immutable v7 checkpoints; endpoint "
+        "grid and gates frozen before any v8 generated-video outcome"
+    )
+    evaluation_contract["native_parent_parity"]["output"] = str(
+        output / PARENT_PARITY_FILENAME
+    )
+    evaluation_contract["native_parent_parity"]["historical_reference_output"] = str(
+        output / PARENT_HISTORICAL_REFERENCE_FILENAME
+    )
+    gate_path = output / V8_INPUT_REPLAY_FILENAME
+    gate_bytes = canonical_json(replay_gate) + b"\n"
+    gate_record = {
+        "path": str(gate_path),
+        "bytes": len(gate_bytes),
+        "sha256": hashlib.sha256(gate_bytes).hexdigest(),
+        "identity_sha256": replay_gate["identity_sha256"],
+    }
+    registration = identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": V8_EVALUATION_REGISTRATION_KIND,
+            "status": (
+                "registered_before_frozen_v7_exploratory_evaluation_outcomes"
+            ),
+            "authorization_schema": "raw-physics-flow-frozen-v7-evaluation-v8",
+            "created_at_utc": now(),
+            "output_root": str(output),
+            "source_repository": source,
+            "source_files": source_files,
+            "v7_frozen_reference": v7_reference,
+            "v5_input_lineage_reference": v5_reference,
+            "input_replay_gate": gate_record,
+            "flow_caches": v7_reference["flow_caches"],
+            "parent": parent,
+            "parent_performance_lineage": v7_reference[
+                "parent_performance_lineage"
+            ],
+            "runtime": v7_reference["runtime"],
+            "arms": [asdict(arm) for arm in ARMS],
+            "arm_run_identity_sha256": {
+                arm.code: V7_TRAINING_ARMS[arm.code]["run_identity_sha256"]
+                for arm in ARMS
+            },
+            "training_contract": {
+                "training_performed_in_v8": False,
+                "frozen_v7_checkpoints_only": True,
+                "v7_training_updates_per_arm": 200,
+                "v7_terminal_decision_preserved": (
+                    "STOP_EXACT_REPAIR_EQUIVALENCE"
+                ),
+                "exact_causal_input_replay_required": True,
+                "exact_input_hashes_required": 2_000,
+                "finite_output_drift_is_descriptive_not_a_pass_gate": True,
+                "frozen_and_buffer_tensor_bit_identity_required": True,
+                "model_state_numerical_drift_threshold": None,
+                "confirmatory_claim_requires_deterministic_multiseed_future_work": True,
+            },
+            "evaluation_contract": evaluation_contract,
+            "primary_gate": v7_reference["primary_gate"],
+            "claim_boundary": (
+                "single-seed exploratory evaluation of frozen v7 checkpoints; "
+                "not a retroactive v7 pass, deterministic replication, "
+                "multi-seed confirmation, FVD, DAgger, or paper-level claim"
+            ),
+            "v7_decision": "STOP_EXACT_REPAIR_EQUIVALENCE",
+            "v8_retraining_performed": False,
+            "v8_wandb_run_created": False,
+            "recurrent_or_hybrid_condition_included": False,
+            "future_rgb_opened": False,
+            "future_measured_state_opened": False,
+            "generator_outcome_opened": False,
+            "protected_test_accessed": False,
+        }
+    )
+    output.mkdir(mode=0o700)
+    exclusive_bytes(gate_path, gate_bytes)
+    exclusive_json(output / "registration.json", registration)
+    print(json.dumps(registration, sort_keys=True))
+    return 0
+
+
+def _validate_training_study_registration(path: Path) -> dict[str, Any]:
     registration = read_json(path, "study registration")
     parity_contract = registration.get("evaluation_contract", {}).get(
         "native_parent_parity", {}
@@ -5368,6 +5789,174 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
     return registration
 
 
+def _validate_v8_evaluation_registration(path: Path) -> dict[str, Any]:
+    registration = read_json(path, "v8 frozen-v7 evaluation registration")
+    if (
+        not identity_valid(registration)
+        or registration.get("schema_version") != SCHEMA_VERSION
+        or registration.get("kind") != V8_EVALUATION_REGISTRATION_KIND
+        or registration.get("status")
+        != "registered_before_frozen_v7_exploratory_evaluation_outcomes"
+        or registration.get("authorization_schema")
+        != "raw-physics-flow-frozen-v7-evaluation-v8"
+        or registration.get("v7_decision") != "STOP_EXACT_REPAIR_EQUIVALENCE"
+        or registration.get("v8_retraining_performed") is not False
+        or registration.get("v8_wandb_run_created") is not False
+        or registration.get("generator_outcome_opened") is not False
+        or registration.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("v8 evaluation registration differs")
+    output = Path(str(registration.get("output_root", ""))).resolve(strict=True)
+    if path.resolve(strict=True) != output / "registration.json":
+        raise PhysicsFlowStage1Error("v8 registration path is noncanonical")
+    source = registration.get("source_repository", {})
+    if clean_repository(
+        Path(str(source.get("path", ""))),
+        str(source.get("git_commit", "")),
+        "v8 evaluation source",
+    ) != source:
+        raise PhysicsFlowStage1Error("v8 evaluation source changed")
+    if _study_source_files(Path(source["path"])) != registration.get("source_files"):
+        raise PhysicsFlowStage1Error("v8 registered source files changed")
+
+    v7_reference = _validated_v7_frozen_reference(
+        Path(registration["v7_frozen_reference"]["study_root"]),
+        Path(registration["v7_frozen_reference"]["cache_root"]),
+        verify_snapshot_digests=False,
+    )
+    if v7_reference != registration["v7_frozen_reference"]:
+        raise PhysicsFlowStage1Error("v7 frozen reference changed")
+    v5_reference = _validated_v5_study_reference(
+        Path(registration["v5_input_lineage_reference"]["root"]),
+        verify_snapshot_digests=False,
+    )
+    if v5_reference != registration["v5_input_lineage_reference"]:
+        raise PhysicsFlowStage1Error("v5 input-lineage reference changed")
+    if registration.get("flow_caches") != v7_reference["flow_caches"]:
+        raise PhysicsFlowStage1Error("v8 frozen cache binding differs")
+    if registration.get("parent_performance_lineage") != v7_reference.get(
+        "parent_performance_lineage"
+    ):
+        raise PhysicsFlowStage1Error("v8 parent performance lineage differs")
+    if registration.get("runtime") != v7_reference.get("runtime"):
+        raise PhysicsFlowStage1Error("v8 runtime differs from frozen v7")
+    validate_main_python_runtime_receipt(
+        registration.get("runtime", {}).get("python_runtime")
+    )
+
+    parent = registration.get("parent", {})
+    if (
+        parent.get("snapshot") != v7_reference["parent"]["snapshot"]
+        or parent.get("resolved_config")
+        != v7_reference["parent"]["resolved_config"]
+        or parent.get("run_identity_sha256") != PARENT_RUN_IDENTITY_SHA256
+        or parent.get("canonical_model_state_sha256")
+        != PARENT_CANONICAL_MODEL_STATE_SHA256
+        or parent.get("model_schema_sha256") != PARENT_MODEL_SCHEMA_SHA256
+        or parent.get("native_sampler_source")
+        != registration["source_files"][PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE]
+    ):
+        raise PhysicsFlowStage1Error("v8 parent binding differs")
+    for relative in PARENT_TRANSITIVE_SOURCE_FILES:
+        expected = {
+            "file": registration["source_files"][relative],
+            "git_blob": PARENT_CURRENT_TRANSITIVE_BLOBS[relative],
+        }
+        if (
+            parent.get("transitive_runtime_source_delta", {})
+            .get("current", {})
+            .get(relative)
+            != expected
+        ):
+            raise PhysicsFlowStage1Error("v8 parent transitive source differs")
+    for value in (parent["snapshot"], parent["resolved_config"]):
+        _absolute_file_record_matches(value, "v8 parent artifact")
+
+    contract = registration.get("training_contract", {})
+    if (
+        contract.get("training_performed_in_v8") is not False
+        or contract.get("frozen_v7_checkpoints_only") is not True
+        or contract.get("v7_terminal_decision_preserved")
+        != "STOP_EXACT_REPAIR_EQUIVALENCE"
+        or contract.get("exact_input_hashes_required") != 2_000
+        or contract.get("model_state_numerical_drift_threshold") is not None
+        or contract.get(
+            "confirmatory_claim_requires_deterministic_multiseed_future_work"
+        )
+        is not True
+    ):
+        raise PhysicsFlowStage1Error("v8 evaluation-only training contract differs")
+    if registration.get("arm_run_identity_sha256") != {
+        arm.code: V7_TRAINING_ARMS[arm.code]["run_identity_sha256"] for arm in ARMS
+    }:
+        raise PhysicsFlowStage1Error("v8 frozen arm identities differ")
+    evaluation_contract = registration.get("evaluation_contract", {})
+    parity = evaluation_contract.get("native_parent_parity", {})
+    if (
+        evaluation_contract.get("endpoints")
+        != v7_reference["evaluation_contract"]["endpoints"]
+        or registration.get("primary_gate") != v7_reference["primary_gate"]
+        or Path(str(parity.get("output", ""))).absolute()
+        != output / PARENT_PARITY_FILENAME
+        or Path(str(parity.get("historical_reference_output", ""))).absolute()
+        != output / PARENT_HISTORICAL_REFERENCE_FILENAME
+    ):
+        raise PhysicsFlowStage1Error("v8 frozen endpoint/gate contract differs")
+    gate_record = registration.get("input_replay_gate")
+    gate_path = _absolute_file_record_matches(
+        gate_record, "v8 causal input replay gate"
+    )
+    if gate_path != output / V8_INPUT_REPLAY_FILENAME:
+        raise PhysicsFlowStage1Error("v8 causal input replay gate path differs")
+    gate = read_json(gate_path, "v8 causal input replay gate")
+    if (
+        not identity_valid(gate)
+        or gate.get("identity_sha256") != gate_record.get("identity_sha256")
+        or gate.get("kind") != V8_INPUT_REPLAY_KIND
+        or gate.get("status")
+        != "exact_causal_input_replay_and_frozen_state_guard_passed"
+        or gate.get("v7_terminal_decision_preserved")
+        != "STOP_EXACT_REPAIR_EQUIVALENCE"
+        or gate.get("exact_causal_input_hash_comparisons") != 2_000
+        or gate.get("exact_cache_array_comparisons") != 8
+        or gate.get("exact_input_probe_clock_index_order_comparisons") != 9_200
+        or gate.get("finite_output_diagnostic_value_checks") != 7_200
+        or gate.get("metric_inventory") != list(V5_TRAINING_METRIC_INVENTORY)
+        or gate.get("exact_input_metrics")
+        != list(V5_TRAINING_INPUT_REPLAY_METRICS)
+        or gate.get("finite_output_diagnostics")
+        != list(V5_TRAINING_OUTPUT_DIAGNOSTICS)
+        or gate.get(
+            "header_hyperparameter_envelope_inventory_and_auxiliary_rows_exact"
+        )
+        is not True
+        or gate.get("model_state_numerical_equality_required") is not False
+        or gate.get("model_state_drift_acceptance_threshold") is not None
+        or any(
+            gate.get("arms", {}).get(arm.code, {}).get(
+                "observed_trainable_mismatch_tensor_count"
+            )
+            != (495 if arm.code == "FLOW-OFF" else 500)
+            or gate.get("arms", {}).get(arm.code, {}).get(
+                "all_frozen_and_buffer_tensors_bit_exact"
+            )
+            is not True
+            for arm in ARMS
+        )
+        or gate.get("future_rgb_opened") is not False
+        or gate.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("v8 causal input replay gate differs")
+    return registration
+
+
+def validate_study_registration(path: Path) -> dict[str, Any]:
+    value = read_json(path, "study registration")
+    if value.get("kind") == V8_EVALUATION_REGISTRATION_KIND:
+        return _validate_v8_evaluation_registration(path)
+    return _validate_training_study_registration(path)
+
+
 def load_parent_sampler_parity(
     registration: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -5694,12 +6283,58 @@ V5_TRAINING_HEADER_EXCLUSIONS = (
     "val_flow_metadata_sha256",
 )
 V5_TRAINING_COMPLETION_EXCLUSIONS = ("trace_sha256",)
-V5_TRAINING_METRIC_EXCLUSIONS = (
+V5_TRAINING_OUTPUT_DIAGNOSTICS = (
+    "train_loss/loss",
+    "train_loss/flow_loss",
+    "train_loss/video_flow_loss",
+    "train_loss/physics_flow/effective_adapter_gate",
+    "system/gradient_norm_max",
     "samples_per_second",
     "system/optimizer_step_seconds_max",
     "system/gpu_memory_allocated_gib_max",
     "system/gpu_memory_reserved_gib_max",
 )
+V5_TRAINING_INPUT_REPLAY_METRICS = (
+    "iteration",
+    "learning_rate",
+    "system/effective_global_batch_size",
+    "system/world_size",
+    "total_observations",
+    "train_loss/paired_audit/action_probe",
+    "train_loss/paired_audit/clip_index_mean",
+    "train_loss/paired_audit/clip_index_square_mean",
+    "train_loss/paired_audit/exact_actions_sha256_all_ranks_sha256",
+    "train_loss/paired_audit/exact_clip_index_sha256_all_ranks_sha256",
+    "train_loss/paired_audit/exact_flow_sha256_all_ranks_sha256",
+    "train_loss/paired_audit/exact_timesteps_sha256_all_ranks_sha256",
+    "train_loss/paired_audit/exact_video_noise_sha256_all_ranks_sha256",
+    "train_loss/paired_audit/flow_probe",
+    "train_loss/paired_audit/timestep_mean",
+    "train_loss/paired_audit/timestep_square_mean",
+    "train_loss/paired_audit/video_noise_probe",
+    "train_loss/physics_flow/condition_nonzero_fraction",
+    "train_loss/physics_flow/condition_rms",
+    "train_loss/physics_flow/fixed_clean_clock",
+    "train_loss/physics_flow/flow_model_calls",
+    "train_loss/physics_flow/fuse_flow",
+    "train_loss/physics_flow/future_measured_state_conditioned",
+)
+V5_TRAINING_METRIC_INVENTORY = tuple(
+    sorted((*V5_TRAINING_INPUT_REPLAY_METRICS, *V5_TRAINING_OUTPUT_DIAGNOSTICS))
+)
+V5_EXACT_INPUT_HASH_METRICS = tuple(
+    f"train_loss/paired_audit/exact_{field}_all_ranks_sha256"
+    for field in (
+        "actions_sha256",
+        "clip_index_sha256",
+        "flow_sha256",
+        "timesteps_sha256",
+        "video_noise_sha256",
+    )
+)
+# Backward-compatible name for the sealed v7 failure path. New v8 receipts use
+# the honest output-diagnostic terminology above.
+V5_TRAINING_METRIC_EXCLUSIONS = V5_TRAINING_OUTPUT_DIAGNOSTICS
 V5_SNAPSHOT_METADATA_EXCLUSIONS = (
     "path",
     "file_sha256",
@@ -5972,9 +6607,366 @@ def _same_arm_v5_training_equivalence(
     )
 
 
+def _expected_v7_trainable_mismatch_names(arm_code: str) -> set[str]:
+    names = {
+        *(
+            f"action_encoder.net.{layer}.{field}"
+            for layer in (0, 2, 4)
+            for field in ("weight", "bias")
+        ),
+        *(
+            f"action_pool.{layer}.{field}"
+            for layer in (0, 2)
+            for field in ("weight", "bias")
+        ),
+        *(
+            f"forward_model.action_to_control.net.{layer}.{field}"
+            for layer in (0, 2)
+            for field in ("weight", "bias")
+        ),
+        "morphology_tokens.weight",
+    }
+    names.update(
+        f"forward_model.transformer.blocks.{block}.{attention}.{projection}."
+        f"lora_{side}.default.weight"
+        for block in range(30)
+        for attention in ("self_attn", "cross_attn")
+        for projection in ("q", "k", "v", "o")
+        for side in ("A", "B")
+    )
+    if arm_code == "RAW-FLOW":
+        names.update(
+            {
+                "forward_model.tf_token_adapter.projection.weight",
+                "forward_model.tf_token_adapter.projection.bias",
+                "forward_model.tf_token_adapter.norm.weight",
+                "forward_model.tf_token_adapter.norm.bias",
+                "forward_model.tf_token_adapter.gate",
+            }
+        )
+    if len(names) != (495 if arm_code == "FLOW-OFF" else 500):
+        raise PhysicsFlowStage1Error("internal v7 trainable family inventory differs")
+    return names
+
+
+def _v7_v5_causal_input_replay(
+    v7_reference: Mapping[str, Any],
+    v5_reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prove exact causal-input replay and describe, never gate, CUDA drift."""
+
+    from tools.snapshot_model_state_receipt import compare_model_state_drift
+
+    arm_receipts: dict[str, Any] = {}
+    artifacts: dict[str, Any] = {}
+    cache_array_receipts: dict[str, Any] = {}
+    cache_array_comparisons = 0
+    for split in ("train", "val"):
+        cache_array_receipts[split] = {}
+        for source_name in CACHE_SOURCES:
+            v7_array = v7_reference["flow_caches"][split]["arrays"][source_name]
+            v5_array = v5_reference["flow_caches"][split]["arrays"][source_name]
+            _absolute_file_record_matches(
+                v7_array, f"v7 {split} {source_name} cache array"
+            )
+            _absolute_file_record_matches(
+                v5_array, f"v5 {split} {source_name} cache array"
+            )
+            if (
+                v7_array.get("bytes") != v5_array.get("bytes")
+                or v7_array.get("sha256") != v5_array.get("sha256")
+                or v7_array.get("path") == v5_array.get("path")
+            ):
+                raise PhysicsFlowStage1Error(
+                    f"{split} {source_name} cache bytes do not exactly replay v5"
+                )
+            cache_array_receipts[split][source_name] = {
+                "bytes": v7_array["bytes"],
+                "sha256": v7_array["sha256"],
+                "v7_path": v7_array["path"],
+                "v5_path": v5_array["path"],
+                "bit_exact": True,
+            }
+            cache_array_comparisons += 1
+    if cache_array_comparisons != 8:
+        raise PhysicsFlowStage1Error("v8 requires eight exact cache-array replays")
+    input_metric_comparisons = 0
+    input_hash_comparisons = 0
+    output_finiteness_checks = 0
+    for arm in ARMS:
+        v7_header, v7_events, v7_completion = _v5_training_trace(
+            v7_reference, arm
+        )
+        v5_header, v5_events, v5_completion = _v5_training_trace(
+            v5_reference, arm
+        )
+        if (
+            set(v7_header) != set(v5_header)
+            or _without_fields(v7_header, V5_TRAINING_HEADER_EXCLUSIONS)
+            != _without_fields(v5_header, V5_TRAINING_HEADER_EXCLUSIONS)
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} exact header/hyperparameter replay differs"
+            )
+        if any(
+            v7_header.get(field) == v5_header.get(field)
+            for field in V5_TRAINING_HEADER_EXCLUSIONS
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} v7/v5 provenance separation differs"
+            )
+        if (
+            set(v7_completion) != set(v5_completion)
+            or _without_fields(
+                v7_completion, V5_TRAINING_COMPLETION_EXCLUSIONS
+            )
+            != _without_fields(v5_completion, V5_TRAINING_COMPLETION_EXCLUSIONS)
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} completion envelope differs"
+            )
+        v7_rows = read_jsonl(Path(v7_reference["arms"][arm.code]["trace"]["path"]))
+        v5_rows = read_jsonl(Path(v5_reference["arms"][arm.code]["trace"]["path"]))
+        v7_auxiliary = [
+            row for row in v7_rows[1:] if "train_loss/loss" not in row.get("metrics", {})
+        ]
+        v5_auxiliary = [
+            row for row in v5_rows[1:] if "train_loss/loss" not in row.get("metrics", {})
+        ]
+        if v7_auxiliary != v5_auxiliary or len(v7_auxiliary) != 2:
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} auxiliary trace rows differ from v5"
+            )
+
+        diagnostic_accumulator = {
+            name: {
+                "v5_min": math.inf,
+                "v5_max": -math.inf,
+                "v7_min": math.inf,
+                "v7_max": -math.inf,
+                "max_abs_drift": 0.0,
+                "updates_with_value_mismatch": 0,
+            }
+            for name in V5_TRAINING_OUTPUT_DIAGNOSTICS
+        }
+        for iteration in range(200):
+            observed = v7_events[iteration]
+            prior = v5_events[iteration]
+            if (
+                set(observed) != set(prior)
+                or _without_fields(observed, ("metrics",))
+                != _without_fields(prior, ("metrics",))
+            ):
+                raise PhysicsFlowStage1Error(
+                    f"{arm.code} event envelope/order differs at {iteration}"
+                )
+            metrics = observed["metrics"]
+            old_metrics = prior["metrics"]
+            if (
+                tuple(sorted(metrics)) != V5_TRAINING_METRIC_INVENTORY
+                or tuple(sorted(old_metrics)) != V5_TRAINING_METRIC_INVENTORY
+            ):
+                raise PhysicsFlowStage1Error(
+                    f"{arm.code} exact metric inventory differs at {iteration}"
+                )
+            for name in V5_TRAINING_INPUT_REPLAY_METRICS:
+                if metrics[name] != old_metrics[name]:
+                    raise PhysicsFlowStage1Error(
+                        f"{arm.code} causal input/probe/clock/index/order differs "
+                        f"at {iteration}: {name}"
+                    )
+                input_metric_comparisons += 1
+                if name in V5_EXACT_INPUT_HASH_METRICS:
+                    input_hash_comparisons += 1
+            for name in V5_TRAINING_OUTPUT_DIAGNOSTICS:
+                values = (old_metrics[name], metrics[name])
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    for value in values
+                ):
+                    raise PhysicsFlowStage1Error(
+                        f"{arm.code} non-finite output diagnostic at {iteration}: {name}"
+                    )
+                old_value, current_value = map(float, values)
+                summary = diagnostic_accumulator[name]
+                summary["v5_min"] = min(summary["v5_min"], old_value)
+                summary["v5_max"] = max(summary["v5_max"], old_value)
+                summary["v7_min"] = min(summary["v7_min"], current_value)
+                summary["v7_max"] = max(summary["v7_max"], current_value)
+                summary["max_abs_drift"] = max(
+                    summary["max_abs_drift"], abs(current_value - old_value)
+                )
+                summary["updates_with_value_mismatch"] += int(
+                    current_value != old_value
+                )
+                output_finiteness_checks += 2
+
+        old_snapshot_record = v5_reference["arms"][arm.code]["snapshot"]
+        v7_snapshot_record = v7_reference["arms"][arm.code]["snapshot"]
+        try:
+            state = compare_model_state_drift(
+                Path(old_snapshot_record["path"]),
+                Path(v7_snapshot_record["path"]),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} finite model-state diagnostic failed"
+            ) from exc
+        if (
+            state["reference_snapshot"]["file_sha256"]
+            != old_snapshot_record["sha256"]
+            or state["reference_snapshot"]["file_bytes"]
+            != old_snapshot_record["bytes"]
+            or state["current_snapshot"]["file_sha256"]
+            != v7_snapshot_record["sha256"]
+            or state["current_snapshot"]["file_bytes"]
+            != v7_snapshot_record["bytes"]
+            or state["model_tensor_count"] != 1_686
+            or state["model_schema_identical"] is not True
+            or state["all_reference_tensors_finite"] is not True
+            or state["all_current_tensors_finite"] is not True
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} snapshot file/schema/finiteness differs"
+            )
+        expected_mismatches = _expected_v7_trainable_mismatch_names(arm.code)
+        observed_mismatches = {
+            value["name"] for value in state["mismatched_tensors"]
+        }
+        if observed_mismatches != expected_mismatches:
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} frozen/trainable mismatch family differs"
+            )
+        trainable_reference_l2 = math.sqrt(
+            sum(
+                float(value["reference_l2"]) ** 2
+                for value in state["mismatched_tensors"]
+            )
+        )
+        trainable_drift_l2 = math.sqrt(
+            sum(
+                float(value["l2_drift"]) ** 2
+                for value in state["mismatched_tensors"]
+            )
+        )
+        trainable_max_abs_drift = max(
+            float(value["max_abs_drift"])
+            for value in state["mismatched_tensors"]
+        )
+        reference_metadata = state["reference_snapshot"]["snapshot_metadata"]
+        current_metadata = state["current_snapshot"]["snapshot_metadata"]
+        if (
+            _without_fields(reference_metadata, ("run_identity_sha256",))
+            != _without_fields(current_metadata, ("run_identity_sha256",))
+            or reference_metadata.get("run_identity_sha256")
+            == current_metadata.get("run_identity_sha256")
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} snapshot metadata lineage differs"
+            )
+        artifact = {
+            key: v7_reference["arms"][arm.code][key]
+            for key in ("run_dir", "trace", "completion", "snapshot", "resolved_config")
+        }
+        artifact["protected_test_accessed"] = False
+        artifacts[arm.code] = artifact
+        arm_receipts[arm.code] = {
+            "updates_with_exact_causal_input_replay": 200,
+            "auxiliary_trace_rows_compared_exactly": 2,
+            "event_envelopes_and_metric_inventory_exact": True,
+            "exact_input_metrics_per_update": len(
+                V5_TRAINING_INPUT_REPLAY_METRICS
+            ),
+            "finite_output_diagnostics_per_update": len(
+                V5_TRAINING_OUTPUT_DIAGNOSTICS
+            ),
+            "output_diagnostics": diagnostic_accumulator,
+            "model_state": state,
+            "expected_trainable_mismatch_tensor_count": len(
+                expected_mismatches
+            ),
+            "observed_trainable_mismatch_tensor_count": len(
+                observed_mismatches
+            ),
+            "frozen_and_buffer_tensor_count": 1_686 - len(expected_mismatches),
+            "all_frozen_and_buffer_tensors_bit_exact": True,
+            "finite_trainable_drift_recorded_without_threshold": True,
+            "trainable_state_drift": {
+                "reference_l2": trainable_reference_l2,
+                "drift_l2": trainable_drift_l2,
+                "relative_l2_vs_reference": (
+                    trainable_drift_l2 / trainable_reference_l2
+                ),
+                "max_abs_drift": trainable_max_abs_drift,
+                "numerical_pass_threshold": None,
+            },
+        }
+
+    terminal_seam = {
+        arm.code: {
+            name: _v5_training_trace(v7_reference, arm)[1][199]["metrics"].get(
+                f"train_loss/{name}"
+            )
+            for name in (
+                "physics_flow/condition_rms",
+                "physics_flow/condition_nonzero_fraction",
+                "physics_flow/effective_adapter_gate",
+            )
+        }
+        for arm in ARMS
+    }
+    return identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": V8_INPUT_REPLAY_KIND,
+            "status": "exact_causal_input_replay_and_frozen_state_guard_passed",
+            "v7_reference_identity_sha256": v7_reference["identity_sha256"],
+            "v5_reference_identity_sha256": v5_reference["identity_sha256"],
+            "v7_terminal_decision_preserved": "STOP_EXACT_REPAIR_EQUIVALENCE",
+            "v8_scope": "prospective_evaluation_only_exploratory",
+            "paired_updates": 200,
+            "same_arm_updates_with_exact_causal_input_replay": 400,
+            "exact_causal_input_hash_comparisons": input_hash_comparisons,
+            "exact_cache_array_comparisons": cache_array_comparisons,
+            "cache_arrays": cache_array_receipts,
+            "exact_input_probe_clock_index_order_comparisons": (
+                input_metric_comparisons
+            ),
+            "finite_output_diagnostic_value_checks": output_finiteness_checks,
+            "metric_inventory": list(V5_TRAINING_METRIC_INVENTORY),
+            "exact_input_metrics": list(V5_TRAINING_INPUT_REPLAY_METRICS),
+            "finite_output_diagnostics": list(V5_TRAINING_OUTPUT_DIAGNOSTICS),
+            "header_hyperparameter_envelope_inventory_and_auxiliary_rows_exact": True,
+            "model_state_numerical_equality_required": False,
+            "model_state_drift_acceptance_threshold": None,
+            "scientific_outcome_reference": False,
+            "v5_endpoint_rows_opened": 0,
+            "v7_endpoint_rows_opened": 0,
+            "endpoint_artifacts_opened": 0,
+            "arms": arm_receipts,
+            "artifacts": artifacts,
+            "terminal_nonselectable_seam_diagnostics": terminal_seam,
+            "future_rgb_opened": False,
+            "future_measured_state_opened": False,
+            "protected_test_accessed": False,
+        }
+    )
+
+
 def compare_training_traces(
     registration: Mapping[str, Any], *, write: bool
 ) -> dict[str, Any]:
+    if registration.get("kind") == V8_EVALUATION_REGISTRATION_KIND:
+        if write:
+            raise PhysicsFlowStage1Error(
+                "v8 input replay gate is registration-owned and read-only"
+            )
+        return _v7_v5_causal_input_replay(
+            registration["v7_frozen_reference"],
+            registration["v5_input_lineage_reference"],
+        )
     off_header, off_events, off_artifacts = _training_trace(
         registration, ARM_BY_CODE["FLOW-OFF"]
     )
@@ -6199,6 +7191,76 @@ def load_training_pairing(
     return pairing, file_record(path)
 
 
+def load_input_replay_gate(
+    registration: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load the honest v8 causal-input gate (or legacy training pairing)."""
+
+    if registration.get("kind") != V8_EVALUATION_REGISTRATION_KIND:
+        return load_training_pairing(registration)
+    record = registration.get("input_replay_gate")
+    path = _absolute_file_record_matches(record, "v8 causal input replay gate")
+    if path != Path(registration["output_root"]) / V8_INPUT_REPLAY_FILENAME:
+        raise PhysicsFlowStage1Error("v8 causal input replay path differs")
+    gate = read_json(path, "v8 causal input replay gate")
+    if (
+        not identity_valid(gate)
+        or gate.get("kind") != V8_INPUT_REPLAY_KIND
+        or gate.get("status")
+        != "exact_causal_input_replay_and_frozen_state_guard_passed"
+        or gate.get("identity_sha256") != record.get("identity_sha256")
+        or gate.get("exact_causal_input_hash_comparisons") != 2_000
+        or gate.get("exact_cache_array_comparisons") != 8
+        or gate.get("exact_input_probe_clock_index_order_comparisons") != 9_200
+        or gate.get("finite_output_diagnostic_value_checks") != 7_200
+        or gate.get("metric_inventory") != list(V5_TRAINING_METRIC_INVENTORY)
+        or gate.get("exact_input_metrics")
+        != list(V5_TRAINING_INPUT_REPLAY_METRICS)
+        or gate.get("finite_output_diagnostics")
+        != list(V5_TRAINING_OUTPUT_DIAGNOSTICS)
+        or gate.get("same_arm_updates_with_exact_causal_input_replay") != 400
+        or gate.get("paired_updates") != 200
+        or gate.get("model_state_numerical_equality_required") is not False
+        or gate.get("model_state_drift_acceptance_threshold") is not None
+        or gate.get("v7_terminal_decision_preserved")
+        != "STOP_EXACT_REPAIR_EQUIVALENCE"
+        or gate.get("future_rgb_opened") is not False
+        or gate.get("future_measured_state_opened") is not False
+        or gate.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("v8 causal input replay gate differs")
+    for arm in ARMS:
+        artifact = gate.get("artifacts", {}).get(arm.code)
+        expected = registration["v7_frozen_reference"]["arms"][arm.code]
+        if not isinstance(artifact, Mapping) or artifact.get("run_dir") != expected.get(
+            "run_dir"
+        ):
+            raise PhysicsFlowStage1Error(f"v8 {arm.code} frozen run path differs")
+        for key in ("trace", "completion", "resolved_config"):
+            _absolute_file_record_matches(
+                artifact.get(key), f"v8 {arm.code} frozen {key}"
+            )
+            if artifact.get(key) != expected.get(key):
+                raise PhysicsFlowStage1Error(
+                    f"v8 {arm.code} frozen {key} record differs"
+                )
+        snapshot = artifact.get("snapshot")
+        snapshot_path = Path(str(snapshot.get("path", ""))) if isinstance(
+            snapshot, Mapping
+        ) else Path()
+        if (
+            snapshot != expected.get("snapshot")
+            or not snapshot_path.is_file()
+            or snapshot_path.is_symlink()
+            or snapshot_path.stat().st_size != snapshot.get("bytes")
+            or SHA256_RE.fullmatch(str(snapshot.get("sha256", ""))) is None
+        ):
+            raise PhysicsFlowStage1Error(
+                f"v8 {arm.code} frozen snapshot record differs"
+            )
+    return gate, file_record(path)
+
+
 def command_compare_traces(args: argparse.Namespace) -> int:
     registration = validate_study_registration(args.registration)
     receipt = compare_training_traces(registration, write=not args.read_only)
@@ -6244,6 +7306,10 @@ def validate_evaluation_causal_flags(
 def load_evaluation_rows(
     registration: Mapping[str, Any]
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    input_gate, _input_gate_record = load_input_replay_gate(registration)
+    require_v8_gate_link = (
+        registration.get("kind") == V8_EVALUATION_REGISTRATION_KIND
+    )
     parent_parity, parent_parity_record = load_parent_sampler_parity(registration)
     root = Path(registration["output_root"]) / "evaluation"
     inventory_path = root / "inventory.json"
@@ -6257,6 +7323,11 @@ def load_evaluation_rows(
         or inventory.get("status") != "complete"
         or inventory.get("registration_identity_sha256")
         != registration["identity_sha256"]
+        or (
+            require_v8_gate_link
+            and inventory.get("input_replay_gate_identity_sha256")
+            != input_gate["identity_sha256"]
+        )
         or inventory.get("d405_clips") != d405_count
         or inventory.get("noise_seed_ids") != list(NOISE_SEEDS)
         or inventory.get("endpoints") != [asdict(endpoint) for endpoint in ENDPOINTS]
@@ -6327,6 +7398,11 @@ def load_evaluation_rows(
             or receipt.get("rank") != rank
             or receipt.get("registration_identity_sha256")
             != registration["identity_sha256"]
+            or (
+                require_v8_gate_link
+                and receipt.get("input_replay_gate_identity_sha256")
+                != input_gate["identity_sha256"]
+            )
             or receipt.get("rows_file") != record
             or receipt.get("world_size") != 8
             or receipt.get("noise_seed_ids") != list(NOISE_SEEDS)
@@ -6406,6 +7482,11 @@ def load_evaluation_rows(
             or row.get("kind") != EVALUATION_KIND
             or row.get("registration_identity_sha256")
             != registration["identity_sha256"]
+            or (
+                require_v8_gate_link
+                and row.get("input_replay_gate_identity_sha256")
+                != input_gate["identity_sha256"]
+            )
             or endpoint is None
             or endpoint_value != asdict(endpoint)
             or not latency_valid
@@ -6599,7 +7680,7 @@ def _endpoint_rows(
 def analyze_study(
     registration: Mapping[str, Any], *, write: bool
 ) -> dict[str, Any]:
-    pairing, _pairing_record = load_training_pairing(registration)
+    input_gate, _input_gate_record = load_input_replay_gate(registration)
     rows, inventory = load_evaluation_rows(registration)
     parent_parity, _parent_parity_record = load_parent_sampler_parity(
         registration
@@ -6727,7 +7808,23 @@ def analyze_study(
             and parent_parity["historical_vs_current_all_bitwise"] is True
             and parent_parity["validation_dataset_opened"] is False
         ),
-        "paired_200_update_trace": pairing["paired_updates"] == 200,
+        "exact_v7_v5_causal_input_replay": (
+            input_gate.get("exact_causal_input_hash_comparisons") == 2_000
+            and input_gate.get("exact_cache_array_comparisons") == 8
+            and input_gate.get(
+                "exact_input_probe_clock_index_order_comparisons"
+            )
+            == 9_200
+            and input_gate.get("finite_output_diagnostic_value_checks") == 7_200
+            and input_gate.get("paired_updates") == 200
+            and all(
+                input_gate.get("arms", {})
+                .get(arm.code, {})
+                .get("all_frozen_and_buffer_tensors_bit_exact")
+                is True
+                for arm in ARMS
+            )
+        ),
         "all_primary_rows_one_Wan_call": all(
             row["actual_transformer_call_count"] == 1
             for row in rows
@@ -6778,7 +7875,7 @@ def analyze_study(
         "cannot_rescue_primary_gate": True,
         "measured_geometry_oracle_included": False,
         "measured_geometry_oracle_deferred_to_separate_preregistration": True,
-        "training_terminal": pairing[
+        "frozen_v7_training_terminal": input_gate[
             "terminal_nonselectable_seam_diagnostics"
         ],
         "raw_checkpoint_nfe1_condition_rms_by_source": {
@@ -6830,7 +7927,7 @@ def analyze_study(
             "kind": STUDY_ANALYSIS_KIND,
             "analyzed_at_utc": now(),
             "registration_identity_sha256": registration["identity_sha256"],
-            "training_pairing_identity_sha256": pairing["identity_sha256"],
+            "input_replay_gate_identity_sha256": input_gate["identity_sha256"],
             "evaluation_inventory_identity_sha256": inventory["identity_sha256"],
             "decision": decision,
             "primary_nfe": PRIMARY_NFE,
@@ -6856,6 +7953,9 @@ def analyze_study(
             },
             "seam_diagnostics": seam_diagnostics,
             "claim_boundary": registration["claim_boundary"],
+            "evaluation_scope": "single_seed_frozen_v7_exploratory_only",
+            "v7_terminal_decision_preserved": "STOP_EXACT_REPAIR_EQUIVALENCE",
+            "confirmatory_claim_deferred_to_deterministic_multiseed_work": True,
             "recurrent_or_hybrid_condition_included": False,
             "future_measured_state_opened_by_cache_or_sampler": False,
             "protected_test_accessed": False,
@@ -6877,11 +7977,13 @@ def command_analyze(args: argparse.Namespace) -> int:
 
 def command_audit_study(args: argparse.Namespace) -> int:
     registration = validate_study_registration(args.registration)
-    pairing = compare_training_traces(registration, write=False)
-    stored_pairing, stored_pairing_record = load_training_pairing(registration)
-    if pairing != stored_pairing:
+    input_gate = compare_training_traces(registration, write=False)
+    stored_input_gate, stored_input_gate_record = load_input_replay_gate(
+        registration
+    )
+    if input_gate != stored_input_gate:
         raise PhysicsFlowStage1Error(
-            "training repair-equivalence replay differs from prospective gate"
+            "causal-input replay differs from prospective gate"
         )
     parent_parity, parent_parity_record = load_parent_sampler_parity(
         registration
@@ -6921,7 +8023,7 @@ def command_audit_study(args: argparse.Namespace) -> int:
         )
         artifact_hashes += 1
     false_flags = require_false_flags(registration, "registration")
-    false_flags += require_false_flags(pairing, "pairing")
+    false_flags += require_false_flags(input_gate, "input replay gate")
     false_flags += require_false_flags(parent_parity, "parent parity")
     false_flags += require_false_flags(inventory, "inventory")
     false_flags += require_false_flags(rows, "rows")
@@ -6933,8 +8035,8 @@ def command_audit_study(args: argparse.Namespace) -> int:
             "status": "audit_passed",
             "audited_at_utc": now(),
             "registration_identity_sha256": registration["identity_sha256"],
-            "training_pairing_identity_sha256": pairing["identity_sha256"],
-            "training_pairing": stored_pairing_record,
+            "input_replay_gate_identity_sha256": input_gate["identity_sha256"],
+            "input_replay_gate": stored_input_gate_record,
             "native_parent_sampler_parity_identity_sha256": parent_parity[
                 "identity_sha256"
             ],
@@ -6945,12 +8047,23 @@ def command_audit_study(args: argparse.Namespace) -> int:
             "evaluation_inventory_identity_sha256": inventory["identity_sha256"],
             "analysis_identity_sha256": analysis["identity_sha256"],
             "decision": analysis["decision"],
-            "paired_training_updates_replayed": 200,
-            "same_arm_v5_training_updates_replayed": 400,
-            "same_arm_v5_model_tensor_hashes_replayed": pairing[
-                "v5_repair_equivalence"
-            ]["model_tensor_hashes_compared_exactly"],
-            "v5_endpoint_artifacts_opened_by_repair_replay": 0,
+            "evaluation_scope": "single_seed_frozen_v7_exploratory_only",
+            "confirmatory_claim_deferred_to_deterministic_multiseed_work": True,
+            "frozen_v7_training_updates_input_replayed": 400,
+            "exact_causal_input_hashes_replayed": input_gate.get(
+                "exact_causal_input_hash_comparisons", 0
+            ),
+            "model_tensors_schema_finiteness_and_drift_replayed": sum(
+                input_gate.get("arms", {})
+                .get(arm.code, {})
+                .get("model_state", {})
+                .get("model_tensor_count", 0)
+                for arm in ARMS
+            ),
+            "v5_v7_endpoint_artifacts_opened_by_input_replay": 0,
+            "v7_terminal_decision_preserved": (
+                "STOP_EXACT_REPAIR_EQUIVALENCE"
+            ),
             "evaluation_rows_replayed": len(rows),
             "episode_cluster_effects_recomputed": sum(
                 len(metrics) for metrics in analysis["effects"].values()
@@ -7044,6 +8157,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--v5-reference-study-root", type=Path, required=True
     )
     study.set_defaults(handler=command_register_study)
+
+    frozen = subparsers.add_parser("register-frozen-v7-evaluation")
+    frozen.add_argument("--output", type=Path, required=True)
+    frozen.add_argument("--source-repo", type=Path, required=True)
+    frozen.add_argument("--expected-commit", required=True)
+    frozen.add_argument("--v7-cache-root", type=Path, required=True)
+    frozen.add_argument("--v7-study-root", type=Path, required=True)
+    frozen.add_argument(
+        "--v5-reference-study-root", type=Path, required=True
+    )
+    frozen.set_defaults(handler=command_register_frozen_v7_evaluation)
 
     traces = subparsers.add_parser("compare-traces")
     traces.add_argument("--registration", type=Path, required=True)

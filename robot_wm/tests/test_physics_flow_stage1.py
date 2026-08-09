@@ -1563,6 +1563,312 @@ def test_same_arm_v5_training_equivalence_is_exact(
     )
 
 
+def _v8_input_replay_fixture(
+    tmp_path: Path,
+    *,
+    change_exact_input: bool = False,
+    nonfinite_output: bool = False,
+) -> tuple[dict, dict, dict[str, tuple[dict, str]]]:
+    cache_roots = {
+        "v5": tmp_path / "v5-cache",
+        "v7": tmp_path / "v7-cache",
+    }
+    flow_caches: dict[str, dict] = {"v5": {}, "v7": {}}
+    for version, root in cache_roots.items():
+        for split in ("train", "val"):
+            split_root = root / split
+            split_root.mkdir(parents=True)
+            arrays = {}
+            for source_name in stage.CACHE_SOURCES:
+                path = split_root / f"{source_name}.npy"
+                path.write_bytes(f"{split}:{source_name}:exact".encode())
+                arrays[source_name] = stage.file_record(path)
+            flow_caches[version][split] = {"arrays": arrays}
+
+    references = {
+        "v5": {
+            "identity_sha256": "5" * 64,
+            "study_registration": {
+                "path": str(tmp_path / "v5-registration.json"),
+                "bytes": 5,
+                "sha256": "6" * 64,
+            },
+            "study_registration_identity_sha256": "7" * 64,
+            "flow_caches": flow_caches["v5"],
+            "arms": {},
+        },
+        "v7": {
+            "identity_sha256": "8" * 64,
+            "study_registration": {
+                "path": str(tmp_path / "v7-registration.json"),
+                "bytes": 7,
+                "sha256": "9" * 64,
+            },
+            "study_registration_identity_sha256": "a" * 64,
+            "flow_caches": flow_caches["v7"],
+            "arms": {},
+        },
+    }
+    drift_states: dict[str, tuple[dict, str]] = {}
+    for arm_index, arm in enumerate(stage.ARMS):
+        common_header = {
+            "kind": "physics_flow_training_trace_header",
+            "arm": arm.code,
+            "fuse_flow": arm.fuse_flow,
+            "parent_snapshot_sha256": stage.PARENT_SNAPSHOT_SHA256,
+            "parent_run_identity_sha256": stage.PARENT_RUN_IDENTITY_SHA256,
+            "continuation_updates": 200,
+            "wan_calls_per_example": 1,
+            "flow_model_calls_per_example": 0,
+            "flow_clock": 0.0,
+            "flow_velocity_loss": 0.0,
+            "future_measured_state_conditioning": False,
+            "future_rgb_conditioning": False,
+            "optimizer_state_policy": "fresh_identical_adamw",
+            "parameter_schema_sha256": "b" * 64,
+            "initial_auxiliary_state_sha256": "c" * 64,
+            "protected_test_accessed": False,
+        }
+        headers = {
+            version: {
+                **common_header,
+                "study_registration": reference["study_registration"]["path"],
+                "study_registration_identity_sha256": reference[
+                    "study_registration_identity_sha256"
+                ],
+                "study_registration_sha256": reference["study_registration"][
+                    "sha256"
+                ],
+                "train_flow_metadata": f"/{version}/{arm.code}/train.json",
+                "train_flow_metadata_sha256": ("d" if version == "v5" else "e")
+                * 64,
+                "val_flow_metadata": f"/{version}/{arm.code}/val.json",
+                "val_flow_metadata_sha256": ("f" if version == "v5" else "0")
+                * 64,
+            }
+            for version, reference in references.items()
+        }
+        events: dict[str, list[dict]] = {"v5": [], "v7": []}
+        for iteration in range(200):
+            input_metrics: dict[str, object] = {}
+            for metric_index, name in enumerate(
+                stage.V5_TRAINING_INPUT_REPLAY_METRICS
+            ):
+                if name in stage.V5_EXACT_INPUT_HASH_METRICS:
+                    value: object = hashlib.sha256(
+                        f"{arm.code}:{iteration}:{name}".encode()
+                    ).hexdigest()
+                elif name == "iteration":
+                    value = iteration
+                elif name in (
+                    "system/effective_global_batch_size",
+                    "system/world_size",
+                    "train_loss/physics_flow/flow_model_calls",
+                ):
+                    value = 8 if "flow_model_calls" not in name else 0
+                elif name == "total_observations":
+                    value = (iteration + 1) * 8
+                elif name.endswith("/fuse_flow"):
+                    value = arm.fuse_flow
+                elif name.endswith("/future_measured_state_conditioned"):
+                    value = False
+                else:
+                    value = float(metric_index + iteration) / 100.0
+                input_metrics[name] = value
+            for version in ("v5", "v7"):
+                metrics = dict(input_metrics)
+                for metric_index, name in enumerate(
+                    stage.V5_TRAINING_OUTPUT_DIAGNOSTICS
+                ):
+                    value = float(iteration + metric_index + 1)
+                    if version == "v7":
+                        value += 0.125
+                    metrics[name] = value
+                if version == "v7" and change_exact_input and iteration == 37:
+                    metrics["train_loss/paired_audit/action_probe"] = -123.0
+                if version == "v7" and nonfinite_output and iteration == 41:
+                    metrics["train_loss/loss"] = float("nan")
+                events[version].append(
+                    {
+                        "kind": "physics_flow_training_trace_event",
+                        "arm": arm.code,
+                        "metrics": metrics,
+                        "total_observations": (iteration + 1) * 8,
+                    }
+                )
+        auxiliary = [
+            {
+                "kind": "physics_flow_training_trace_event",
+                "arm": arm.code,
+                "metrics": {"auxiliary": index},
+                "total_observations": 1_600,
+            }
+            for index in range(2)
+        ]
+        for version in ("v5", "v7"):
+            arm_root = tmp_path / version / arm.code.lower()
+            arm_root.mkdir(parents=True)
+            trace_path = arm_root / "trace.jsonl"
+            with trace_path.open("w", encoding="utf-8") as handle:
+                for row in [headers[version], *events[version], *auxiliary]:
+                    handle.write(
+                        json.dumps(row, sort_keys=True, allow_nan=True) + "\n"
+                    )
+            completion = {
+                "kind": "physics_flow_training_trace_complete",
+                "arm": arm.code,
+                "completed_updates": 200,
+                "rows": 203,
+                "trace_sha256": stage.sha256_file(trace_path),
+                "protected_test_accessed": False,
+            }
+            completion_path = arm_root / "complete.json"
+            completion_path.write_bytes(stage.canonical_json(completion) + b"\n")
+            snapshot_path = arm_root / "snapshot.pt"
+            snapshot_path.write_bytes(f"{version}:{arm.code}:snapshot".encode())
+            config_path = arm_root / "config.yaml"
+            config_path.write_text("frozen: true\n")
+            references[version]["arms"][arm.code] = {
+                "run_dir": str(arm_root),
+                "trace": stage.file_record(trace_path),
+                "completion": stage.file_record(completion_path),
+                "snapshot": stage.file_record(snapshot_path),
+                "resolved_config": stage.file_record(config_path),
+            }
+        expected_names = stage._expected_v7_trainable_mismatch_names(arm.code)
+        mismatches = [
+            {
+                "name": name,
+                "reference_l2": 1.0,
+                "l2_drift": 0.02,
+                "max_abs_drift": 0.001,
+            }
+            for name in sorted(expected_names)
+        ]
+        v5_snapshot = references["v5"]["arms"][arm.code]["snapshot"]
+        v7_snapshot = references["v7"]["arms"][arm.code]["snapshot"]
+        state = {
+            "reference_snapshot": {
+                "file_sha256": v5_snapshot["sha256"],
+                "file_bytes": v5_snapshot["bytes"],
+                "snapshot_metadata": {
+                    "snapshot_schema_version": 3,
+                    "run_identity_sha256": f"v5-{arm_index}",
+                    "_start_iter": 200,
+                    "world_size": 8,
+                    "gradient_accumulation_steps": 1,
+                },
+            },
+            "current_snapshot": {
+                "file_sha256": v7_snapshot["sha256"],
+                "file_bytes": v7_snapshot["bytes"],
+                "snapshot_metadata": {
+                    "snapshot_schema_version": 3,
+                    "run_identity_sha256": f"v7-{arm_index}",
+                    "_start_iter": 200,
+                    "world_size": 8,
+                    "gradient_accumulation_steps": 1,
+                },
+            },
+            "model_tensor_count": 1_686,
+            "model_schema_identical": True,
+            "all_reference_tensors_finite": True,
+            "all_current_tensors_finite": True,
+            "mismatched_tensors": mismatches,
+        }
+        drift_states[str(Path(v7_snapshot["path"]).resolve())] = (state, arm.code)
+    return references["v7"], references["v5"], drift_states
+
+
+def _install_v8_drift_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    drift_states: dict[str, tuple[dict, str]],
+    *,
+    schema_identical: bool = True,
+) -> None:
+    from tools import snapshot_model_state_receipt as receipt_module
+
+    def compare(_reference: Path, current: Path) -> dict:
+        state, _arm = drift_states[str(current.resolve())]
+        result = json.loads(json.dumps(state))
+        result["model_schema_identical"] = schema_identical
+        return result
+
+    monkeypatch.setattr(receipt_module, "compare_model_state_drift", compare)
+
+
+def test_v8_input_replay_accepts_finite_output_and_trainable_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    v7, v5, states = _v8_input_replay_fixture(tmp_path)
+    _install_v8_drift_stub(monkeypatch, states)
+    receipt = stage._v7_v5_causal_input_replay(v7, v5)
+    assert receipt["exact_cache_array_comparisons"] == 8
+    assert receipt["exact_causal_input_hash_comparisons"] == 2_000
+    assert receipt["exact_input_probe_clock_index_order_comparisons"] == 9_200
+    assert receipt["finite_output_diagnostic_value_checks"] == 7_200
+    assert receipt["model_state_numerical_equality_required"] is False
+    assert receipt["model_state_drift_acceptance_threshold"] is None
+    assert receipt["v7_terminal_decision_preserved"] == (
+        "STOP_EXACT_REPAIR_EQUIVALENCE"
+    )
+    assert receipt["arms"]["FLOW-OFF"][
+        "observed_trainable_mismatch_tensor_count"
+    ] == 495
+    assert receipt["arms"]["RAW-FLOW"][
+        "observed_trainable_mismatch_tensor_count"
+    ] == 500
+
+
+@pytest.mark.parametrize(
+    ("change_exact_input", "nonfinite_output", "schema_identical", "match"),
+    (
+        (True, False, True, "causal input/probe/clock/index/order differs"),
+        (False, True, True, "non-finite output diagnostic"),
+        (False, False, False, "snapshot file/schema/finiteness differs"),
+    ),
+)
+def test_v8_input_replay_rejects_invalid_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change_exact_input: bool,
+    nonfinite_output: bool,
+    schema_identical: bool,
+    match: str,
+) -> None:
+    v7, v5, states = _v8_input_replay_fixture(
+        tmp_path,
+        change_exact_input=change_exact_input,
+        nonfinite_output=nonfinite_output,
+    )
+    _install_v8_drift_stub(
+        monkeypatch, states, schema_identical=schema_identical
+    )
+    with pytest.raises(stage.PhysicsFlowStage1Error, match=match):
+        stage._v7_v5_causal_input_replay(v7, v5)
+
+
+def test_finite_model_state_drift_is_descriptive_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    reference = tmp_path / "reference.pt"
+    current = tmp_path / "current.pt"
+    torch.save({"model": {"weight": torch.tensor([1.0, 2.0])}}, reference)
+    torch.save({"model": {"weight": torch.tensor([1.0, 2.1])}}, current)
+    result = snapshot_receipt.compare_model_state_drift(reference, current)
+    assert result["model_schema_identical"] is True
+    assert result["mismatched_tensor_count"] == 1
+    assert result["global_drift"]["drift_l2"] > 0.0
+    assert result["global_drift"]["numerical_pass_threshold"] is None
+
+    torch.save({"model": {"weight": torch.ones(2, 1)}}, current)
+    with pytest.raises(ValueError, match="dtype/shape differs"):
+        snapshot_receipt.compare_model_state_drift(reference, current)
+    torch.save({"model": {"weight": torch.tensor([1.0, float("nan")])}}, current)
+    with pytest.raises(ValueError, match="non-finite current model tensor"):
+        snapshot_receipt.compare_model_state_drift(reference, current)
+
+
 def test_protocol_and_launcher_have_causal_guards() -> None:
     protocol = (
         ROOT / "docs/experiments/PHYSICS_FLOW_WAN_SCREEN_PROTOCOL.md"
@@ -1641,22 +1947,16 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "prepared only; do not execute" in launch_runbook
     assert "REPLACE_WITH_AUDITOR_ACKNOWLEDGED_40_CHARACTER_COMMIT" in launch_runbook
     assert 'BASH_PREFIX="/bin/bash -lc' in launch_runbook
-    assert "CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python" in launch_runbook
     assert "PYTHONNOUSERSITE=1" in launch_runbook
-    assert "--cache-python $CACHE_PYTHON_BIN" in launch_runbook
-    assert launch_runbook.count("-20260808-$SHORT-v7") == 3
-    assert "--v5-reference-cache-root $V5_CACHE_ROOT" in launch_runbook
+    assert "register-frozen-v7-evaluation" in launch_runbook
+    assert "--v7-cache-root $V7_CACHE_ROOT" in launch_runbook
+    assert "--v7-study-root $V7_STUDY_ROOT" in launch_runbook
     assert "--v5-reference-study-root $V5_STUDY_ROOT" in launch_runbook
-    assert "-20260808-$SHORT-v6" not in launch_runbook
-    assert "-20260808-$SHORT-v4" not in launch_runbook
-    assert "-20260808-$SHORT-v3" not in launch_runbook
-    assert "-20260808-$SHORT-v2" not in launch_runbook
-    assert "-20260808-$SHORT-v1" not in launch_runbook
-    assert launch_runbook.count(
-        "$CACHE_PYTHON_BIN tools/physics_flow_stage1.py build-cache"
-    ) == 2
-    assert "$CACHE_PYTHON_BIN tools/physics_flow_stage1.py audit-cache" not in launch_runbook
-    assert "p._collect_main_python_runtime" in launch_runbook
+    assert "-20260809-$SHORT-v8-exploratory" in launch_runbook
+    assert "register-cache" not in launch_runbook
+    assert "build-cache" not in launch_runbook
+    assert "--mode train" not in launch_runbook
+    assert "WANDB_MODE=disabled" in launch_runbook
     assert "args.python.expanduser().resolve" not in stage_source
     assert "python = lexical_absolute(python_entry)" in stage_source
     assert '"python_runtime": main_python_runtime' in stage_source
@@ -1665,12 +1965,10 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     )[0]
     assert "physics_flow_lpips.py" not in login_preflight
     register_wrapper = launch_runbook.split("REGISTER_JOB=", 1)[1].split(
-        "CACHE_TRAIN_JOB=", 1
+        "EVAL_JOB=", 1
     )[0]
-    assert register_wrapper.index("preflight-main-runtime") < register_wrapper.index(
-        "register-cache"
-    )
-    assert "--lpips-preflight-log $LPIPS_PREFLIGHT_LOG" in register_wrapper
+    assert "register-frozen-v7-evaluation" in register_wrapper
+    assert "physics_flow_stage1_workflow.py plan" in register_wrapper
     compute_preflight = stage_source.split(
         "def _main_runtime_preflight", 1
     )[1].split("def command_preflight_main_runtime", 1)[0]
@@ -1719,7 +2017,7 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert evaluator_config_gate < evaluator_source.index(
         "model = instantiate(config.model)"
     )
-    assert evaluator_source.index("stage.load_training_pairing(registration)") < (
+    assert evaluator_source.index("stage.load_input_replay_gate(registration)") < (
         evaluator_source.index("dataset = RegisteredCausalInputs(registration)")
     )
     assert "model.evaluation_noise_seed != EXPECTED_EVALUATION_NOISE_SEED" in (
@@ -1731,13 +2029,11 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert build_body.index("enforce_current_cache_renderer_runtime") < build_body.index(
         "split_root.mkdir(mode=0o700)"
     )
-    assert 'mkdir -p "$(dirname "$CACHE_ROOT")"' in launch_runbook
-    assert "p.validate_renderer_gate" in launch_runbook
-    assert launch_runbook.count("--gpus-per-node=1") == 4
+    assert 'mkdir -p "$(dirname "$STUDY_ROOT")" "$LOG_ROOT"' in launch_runbook
+    assert launch_runbook.count("--gpus-per-node=1") == 1
     assert "04:00:00" not in launch_runbook
-    assert launch_runbook.count("--time=02:00:00") == 4
-    assert "--parent-source-repo $PARENT_SOURCE_REPO" in launch_runbook
-    assert "--dependency=afterok:$FLOW_OFF_JOB:$RAW_FLOW_JOB" in launch_runbook
+    assert launch_runbook.count("--time=02:00:00") == 1
+    assert "--dependency=afterok:$REGISTER_JOB" in launch_runbook
     compare_index = launcher.index(
         '"$PYTHON_BIN" "$STAGE_TOOL" compare-traces'
     )
@@ -1746,5 +2042,5 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
         '"$PYTHON_BIN" -m torch.distributed.run'
     )
     assert compare_index < parity_index < evaluate_index
-    assert "V5_TRAINING_METRIC_EXCLUSIONS" in stage_source
-    assert "snapshot_pickle_bytes_compared" in stage_source
+    assert "V5_TRAINING_INPUT_REPLAY_METRICS" in stage_source
+    assert "compare_model_state_drift" in stage_source

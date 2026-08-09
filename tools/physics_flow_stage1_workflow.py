@@ -40,6 +40,17 @@ def _arm(code: str) -> stage.Arm:
 
 def arm_values(registration: dict[str, Any], arm: stage.Arm) -> dict[str, str]:
     root = Path(registration["output_root"])
+    frozen = registration.get("v7_frozen_reference", {}).get("arms", {}).get(
+        arm.code
+    )
+    if isinstance(frozen, dict):
+        run_dir = Path(frozen["run_dir"])
+        training_root = run_dir.parent
+        arm_plan = Path(frozen["arm_plan"]["path"])
+    else:
+        run_dir = root / "training" / arm.run_name
+        training_root = root / "training"
+        arm_plan = root / "arm_plans" / f"{arm.code.lower()}.json"
     cache_registration = stage.read_json(
         Path(registration["flow_caches"]["train"]["metadata"]["path"])
         .parent.parent
@@ -53,9 +64,9 @@ def arm_values(registration: dict[str, Any], arm: stage.Arm) -> dict[str, str]:
         "config_name": arm.config_name,
         "run_name": arm.run_name,
         "run_identity": registration["arm_run_identity_sha256"][arm.code],
-        "run_dir": str(root / "training" / arm.run_name),
-        "training_root": str(root / "training"),
-        "arm_plan": str(root / "arm_plans" / f"{arm.code.lower()}.json"),
+        "run_dir": str(run_dir),
+        "training_root": str(training_root),
+        "arm_plan": str(arm_plan),
         "parent_snapshot": registration["parent"]["snapshot"]["path"],
         "parent_resolved_config": registration["parent"]["resolved_config"][
             "path"
@@ -138,6 +149,8 @@ def command_arm_values(args: argparse.Namespace) -> int:
 
 def command_write_arm_plan(args: argparse.Namespace) -> int:
     registration = _registration(args.registration)
+    if registration.get("kind") == stage.V8_EVALUATION_REGISTRATION_KIND:
+        raise PhysicsFlowWorkflowError("v8 frozen evaluation forbids arm training")
     arm = _arm(args.arm)
     values = arm_values(registration, arm)
     _assert_fresh_training(values)
@@ -218,18 +231,29 @@ def command_plan(args: argparse.Namespace) -> int:
     repo = Path(registration["source_repository"]["path"])
     root = Path(registration["output_root"])
     arms = []
+    evaluation_only = registration.get("kind") == stage.V8_EVALUATION_REGISTRATION_KIND
     for arm in stage.ARMS:
         values = arm_values(registration, arm)
-        command = _train_command(args.registration, registration, arm)
-        arms.append(
-            {
-                "arm": arm.code,
-                "run_identity_sha256": values["run_identity"],
-                "argv": command,
-                "shell": shlex.join(command),
-                "output": values["run_dir"],
-            }
-        )
+        if evaluation_only:
+            arms.append(
+                {
+                    "arm": arm.code,
+                    "run_identity_sha256": values["run_identity"],
+                    "frozen_input": values["run_dir"],
+                    "training_command": None,
+                }
+            )
+        else:
+            command = _train_command(args.registration, registration, arm)
+            arms.append(
+                {
+                    "arm": arm.code,
+                    "run_identity_sha256": values["run_identity"],
+                    "argv": command,
+                    "shell": shlex.join(command),
+                    "output": values["run_dir"],
+                }
+            )
     evaluation = [
         registration["runtime"]["python"],
         "-m",
@@ -270,7 +294,7 @@ def command_plan(args: argparse.Namespace) -> int:
                     "compare-traces/analyze/audit-study",
                 ],
                 "slurm": {
-                    "training_nodes": 2,
+                    "training_nodes": 0 if evaluation_only else 2,
                     "evaluation_nodes": 1,
                     "b200_per_node": 8,
                     "non_requeueable": True,
