@@ -1,181 +1,242 @@
-# Fixed causal robot-flow Wan screen
+# Prospective raw-physics-flow Wan Stage-1 gate
 
 Date frozen: 2026-08-08
 
-Status: prospective implementation; launch is forbidden unless the sealed
-predicted tracking-corrected renderer attribution study returns
-`GO_FOR_WAN_SCREEN`
+Status: **prospective; no video-model training or generated-video outcome may
+open until the exact source commit, caches, audits, parent, runtime, and this
+protocol are sealed in `registration.json`**
 
 ## Question and claim boundary
 
-Does a deterministic robot-motion field, computed only from the observed
-history, proposed actions, a train-fitted command-tracking model, robot
-geometry, and fixed camera calibration, improve an action-conditioned Wan
-video model at one, two, or four transformer calls?
+At equal Wan transformer calls, does a deterministic robot-motion field built
+only from the observed frame-4 robot state, candidate action chunks, fixed
+D405 calibration, and official ABC robot geometry improve a matched
+action-conditioned Wan continuation model at NFE 1, 2, or 4?
 
-This is a fixed-conditioning feasibility screen. It is not dual diffusion:
-the robot field has no noise clock, no velocity target, and no sampling calls.
-Passing authorizes a separately preregistered stochastic object/contact
-residual experiment. It does not establish a video-generation, FVD, DAgger,
-or paper-level claim.
+This is a fixed-conditioning feasibility screen. The field is not diffused,
+predicted, or updated; it has no noise clock, velocity target, or model call.
+A pass would establish only that causal raw geometry is a useful scaffold for
+a separately preregistered stochastic object/contact residual. It would not
+establish dual diffusion, FVD, real-time DAgger, or a paper-level video-quality
+claim.
 
-## Hard prerequisite
+The fresh direct-residual continuation screen did not improve its frozen
+quality family. It is therefore supporting motivation, not an imported arm:
+the faithful-cascade update-1,000 VPM remains the sole parent/control, and
+RAW-FLOW must show that action-aligned causal geometry contributes structure
+beyond ordinary residual continuation capacity. No direct-residual weights or
+outcomes enter this study.
 
-The exact committed renderer study must be complete, pass its read-only audit,
-and report `GO_FOR_WAN_SCREEN`. Its source, registration, preparation,
-analysis, completion, audit, predictor state, official ABC commit, and model
-assets are content-bound in this study's registration. A renderer stop, an
-incomplete artifact, or any changed threshold prevents cache construction and
-training.
+The pre-outcome parent audit in `PHYSICS_FLOW_PARENT_LINEAGE.md` rejected the
+older `f67c7bae…` snapshot: although its 1,686-tensor schema matches, 495 model
+tensors differ from the faithful-cascade frontier. Both arms therefore use
+only `de65e832…/d79c3699…`; the registration binds both canonical model-state
+hashes, the full mismatch receipt, its failed predecessor, and the ladder and
+direct-residual lineages.
 
-## Causal condition
+Recurrent-delta and hybrid-anchor trajectories are deliberately excluded. The
+fresh renderer study found a large recurrent flow improvement but did not pass
+its complete frozen flow-plus-spatial family. No failed family may be imported
+or used to rescue this raw-only screen.
 
-For each clip, the train-fitted predictor receives measured robot state only
-through observed video frame 4 and the candidate action chunks. It predicts
-the eight future command-tracking residuals. The causal pose path is the
-observed frame-4 pose followed by the eight raw command endpoints plus those
-predicted residuals. Future measured states and future RGB are neither read nor
-accepted by the cache builder for validation clips.
+## Independent prerequisite
 
-At each of the eight future transitions, articulated visible robot pixels are
-transported analytically between two MuJoCo poses. The per-pixel field is
+The exact fresh 24-episode trajectory-consistent renderer gate must remain
+complete and independently auditable with:
+
+- registration identity
+  `9cc556aba53d1defb69f0049dab67d12a3991decb917015bba5153c16cb8c2b1`;
+- preparation identity
+  `11444ee94ae6707869f44f00409386701c93b886d650ebc928bc4edec4f41a3a`;
+- analysis identity
+  `1471d0bb1f40aabc44d08c71b7eeeba3f0e88b9cb2a07e56dc6f7eb8b11034a0`;
+- completion identity
+  `715fc288ca3e5526cda3a5bb3329db650aa8ed15a61d2959be2349dd3df6dcfc`;
+- decision `GO_raw_geometry_scaffold_pass`; and
+- read-only audit status `audit_passed` with causal replay error at most
+  `1e-6`.
+
+That study prospectively showed raw commands outperform episode-shuffled raw
+geometry on flow and every registered spatial metric, and outperform
+hold-current geometry on the same family. Its raw-family pass—and only that
+pass—authorizes this Wan screen.
+
+## Causal field and tensor contract
+
+For clip (i), let (q_{i,4}) be measured robot state at the last observed
+video frame and let (a_{i,t,-1}) be the final absolute command in candidate
+action chunk (t). The nine-pose raw path is
 
 \[
-  f_t(p)=\left(\Delta x/W,\;\Delta y/H,\;m,\;
-  m\log\frac{z_{t+1}+10^{-6}}{z_t+10^{-6}}\right),
+  Q_i=(q_{i,4},a_{i,4,-1},a_{i,5,-1},\ldots,a_{i,11,-1}).
 \]
 
-where `m` is one only when the source robot surface is valid, its transported
-point remains in frame, and it is z-buffer visible in the target render.
-Invalid values are exactly zero. Each native 180-by-320 top-camera field is
-bottom-padded to 192-by-320 exactly like the Wan VAE, area-pooled by eight to
-24-by-40, and inserted into columns 0:40 of the three-view 24-by-120 grid. The
-two unvalidated wrist views are exactly zero.
+No measured state at frames 5 through 12 and no future RGB are read by the
+cache predictor. Raw action samples are checked bit-exactly against the
+immutable cached generator input.
 
-Wan has four temporal latents for 13 RGB frames. Latents 0 and 1 correspond to
-the observed five-frame history and receive exact-zero flow. Latent 2 packs
-the four transitions 4->5 through 7->8; latent 3 packs transitions 8->9
-through 11->12. Four components times four sub-transitions produce the fixed
-condition shape `[B,16,4,24,120]`. Packing and view placement are tested by an
-exact round trip.
+For each transition, every source-visible articulated robot pixel is
+back-projected into the source geometry, transported in its MuJoCo geom-local
+coordinates, projected into the target pose, and checked against target
+z-buffer visibility. The native field is
 
-All flow scaling constants are analytic (`W=320`, `H=180`); no validation
-normalization is fit. Grippers are clipped to `[0,1]` only at the renderer
-boundary. Cache metadata binds every row, input, predictor, calibration,
-source commit, tensor hash, clipping count, visibility count, and render
-latency. Protected test data are unsupported.
+\[
+ f_t(p)=\left(\frac{x' - x}{320},\frac{y' - y}{180},m,
+ m\log\frac{z'+10^{-6}}{z+10^{-6}}\right),
+\]
 
-## Frozen data and cache controls
+where (m=1) only for a valid, in-frame, z-buffer-visible target point.
+Visibility uses frozen tolerance
+`max(0.01 m, 0.02 * target_depth)`. Unsupported components are exact zero.
 
-- Training uses the immutable ABC train512 cache and manifest.
-- Development evaluation uses the existing immutable val64 cache and
-  manifest. It is not a lockbox and supports only an exploratory decision.
-- The tracking predictor is fit only on train indices 0:384 under the already
-  frozen PCA64/ridge contract. The same sealed parameters are applied to all
-  train512 and val64 clips.
-- Camera eligibility is frozen from MCAP metadata before any generator outcome.
-  D405 rows receive the rendered field. Non-D405 rows remain in the identical
-  train/validation stream but receive an exact-zero 16-channel field and an
-  explicit ineligible flag; they are never rendered using fabricated D405
-  calibration. A D405 row without raw state history, exact cached/raw action
-  equality, nonempty articulated support, or the registered geometry is fatal.
-  There is no retry or substitution. At least 32 val64 episodes must be D405 or
-  the screen stops before training.
+Each 180-by-320 top field is bottom-padded by 12 rows to 192-by-320. In each
+8-by-8 block, visibility is area-averaged; displacement and log depth are
+support-weighted averages. This yields eight transitions of shape
+`[8,4,24,40]` per row. Compact float16 caches avoid storing known-zero history
+and wrist values. At dataset read time, four transitions are packed into each
+future Wan token, giving `[16,4,24,120]`: history tokens 0 and 1 and wrist
+columns 40:120 are exact zero; future tokens 2 and 3 contain the top-view
+field. Pack/unpack is exact and tested.
 
-The cache builder emits aligned flow plus three deterministic controls:
+The recorded D405 vertical focal length is scaled to 180 rows. The official
+ABC nominal camera extrinsics and a centered principal point are fixed; lens
+distortion is recorded but not corrected. This limitation is part of the
+claim boundary.
 
-| Source | Construction | Purpose |
+## Immutable cache registration and controls
+
+The cache registration scans only manifest/action/camera metadata and D405
+calibration. It freezes D405 eligibility, calibration identities, and shuffled
+donors before rendering, training, validation
+target access, or any generator outcome. At least 32 immutable val64 rows must
+be D405 or the study stops. D405 rows missing observed state, exact action
+equality, calibration, geometry, or articulated support are fatal. Non-D405
+rows remain in the train stream with exact-zero fields and an explicit
+ineligible flag; the primary evaluation population is the prospectively
+registered D405 subset.
+
+Four compact arrays are materialized and independently reconstructed by the
+cache auditor:
+
+| Source | Frozen construction | Attribution question |
 |---|---|---|
-| `aligned` | local predicted-corrected render | deployable candidate |
-| `episode_shuffled` | another episode's complete aligned tensor, fixed cyclic donor | sample attribution |
-| `timeshift_plus_one` | local transitions shifted one future step without wrap; last is zero | timing attribution |
-| `wrong_calibration` | local trajectory rendered after a fixed +5 cm local camera-x perturbation | geometry attribution |
+| `raw` | local observed anchor plus raw action endpoints | deployable candidate |
+| `episode_shuffled` | complete raw tensor from another D405 episode in the same planned-motion tertile | sample identity |
+| `timeshift_plus_one` | local transitions shifted one slot without wrap; final slot zero | temporal alignment |
+| `hold_current` | observed frame-4 pose repeated for all nine poses | action-dependent motion |
+| `off` | runtime exact-zero packed tensor; not redundantly stored | condition presence |
 
-Donors are fixed before video outcomes, episode-disjoint, D405-to-D405, and
-matched by a train-only planned-motion tertile. Validation donors are
-constructed within the registered D405 subset of val64 without reading
-validation RGB or measured future state. Non-D405 control tensors are all
-exact zero. The wrong calibration perturbation is fixed before cache
-generation and is never tuned.
+Donors use fixed seed 20260831, are episode-disjoint, and are chosen within
+split without RGB or measured future state. Row lineage binds ordered clip ID,
+manifest index, action window/hash, observed state hash, calibration identity,
+camera eligibility, donor, pose path, tensor hashes, visibility, and latency.
+Global metadata binds the immutable RGB/action hashes, source commit, official
+ABC commit, renderer prerequisite, row lineage, and all arrays. Protected test
+data are unsupported.
 
-## Matched training arms
+## Matched training
 
-Both arms start from the exact frozen VPM update-1,000 snapshot, use seed 1234,
-the same global batch, clip order, augmentation, video noise, timestep draws,
-optimizer, learning-rate schedule, 200 updates, and one Wan call per training
-example. Both instantiate the same 16-channel Conv3d adapter and unused
-auxiliary head. The parent auxiliary modules are excluded identically at load.
+Both arms start from the exact faithful-cascade update-1,000 VPM snapshot with
+SHA-256
+`de65e832c56f82be1472edb1fd789e16d3a6c8a7adc9b1f31306779951cb463a`
+and parent run identity
+`d79c3699f0c68dcd17321fcb0ea2846fca4d96f8c815f91dff02a19d3140787f`.
+Its canonical model-state SHA-256 is
+`d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0`.
+They use seed 1234, eight B200 ranks, batch one per rank, 200 updates, fresh
+identical AdamW, the same learning-rate schedule, no EMA, and one Wan call per
+example.
 
-The parent video corruption path is preserved exactly: during training,
-history latents follow the same forward-noise draw as future latents; during
-sampling, known history follows `(1-sigma) * reference + sigma * initial_noise`
-and reaches the clean reference only at `sigma=0`. Clean-clamping history at
-intermediate calls is forbidden because it changes the parent state
-distribution even when flow fusion is off.
-
-| Arm | Training condition | Difference |
+| Arm | Field at training | Sole intervention |
 |---|---|---|
-| `FLOW-OFF` | aligned tensor is projected but hard-masked at the Wan seam | parameter-matched video control |
-| `FLOW-ON` | aligned tensor is injected through the trainable bounded residual gate | fixed causal condition |
+| `FLOW-OFF` | registered raw tensor loaded/projected but hard-disabled at the Wan seam | parameter-matched control |
+| `RAW-FLOW` | same registered raw tensor fused by the bounded residual adapter | causal raw geometry |
 
-The fixed flow clock is always zero; auxiliary loss is zero; the flow tensor is
-never corrupted, predicted, or updated. Both traces must hash-identically match
-all 200 clip/timestep/video-noise/action/flow batches. Trainable parameter
-names and counts must match. `FLOW-OFF` must reproduce an explicit off call
-bit-for-bit.
+Both instantiate identical auxiliary parameters from the same seed; parent
+auxiliary parameters are excluded identically from warm start. The field clock
+and field velocity loss are zero. The parent VPM history corruption and native
+sampling scheduler are unchanged.
 
-## Evaluation grid and metrics
+Every update records all-rank SHA-256 identities for clip indices, actions,
+raw field, video noise, and timesteps. The two 200-update traces, trainable
+parameter schema, parent identity, and initial auxiliary state must compare
+exactly before evaluation. A preemption may resume only through the existing
+atomic checkpoint/trace contract; this prospective run is submitted
+non-requeueable.
 
-Use every val64 clip and four stateless video-noise seeds. Clean future video
-is evaluator-owned and is opened only after every causal endpoint for that
-clip/noise pair has materialized. Evaluate:
+## Causal equal-call evaluation
 
-- `FLOW-OFF` at NFE 1/2/4 with condition hard-off;
-- `FLOW-ON` at NFE 1/2/4 with aligned flow;
-- the same `FLOW-ON` checkpoint at NFE 1/2/4 with condition off,
-  episode-shuffled, time-shifted, and wrong-calibration flow.
+Use every prospectively registered D405 val64 row, stateless noise IDs
+0/1/2/3, and NFE 1/2/4. For each evaluation batch, materialize the complete
+noise-by-endpoint grid below to CPU before opening any clean future RGB bytes:
 
-The primary population is the prospectively registered D405 subset of val64,
-and the primary spatial scope is its top view (pixel columns 0:320; latent
-columns 0:40), because only that camera passed the prerequisite. The full
-val64 population and all-three-view metrics are secondary guardrails. For each
-scope report latent NMSE, decoded MSE in `[0,1]`, temporal-difference MSE
-including the observed-to-first-future boundary, LPIPS, and action
-sensitivity. Report adapter, render, VAE, Wan, decoder, and end-to-end latency
-separately. Confidence intervals use 10,000 paired episode-clustered bootstrap
-samples with frozen seed 20260831.
+- `FLOW-OFF` checkpoint with condition off;
+- `RAW-FLOW` checkpoint with `raw`;
+- the same `RAW-FLOW` checkpoint with `off`, `episode_shuffled`,
+  `timeshift_plus_one`, and `hold_current`.
 
-## Frozen development decision
+All same-NFE contrasts use identical explicit video noise and exactly NFE Wan
+calls. No endpoint makes a field-model, teacher, or online feature call.
 
-The primary endpoint is top-view decoded MSE at NFE 1. `ADVANCE_TO_RESIDUAL`
-requires all conditions:
+Primary scope is top-view pixels 0:320 / latent columns 0:40 at NFE 1. Report:
 
-1. aligned `FLOW-ON` improves top-view decoded and temporal MSE by at least 3%
-   over matched `FLOW-OFF`, with paired 95% lower bounds above 1%;
-2. aligned `FLOW-ON` beats its same-checkpoint off, shuffled, time-shifted, and
-   wrong-calibration controls on both metrics, with positive paired lower
-   bounds and at least 1% point improvement;
-3. top-view LPIPS improves with a positive paired lower bound;
-4. all-view decoded and temporal MSE have nonnegative point effects and lower
-   bounds above -1%;
-5. latent NMSE has a nonnegative point effect and lower bound above -1%;
-6. aligned action sensitivity exceeds shuffled-action sensitivity with a
-   positive paired lower bound;
-7. exactly one Wan call is reported, no teacher/flow-model calls occur, no
-   future RGB or measured future state enters any sampler or cache predictor,
-   the full paired training trace passes, and protected test remains unopened.
+- decoded MSE in `[0,1]`;
+- temporal-difference MSE including observed-frame-4 to first-future boundary;
+- AlexNet LPIPS averaged over eight top-view future frames;
+- all-view decoded and temporal MSE;
+- future video-latent NMSE; and
+- history VAE, adapter-plus-Wan, decoder, and end-to-end latency.
 
-NFE 2/4 are secondary dose-response checks. If NFE 1 fails, a higher-NFE gain
-does not authorize the real-time residual direction. Otherwise the decision is
-`STOP_FIXED_FLOW`; no stochastic residual diffusion or distillation is
-launched from this mechanism.
+LPIPS is a registered offline instrument, not a runtime dependency fetched
+after outcomes. Registration hashes the installed LPIPS implementation and
+packaged linear weights, the already-cached torchvision AlexNet checkpoint,
+and the exact loaded state dictionary. Every evaluation rank must reconstruct
+the identical receipt without network access, and the final auditor verifies
+that one identity served every arm and endpoint. The frozen preflight is job
+`507388`: LPIPS 0.1.4 / torch 2.7.1+cu128 / torchvision 0.22.1+cu128,
+receipt `04f5013b7161fbf91ed6116d25f7e6ec66afc661024236ad27564b1899cb94be`,
+loaded-state SHA-256
+`abc218a76418de010923a57c9c55afb1c1040503b46e5015694ee79ea7c90a7d`,
+and cached AlexNet SHA-256
+`7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02`.
 
-## Next stage if and only if this passes
+A future-state `MEASURED_GEOMETRY_ORACLE` is deliberately not improvised into
+this raw-only causal gate: constructing it would require a separate privileged
+cache/access contract. Instead, nonselectable seam diagnostics report the
+effective adapter gate, condition RMS/nonzero support, and same-checkpoint
+raw-versus-off output-hash sensitivity. They can identify an unresponsive seam
+but cannot rescue any quality decision. A measured-geometry oracle, if needed,
+requires its own prospective study after this one.
 
-The next state must model object/contact uncertainty rather than duplicate
-known robot kinematics. It will use the deterministic robot field as a frozen
-scaffold and generate a severe, layered residual (object SE(3), particles,
-contact mode, visibility, or another preregistered bottleneck) from history and
-actions before RGB. Clean future flow may supervise it but may never condition
-deployment. Generated-versus-zero, generated-versus-shuffled, and oracle
-attribution remain mandatory at equal total calls and latency.
+NFE 2/4 are secondary dose-response checks and cannot rescue an NFE-1 failure.
+Confidence intervals use 10,000 paired episode-cluster bootstrap replicates
+with seed 20260831; all four noise seeds remain inside their episode cluster.
+
+## Frozen decision
+
+`ADVANCE_RAW_FLOW_SCAFFOLD` requires every condition:
+
+1. Versus matched `FLOW-OFF`, NFE-1 raw improves top-view decoded and temporal
+   MSE by at least 3%, with paired lower bounds strictly above 1%.
+2. Versus matched `FLOW-OFF`, top-view LPIPS has a strictly positive lower
+   improvement bound.
+3. At the same `RAW-FLOW` checkpoint, raw beats each of off, episode-shuffled,
+   +1 time, and hold on both top decoded and temporal MSE by at least 1%, with
+   strictly positive lower bounds.
+4. Versus matched `FLOW-OFF`, all-view decoded and temporal MSE and latent NMSE
+   have nonnegative point effects and lower bounds strictly above -1%.
+5. The exact 200-update pairing trace passes; every NFE-1 endpoint reports one
+   Wan call; flow-model calls are zero; future RGB and future measured state do
+   not enter cache prediction or sampling; and protected test remains unopened.
+
+Otherwise the decision is `STOP_FIXED_RAW_FLOW`. No secondary endpoint or
+qualitative video can override the gate.
+
+## Conditional next step
+
+Only a pass authorizes a new prospective experiment in which the deterministic
+robot field remains frozen and a small causal stochastic residual models
+object/contact uncertainty (for example object SE(3), contact mode, visibility,
+or particles) before RGB generation. Generated-versus-zero,
+generated-versus-shuffled, oracle attribution, equal total calls, and serving
+latency would remain mandatory.

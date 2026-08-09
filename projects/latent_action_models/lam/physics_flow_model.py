@@ -30,18 +30,18 @@ from robot_wm.modeling.networks.wan_forward_model import DualWanOutput
 
 
 FLOW_CONDITION_SOURCES = (
-    "aligned",
+    "raw",
     "off",
     "episode_shuffled",
     "timeshift_plus_one",
-    "wrong_calibration",
+    "hold_current",
 )
 FlowConditionSource = Literal[
-    "aligned",
+    "raw",
     "off",
     "episode_shuffled",
     "timeshift_plus_one",
-    "wrong_calibration",
+    "hold_current",
 ]
 
 
@@ -196,6 +196,10 @@ class PhysicsFlowVPM(DualExplicitActionDiTModel):
             "physics_flow/fuse_flow": flow_loss.new_tensor(float(self.fuse_flow)),
             "physics_flow/flow_model_calls": flow_loss.new_tensor(0.0),
             "physics_flow/condition_rms": condition.float().square().mean().sqrt().detach(),
+            "physics_flow/condition_nonzero_fraction": condition.ne(0).float().mean().detach(),
+            "physics_flow/effective_adapter_gate": (
+                self.forward_model.tf_token_adapter.effective_gate().detach().float()
+            ),
             "physics_flow/fixed_clean_clock": flow_loss.new_tensor(1.0),
             "physics_flow/future_measured_state_conditioned": flow_loss.new_tensor(0.0),
             "paired_audit/timestep_mean": timesteps.float().mean().detach(),

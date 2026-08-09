@@ -29,7 +29,7 @@ dataset: &training_dataset
       expected_manifest_sha256: eeace7b0c9f5b6598f32e802d6d3678b6deccccf5b62c6cea2bb3d5478ab8b74
       expected_rgb_sha256: b5bdde4461c75bc88653c38b737021fcbd69b0b22f4c87bc8e8097c3494b64ee
       expected_actions_sha256: f2cde809c1d864d4a00422aca8fcac0116229a0b0ac83a93850d1421d16c5b89
-      expected_flow_sha256: ${oc.env:PHYSICS_FLOW_TRAIN_ALIGNED_SHA256}
+      expected_flow_sha256: ${oc.env:PHYSICS_FLOW_TRAIN_RAW_SHA256}
       expected_renderer_analysis_identity_sha256: ${oc.env:PHYSICS_FLOW_RENDERER_ANALYSIS_IDENTITY_SHA256}
 val_dataset: &validation_dataset
   <<: *training_dataset
@@ -44,7 +44,7 @@ val_dataset: &validation_dataset
       expected_manifest_sha256: 8cb39c1f056855e28855c0b944c715d084b709e1421f4efeed3710e7099348c4
       expected_rgb_sha256: ed82fc0f580baa90c4dc39c1608f97ad7092a4ddcb59c3612eed31711afda404
       expected_actions_sha256: 552a5cf0af156868d2866dfacabe102fc6b5cd24580bb377953e35a14625306a
-      expected_flow_sha256: ${oc.env:PHYSICS_FLOW_VAL_ALIGNED_SHA256}
+      expected_flow_sha256: ${oc.env:PHYSICS_FLOW_VAL_RAW_SHA256}
       expected_renderer_analysis_identity_sha256: ${oc.env:PHYSICS_FLOW_RENDERER_ANALYSIS_IDENTITY_SHA256}
 viz_dataset:
   <<: *validation_dataset
