@@ -129,6 +129,45 @@ def test_snapshot_receipt_hashes_scalar_and_records_lineage(tmp_path: Path) -> N
     assert set(tensors) == {"matrix", "scalar"}
 
 
+def test_enriched_lineage_file_receipt_revalidates_only_file_fields(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "legacy-snapshot.pt"
+    artifact.write_bytes(b"sealed legacy snapshot\n")
+    enriched = {
+        **stage.file_record(artifact),
+        "run_identity_sha256": "a" * 64,
+        "canonical_model_state_sha256": "b" * 64,
+        "model_schema_sha256": "c" * 64,
+        "rejection_reason": "separately validated semantic metadata",
+    }
+
+    assert stage._absolute_file_record_matches(
+        enriched, "legacy parent"
+    ) == artifact.resolve()
+
+    for field, value in (
+        ("bytes", enriched["bytes"] + 1),
+        ("sha256", "0" * 64),
+    ):
+        changed = dict(enriched)
+        changed[field] = value
+        with pytest.raises(
+            stage.PhysicsFlowStage1Error,
+            match="legacy parent file differs",
+        ):
+            stage._absolute_file_record_matches(changed, "legacy parent")
+
+    different = tmp_path / "different-snapshot.pt"
+    different.write_bytes(b"different artifact\n")
+    changed_path = {**enriched, "path": str(different)}
+    with pytest.raises(
+        stage.PhysicsFlowStage1Error,
+        match="legacy parent file differs",
+    ):
+        stage._absolute_file_record_matches(changed_path, "legacy parent")
+
+
 def test_parent_parity_hash_handles_scalar_and_native_artifacts() -> None:
     assert len(parent_parity_tool._torch_tensor_hash(torch.tensor(0.25))) == 64
     noise = torch.randn(1, 16, 4, 2, 3)
@@ -727,7 +766,8 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python" in launch_runbook
     assert "PYTHONNOUSERSITE=1" in launch_runbook
     assert "--cache-python $CACHE_PYTHON_BIN" in launch_runbook
-    assert launch_runbook.count("-20260808-$SHORT-v4") == 3
+    assert launch_runbook.count("-20260808-$SHORT-v5") == 3
+    assert "-20260808-$SHORT-v4" not in launch_runbook
     assert "-20260808-$SHORT-v3" not in launch_runbook
     assert "-20260808-$SHORT-v2" not in launch_runbook
     assert "-20260808-$SHORT-v1" not in launch_runbook

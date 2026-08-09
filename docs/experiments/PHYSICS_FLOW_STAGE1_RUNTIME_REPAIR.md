@@ -81,6 +81,35 @@ source commit and fresh commit-derived `v4` source/cache/study/log paths.
 Neither the successful `v2` caches, the `0561b71` source, nor any failed-chain
 path may be resumed or overwritten.
 
+## Preserved `7ce3776-v4` lineage-replay failure
+
+Exact audited source `7ce37765a3b9ffd906fe28fab8c4bdc90886ab55` was
+submitted as jobs 507672--507678. Registration job 507672 passed the compute
+main-runtime/LPIPS gate before cache output. Train cache 507673 and validation
+cache 507674 completed, and seal job 507675 independently audited every array,
+row tensor, lineage identity, causal negative control, and false access flag.
+Study registration then completed, but the workflow planner stopped with
+`parent lineage artifact changed`; `afterok` cancelled both training arms and
+evaluation before they ran.
+
+Read-only replay proved that no parent-lineage file changed. The rejected
+legacy snapshot remained 4,253,540,954 bytes with SHA-256
+`f67c7bae50c4c279bf6372e098833be32699aca24232d7d489a1f7a45b5a8e21`,
+and every other lineage path/size/hash compared exactly. The validator had
+compared the three-field `file_record(path)` against an intentionally enriched
+legacy-snapshot mapping that also contains the independently checked run,
+canonical-state, schema, and rejection-reason fields. The shape mismatch was
+therefore deterministic.
+
+The repair projects every lineage artifact to its immutable `path`, `bytes`,
+and `sha256` fields for file replay, while continuing to validate the enriched
+legacy semantic fields separately. Regression coverage requires enriched
+metadata to be accepted and stale path, size, or hash receipts to fail closed.
+The complete `7ce3776-v4` source, cache, study registration, and logs remain
+preserved and must not be reused. Any relaunch requires a fresh independently
+audited source commit and fresh commit-derived `v5` source/cache/study/log
+paths.
+
 ## Preserved second failed chain: cache-renderer runtime
 
 The exact audited source `a72d159de635d8dff3daab3a684dc4cf99c53b96`

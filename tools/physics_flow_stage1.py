@@ -3670,6 +3670,12 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
             "canonical_model_state_sha256"
         )
         != LEGACY_REJECTED_MODEL_STATE_SHA256
+        or lineage.get("rejected_older_parent", {}).get("run_identity_sha256")
+        != LEGACY_REJECTED_RUN_IDENTITY_SHA256
+        or lineage.get("rejected_older_parent", {}).get("model_schema_sha256")
+        != PARENT_MODEL_SCHEMA_SHA256
+        or lineage.get("rejected_older_parent", {}).get("rejection_reason")
+        != "495 model tensors differ from actual frontier"
         or lineage.get("canonical_comparison", {}).get("mismatched_tensor_count")
         != 495
         or lineage.get("canonical_comparison", {}).get(
@@ -3691,8 +3697,7 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         *lineage["direct_residual_frontier"]["files"].values(),
     ]
     for record in lineage_records:
-        if file_record(Path(record["path"])) != record:
-            raise PhysicsFlowStage1Error("parent lineage artifact changed")
+        _absolute_file_record_matches(record, "parent lineage artifact")
     return registration
 
 
