@@ -1311,6 +1311,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     timing_rows: list[dict[str, Any]] = []
     render_latencies: list[float] = []
+    steady_render_latencies: list[float] = []
     overlay_dir = output / "overlays"
     overlay_dir.mkdir()
     overlay_records: list[dict[str, Any]] = []
@@ -1323,11 +1324,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             _, height, width, channels = rgb.shape
             if channels != 3:
                 raise AttributionError("RGB channel geometry differs")
-            if renderer is None:
-                renderer = mujoco.Renderer(model, height=height, width=width)
-                renderer_shape = (height, width)
-            elif renderer_shape != (height, width):
-                raise AttributionError("all score bundles must share one resolution")
+            if renderer is not None:
+                renderer.close()
+            renderer = mujoco.Renderer(model, height=height, width=width)
+            renderer_shape = (height, width)
+            clip_latency_start = len(render_latencies)
             fy = float(arrays["K"][1, 1])
             model.cam_fovy[camera_id] = math.degrees(2.0 * math.atan(height / (2.0 * fy)))
 
@@ -1350,6 +1351,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     for pose in poses
                 ]
                 render_latencies.extend(item.render_ms for item in rendered[arm])
+            clip_latencies = render_latencies[clip_latency_start:]
+            steady_render_latencies.extend(
+                clip_latencies[2:] if len(clip_latencies) > 2 else clip_latencies
+            )
 
             clip_rows: list[dict[str, Any]] = []
             for target_index in range(1, 9):
@@ -1532,7 +1537,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             }
 
-    latency = np.asarray(render_latencies[2:] if len(render_latencies) > 2 else render_latencies)
+    latency = np.asarray(steady_render_latencies)
     analysis = seal(
         {
             "schema_version": SCHEMA_VERSION,
@@ -1591,6 +1596,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "render_pose_p50_ms": float(np.percentile(latency, 50)),
                 "render_pose_p95_ms": float(np.percentile(latency, 95)),
                 "render_pose_count_after_two_warmups": int(len(latency)),
+                "warmups_excluded_per_clip": 2,
+                "native_resolution_renderer_recreated_per_clip": True,
             },
             "artifacts": {
                 "registration": file_record(output / "registration.json"),
