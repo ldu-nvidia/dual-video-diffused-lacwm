@@ -96,7 +96,9 @@ test "$(git -C "$SOURCE_MIRROR" rev-parse FETCH_HEAD)" = "$EXPECTED_COMMIT"
 git -C "$SOURCE_MIRROR" worktree add --detach "$SOURCE_REPO" "$EXPECTED_COMMIT"
 test "$(git -C "$SOURCE_REPO" rev-parse HEAD)" = "$EXPECTED_COMMIT"
 test -z "$(git -C "$SOURCE_REPO" status --porcelain --untracked-files=all)"
-mkdir -p "$LOG_ROOT"
+mkdir -p "$(dirname "$CACHE_ROOT")" "$(dirname "$STUDY_ROOT")" "$LOG_ROOT"
+test -d "$(dirname "$CACHE_ROOT")"
+test -d "$(dirname "$STUDY_ROOT")"
 ```
 
 ## 3. Submit the complete dependency chain
