@@ -198,6 +198,18 @@ identities are respectively
 `2426a1546a43403fc09f7d8bb60475526e4d342586727c880dd005aad99010f8`,
 and `a94afb1e39ccee4b80298182f287431409fbce47ae260c94d4324fa23081e5ff`.
 
+Standalone strict-audit job `508106` completed `0:0` and reproduced the GO
+after 731 record checks over 356 unique files / 9,069,194,268 referenced bytes,
+25 reconstructed causal arrays with maximum error zero, all 2,200 transition
+rows, all 275 episode/arm rows, and the exact `[100000,55]` bootstrap. Its
+external receipt identity is
+`d7afdf0bddcd8dee32351b2356137503cf5485dcdaa5f8e0b699a63d1dc86b69`
+(file SHA-256
+`8e0475d40aabb7ed3d200ef900cf012e58f0096b27fa46642384869b92f545ea`).
+The first audit job `508100` failed closed on an auditor-only fixed-width
+assumption; the repair independently binds each bundle to its variable native
+raw-MCAP camera geometry. No canonical evidence was mutated.
+
 ## Claim boundary
 
 The completed screens support a narrower and more useful conclusion: clean
