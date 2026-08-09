@@ -2,8 +2,8 @@
 
 Date frozen: 2026-08-09
 
-Status: **prospective; no strict-fresh-29 future measured state or RGB may be
-opened until registration is sealed**
+Status: **prospective; no strict-fresh-29 future measured target indices or RGB
+frames may be extracted until registration is sealed**
 
 ## Question and claim boundary
 
@@ -43,9 +43,9 @@ Validation and protected test are forbidden.
   in sorted `clip_id` order within the same frozen stratum, with wraparound.
 - Before registration is sealed, the workflow may read only the manifest,
   cached planned actions and metadata, file presence, MCAP camera type, the two
-  prior registrations, and the prior fitted-model artifact.  It may not open
-  future measured state, score RGB, earlier per-episode metrics for the 29, or
-  validation/protected-test data.
+  prior registrations, and the prior fitted-model artifact.  It may not open a
+  score state container, decode score RGB, inspect earlier per-episode metrics
+  for the 29, or access validation/protected-test data.
 - Registration hash-binds both prior selections, the completed VPM collision
   receipt, the final canonical metadata-only freshness audit, all 29 IDs and
   donor IDs, input files, source commit and tool, prior model artifact,
@@ -80,8 +80,14 @@ targets only.
 
 Preparation writes and hash-closes every raw, absolute-ridge, recurrent,
 recurrent-shuffled, and measured-history trajectory before evaluation is
-allowed to open future measured state or RGB.  The prior absolute-ridge model is
-also copied unchanged; it is a mandatory reference, not a retuned candidate.
+allowed to extract future target indices or decode future RGB.  The NPZ format
+stores complete state arrays as indivisible members, so requesting an array can
+decompress its full member in memory; the audited preparation source indexes,
+retains, hashes, and supplies only boundaries through 4, and a separate process
+indexes boundaries 5--12 after closure.  This is source-enforced target-index
+blindness, not an operating-system claim that future bytes were unread.  The
+prior absolute-ridge model is copied unchanged; it is a mandatory reference,
+not a retuned candidate.
 
 ## Frozen arms and renderer
 
@@ -168,7 +174,8 @@ The immutable workflow is `register -> prepare -> evaluate -> analyze -> audit`.
 It records identities and SHA-256 hashes for source, prior registrations/model,
 selection/donors, causal trajectories, bundles, rows, bootstrap indices,
 analysis, completion, and environment.  The read-only audit replays causal
-rollouts, confirms all trajectories were closed before target access, recomputes
+rollouts, confirms all trajectories were closed before future-target indexing
+and RGB decoding, recomputes
 the two Holm families and machine decision, checks exact 29 membership and
 14/8/7 strata, validates all hashes and protected-data false flags, and emits
 no mutation of evidence.  Partial or failed runs remain immutable and can never
