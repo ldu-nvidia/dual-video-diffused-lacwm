@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /experiments_0908/invertible_two_clock_common
+  - _self_
+
+name: ipq-tc1-sync-seed1234-u000400
+model:
+  invertible_two_clock:
+    arm_mode: synchronous
+wandb:
+  tags: [abc, vpm, ipq-tc1, single-clock-control, seed-1234]
