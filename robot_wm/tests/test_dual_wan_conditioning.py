@@ -144,6 +144,7 @@ def _make_dual_model(
     state_gate_trainable=False,
     clock_gate_init=0.0,
     clock_gate_trainable=True,
+    preserve_zero_support=False,
 ):
     model = WAN_FORWARD.WanForwardModel.__new__(
         WAN_FORWARD.WanForwardModel
@@ -166,6 +167,7 @@ def _make_dual_model(
         patch_size=model.patch_size,
         gate_init=state_gate_init,
         gate_trainable=state_gate_trainable,
+        preserve_zero_support=preserve_zero_support,
     )
     model.tf_clock_embedding = TFSigmaTokenEmbedding(
         hidden_size=8,
@@ -426,3 +428,62 @@ def test_frozen_zero_state_and_clock_make_video_loss_output_and_gradients_tf_inv
         for parameter in module.parameters():
             if parameter.grad is not None:
                 assert torch.count_nonzero(parameter.grad) == 0
+
+
+def test_runtime_off_is_output_and_gradient_invariant_with_nonzero_flow_gate():
+    """FLOW-OFF must match the parent seam even though its gate is trainable."""
+
+    torch.manual_seed(71)
+    model = _make_dual_model(
+        condition_on_tf=False,
+        condition_on_tf_clock=False,
+        state_gate_init=0.02,
+        state_gate_trainable=True,
+        clock_gate_init=0.0,
+        clock_gate_trainable=False,
+        preserve_zero_support=True,
+    )
+    video = torch.randn(2, 16, 2, 4, 4)
+    reference = torch.randn_like(video)
+    actions = torch.randn(2, 2, 3)
+    timesteps = torch.tensor([100.0, 200.0])
+    target = torch.randn_like(video)
+    context = [torch.zeros(1, 4), torch.zeros(1, 4)]
+
+    def run(condition):
+        model.zero_grad(set_to_none=True)
+        output = model(
+            video,
+            timesteps,
+            actions,
+            reference,
+            context,
+            noisy_tf=condition,
+            conditioning_tf=condition,
+            tf_sigma=torch.zeros(2),
+            condition_on_tf=False,
+            condition_on_tf_clock=False,
+        )
+        loss = (output.video_velocity - target).square().mean()
+        loss.backward()
+        shared_gradients = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in model.transformer.named_parameters()
+            if parameter.grad is not None
+        }
+        auxiliary_gradients = {
+            name: None if parameter.grad is None else parameter.grad.detach().clone()
+            for name, parameter in model.tf_token_adapter.named_parameters()
+        }
+        return output.video_velocity.detach(), loss.detach(), shared_gradients, auxiliary_gradients
+
+    first = run(torch.randn(2, 4, 2, 4, 4))
+    second = run(torch.randn(2, 4, 2, 4, 4) * 30.0 + 11.0)
+    assert torch.equal(first[0], second[0])
+    assert torch.equal(first[1], second[1])
+    assert first[2].keys() == second[2].keys()
+    for name in first[2]:
+        assert torch.equal(first[2][name], second[2][name]), name
+    for gradients in (first[3], second[3]):
+        for value in gradients.values():
+            assert value is None or torch.count_nonzero(value) == 0
