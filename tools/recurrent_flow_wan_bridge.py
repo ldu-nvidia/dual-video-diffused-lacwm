@@ -773,18 +773,24 @@ def _freeze_causal_prefix_values(
 
 def _validate_source(registration: Mapping[str, Any]) -> None:
     source = registration.get("source", {})
+    registered_repo = _validate_executing_source_repo(
+        Path(str(source.get("repository", "")))
+    )
     observed = raw_stage.clean_repository(
-        Path(str(source.get("repository", ""))),
+        registered_repo,
         str(source.get("git_commit", "")),
         "recurrent-flow bridge source",
     )
-    if observed["git_commit"] != source.get("git_commit"):
-        raise RecurrentFlowBridgeError("bridge source commit changed")
+    registered_source = {
+        "path": source.get("repository"),
+        "git_commit": source.get("git_commit"),
+        "git_tree_sha": source.get("git_tree_sha"),
+        "clean": source.get("clean"),
+    }
+    if observed != registered_source:
+        raise RecurrentFlowBridgeError("bridge source record changed")
     current = _source_records()
-    if any(
-        current.get(name, {}).get("sha256") != record.get("sha256")
-        for name, record in source.get("files", {}).items()
-    ):
+    if current != source.get("files"):
         raise RecurrentFlowBridgeError("bridge source file changed after registration")
 
 
@@ -861,6 +867,8 @@ def command_register_cache(args: argparse.Namespace) -> int:
             "source": {
                 "repository": source["path"],
                 "git_commit": source["git_commit"],
+                "git_tree_sha": source["git_tree_sha"],
+                "clean": source["clean"],
                 "files": _source_records(),
             },
             "raw_stage_input_contract": {
