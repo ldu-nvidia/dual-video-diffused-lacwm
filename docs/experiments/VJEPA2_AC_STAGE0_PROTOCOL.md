@@ -2,8 +2,9 @@
 
 Date: 2026-08-08
 
-Status: protocol and evaluator implemented; native-DROID train-only run pending
-completion at the time of this protocol commit
+Status: implemented; 32-episode RTX Blackwell qualification completed
+`STOP_NATIVE_ACTION_GATE_FAIL`; exact B200 replication pending.  See
+`VJEPA2_AC_STAGE0_RESULT.md`.
 
 ## Decision question
 
