@@ -133,6 +133,15 @@ metric or analysis because a fine-motion transition had zero pixels above the
 registered 0.25-pixel threshold. No renderer comparison outcome was available
 from that incomplete attempt.
 
+A second tooling-qualification attempt stopped before writing frame metrics or
+analysis when it encountered two native D405 resolutions; it had incorrectly
+required one renderer size for all clips. The frozen execution now recreates
+the same MuJoCo model/renderer for each clip at that clip's recorded native
+resolution and excludes the first two pose renders per clip from latency. This
+does not rescale RGB, alter camera FOV, select clips, or change any metric or
+decision threshold. No renderer comparison outcome was available from the
+incomplete attempt.
+
 This is a rendered robot-geometry flow diagnostic. It excludes objects,
 contacts, occlusions by scene objects, camera distortion, and real optical-flow
 estimation.
