@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /experiments_0908/physics_flow_common
+  - _self_
+
+name: physics-flow-on-seed1234-u000200
+model:
+  physics_flow:
+    fuse_flow: true
+wandb:
+  tags: [abc, vpm, physics-flow, flow-on, seed-1234]

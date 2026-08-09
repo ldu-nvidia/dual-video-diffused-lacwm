@@ -146,6 +146,9 @@ class WanForwardModel(nn.Module):
                 gate_trainable=bool(
                     dual_config.get("state_gate_trainable", True)
                 ),
+                preserve_zero_support=bool(
+                    dual_config.get("preserve_zero_support", False)
+                ),
             )
             self.tf_clock_embedding = TFSigmaTokenEmbedding(
                 hidden_size=hidden_size,

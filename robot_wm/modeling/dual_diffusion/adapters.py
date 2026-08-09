@@ -6,6 +6,7 @@ from math import atanh, isfinite, log, prod
 from typing import Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 
@@ -24,6 +25,7 @@ class ZeroInitTFTokenAdapter(nn.Module):
         patch_size: Tuple[int, int, int] = (1, 2, 2),
         gate_init: float = 0.0,
         gate_trainable: bool = True,
+        preserve_zero_support: bool = False,
     ) -> None:
         super().__init__()
         if tf_channels < 1 or hidden_size < 1:
@@ -35,6 +37,7 @@ class ZeroInitTFTokenAdapter(nn.Module):
         self.tf_channels = tf_channels
         self.hidden_size = hidden_size
         self.patch_size = patch_size
+        self.preserve_zero_support = bool(preserve_zero_support)
         self.projection = nn.Conv3d(
             tf_channels,
             hidden_size,
@@ -62,8 +65,23 @@ class ZeroInitTFTokenAdapter(nn.Module):
             )
         projected = self.projection(time_frequency)
         grid = tuple(projected.shape[2:])
-        tokens = projected.flatten(2).transpose(1, 2)
-        return self.norm(tokens), grid
+        tokens = self.norm(projected.flatten(2).transpose(1, 2))
+        if self.preserve_zero_support:
+            # A biased Conv3d followed by LayerNorm does not map an all-zero
+            # input patch to exact zero after optimization.  Physics-derived
+            # fields deliberately use zero to mean unsupported history, view,
+            # or morphology.  Mask those patches after normalization so the
+            # representation cannot learn a constant treatment in regions
+            # where no causal field exists.  Defaults remain checkpoint-
+            # compatible for all existing experiments.
+            support = F.max_pool3d(
+                time_frequency.detach().abs().amax(dim=1, keepdim=True),
+                kernel_size=self.patch_size,
+                stride=self.patch_size,
+            )
+            support_tokens = support.flatten(2).transpose(1, 2).ne(0)
+            tokens = tokens * support_tokens.to(dtype=tokens.dtype)
+        return tokens, grid
 
     def residual_tokens(self, tokens: Tensor) -> Tensor:
         """Apply the checkpoint-compatible scalar gate to projected tokens."""
