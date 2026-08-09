@@ -132,18 +132,35 @@ support overlap, rendered-layer flow direction/endpoint error, and per-view
 latency. Report robot-support, nearby nonrobot foreground, and background
 regions separately where the observable evidence permits it.
 
-Advance to fixed-flow Wan conditioning only if `PREDICTED` beats both `RAW` and
-`SHUFFLED` on the registered primary alignment metric by at least 5%, both
-paired lower bounds are positive, at least 60% of clips favor `PREDICTED`, and
-no registered secondary metric materially regresses. `MEASURED` cannot make a
-failed causal arm pass.
+The primary alignment metric is symmetric rendered-silhouette boundary
+Chamfer. Advance to fixed-flow Wan conditioning only if `PREDICTED` beats both
+`RAW` and `SHUFFLED` on that primary by at least 5%, both paired lower bounds
+are positive, and at least 60% of clips favor `PREDICTED`. The fixed-region RGB
+robot-band Chamfer and rendered robot-only flow EPE must also favor
+`PREDICTED` over both controls with positive paired lower bounds, and
+silhouette IoU may not regress. `MEASURED` cannot make a failed causal arm
+pass.
 
 ## Gate C: V-JEPA 2-AC causal qualification
 
 Pin the official source and official `vjepa2-ac-vitg.pt` bytes. The released
 predictor was trained on monocular DROID clips using 7-D Cartesian state and
 action tokens, with only two autoregressive future steps in the official
-configuration. Therefore:
+configuration. The native contract is reproduced literally before adapting it:
+
+- state is `[xyz(3), Euler-xyz(3), gripper(1)]`; the cached LeRobot record's
+  eighth coordinate is the gripper and its seventh coordinate is padding,
+  despite misleading field metadata;
+- action is re-derived from successive states as translation difference,
+  relative rotation `R[t+1] @ R[t].T` expressed as Euler-xyz, and gripper
+  difference; the stored DROID action column is not substituted;
+- the eight 4-fps RGB frames are each duplicated into an independent two-frame
+  tubelet for the target encoder, exactly as in the released training loop;
+  they are not encoded as four adjacent-frame tubelets; and
+- source-line hashes, sampled padding/gripper statistics, tensor shapes, and a
+  hand-calculated action row are retained as contract evidence.
+
+Therefore:
 
 1. first run a native-contract DROID positive control;
 2. distinguish teacher-forced/logged-state diagnostics from inference-valid
