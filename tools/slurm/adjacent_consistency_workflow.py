@@ -963,7 +963,7 @@ def command_plan(args: argparse.Namespace) -> int:
                 "script": str(ROOT / "tools/slurm/adjacent_consistency.sbatch"),
                 "gpus": 8,
                 "gpu_type": "B200",
-                "time_limit_hours": 6,
+                "time_limit_hours": 2,
                 "submission_receipt": str(
                     root
                     / "_slurm_logs"

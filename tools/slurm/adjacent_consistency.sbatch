@@ -6,7 +6,7 @@
 #SBATCH --constraint=B200
 #SBATCH --cpus-per-task=160
 #SBATCH --mem=1000G
-#SBATCH --time=06:00:00
+#SBATCH --time=02:00:00
 #SBATCH --partition=batch
 #SBATCH --account=coreai_chef_posttrain
 #SBATCH --qos=short

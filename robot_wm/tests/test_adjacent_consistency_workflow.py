@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -58,7 +60,7 @@ def _authorization(
     "filename,gpus,hours",
     (
         ("adjacent_consistency_memory_smoke.sbatch", 1, "01:00:00"),
-        ("adjacent_consistency.sbatch", 8, "06:00:00"),
+        ("adjacent_consistency.sbatch", 8, "02:00:00"),
         ("adjacent_consistency_evaluate.sbatch", 8, "02:00:00"),
     ),
 )
@@ -92,6 +94,65 @@ def test_slurm_resources_are_exact_b200_non_requeueable(
         "git checkout",
     ):
         assert forbidden not in source
+
+
+def _sbatch_directives(filename: str) -> dict[str, str]:
+    directives = {}
+    for line in (SLURM / filename).read_text(encoding="utf-8").splitlines():
+        prefix = "#SBATCH --"
+        if not line.startswith(prefix):
+            continue
+        key, separator, value = line[len(prefix) :].partition("=")
+        if separator:
+            directives[key] = value
+    return directives
+
+
+def _slurm_seconds(value: str) -> int:
+    hours, minutes, seconds = (int(part) for part in value.split(":"))
+    return hours * 3600 + minutes * 60 + seconds
+
+
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "adjacent_consistency_memory_smoke.sbatch",
+        "adjacent_consistency.sbatch",
+        "adjacent_consistency_evaluate.sbatch",
+    ),
+)
+def test_each_acd_sbatch_time_fits_site_qos_and_partition_limits(
+    filename: str,
+) -> None:
+    directives = _sbatch_directives(filename)
+    assert directives["qos"] == "short"
+    assert directives["partition"] == "batch"
+    requested_seconds = _slurm_seconds(directives["time"])
+    assert requested_seconds <= 2 * 3600  # short QoS MaxWall
+    assert requested_seconds <= 4 * 3600  # batch partition MaxTime
+
+
+def test_workflow_plan_has_two_two_hour_training_specs(
+    monkeypatch, capsys
+) -> None:
+    registration = {
+        "output_root": "/mnt/data1/acd-test",
+        "tool_repository": {"git_commit": "a" * 40},
+        "identity_sha256": "b" * 64,
+    }
+    monkeypatch.setattr(workflow, "_registration", lambda _path: registration)
+    assert workflow.command_plan(
+        argparse.Namespace(registration=Path("/unused/registration.json"))
+    ) == 0
+    rendered = json.loads(capsys.readouterr().out)
+    train_specs = [
+        spec for spec in rendered["phases"] if spec["phase"] == "train"
+    ]
+    assert [spec["arm"] for spec in train_specs] == [
+        arm.code for arm in pilot.ARMS
+    ]
+    assert [spec["time_limit_hours"] for spec in train_specs] == [2, 2]
+    assert rendered["resource_plan"] == pilot.resource_plan()
 
 
 @pytest.mark.parametrize(

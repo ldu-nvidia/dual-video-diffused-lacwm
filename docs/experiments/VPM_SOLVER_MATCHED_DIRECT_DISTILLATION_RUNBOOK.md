@@ -169,9 +169,13 @@ novelty.
 
 ## Resource and stop contracts
 
-Maximum reservation is 113 B200-hours: one B200-hour memory smoke, two
-eight-B200 six-hour training allocations, and one eight-B200 two-hour
-evaluation. Persistent artifacts are capped at 100 GiB; jobs are non-requeue.
+Maximum reservation is 49 B200-hours: one B200-hour memory smoke, two
+eight-B200 two-hour training allocations, and one eight-B200 two-hour
+evaluation. The source-bound execution estimate, excluding queue delay, is
+4--6 wall-hours with the training arms in parallel or 6--8 wall-hours with
+them serialized. Every allocation uses the `short` QoS and remains within its
+two-hour maximum; the `batch` partition has a four-hour maximum. Persistent
+artifacts are capped at 100 GiB; jobs are non-requeue.
 Stop on any source/config/data/state/call/access mismatch, nonfinite update,
 AMP-skipped optimizer transaction, memory-gate failure, or authorization
 failure. Do not repair, resume, retune, or select an unregistered endpoint
