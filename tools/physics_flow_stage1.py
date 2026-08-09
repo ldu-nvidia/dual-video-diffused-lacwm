@@ -18,8 +18,8 @@ The workflow has fail-closed state transitions:
 ``audit-cache``
     Rehash every artifact and reconstruct all deterministic interventions.
 ``register-study``
-    Seal the two-arm training and equal-Wan-call evaluation gate before video
-    model training or generated-video outcome access.
+    Seal the two-arm training plus untouched-parent equal-Wan-call evaluation
+    gate before video model training or generated-video outcome access.
 ``compare-traces`` / ``analyze`` / ``audit-study``
     Validate matched training, compute the preregistered paired analysis, and
     independently replay the evidence inventory.
@@ -127,6 +127,14 @@ PARENT_RUN_IDENTITY_SHA256 = (
 PARENT_CANONICAL_MODEL_STATE_SHA256 = (
     "d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0"
 )
+PARENT_RESOLVED_CONFIG_SHA256 = (
+    "ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38"
+)
+PARENT_EVALUATION_MODEL_CODE = "PARENT-VPM"
+PARENT_PARITY_KIND = "raw_physics_flow_native_parent_sampler_parity"
+PARENT_PARITY_FILENAME = "parent_sampler_parity.json"
+PARENT_PARITY_TRAIN_INDEX = 0
+PARENT_PARITY_SAMPLE_ID = 7_000_000
 LEGACY_REJECTED_SNAPSHOT_SHA256 = (
     "f67c7bae50c4c279bf6372e098833be32699aca24232d7d489a1f7a45b5a8e21"
 )
@@ -271,6 +279,15 @@ ENDPOINTS = tuple(
         nfe == 1,
     )
     for source in RUNTIME_SOURCES
+    for nfe in NFE_GRID
+) + tuple(
+    Endpoint(
+        f"parent_vpm_off_nfe_{nfe}",
+        PARENT_EVALUATION_MODEL_CODE,
+        nfe,
+        "off",
+        nfe == 1,
+    )
     for nfe in NFE_GRID
 )
 ENDPOINT_BY_CODE = {endpoint.code: endpoint for endpoint in ENDPOINTS}
@@ -1959,6 +1976,8 @@ def _study_source_files(repo: Path) -> dict[str, Any]:
         "docs/experiments/PHYSICS_FLOW_PARENT_LINEAGE.md",
         "tools/physics_flow_stage1.py",
         "tools/physics_flow_stage1_evaluate.py",
+        "tools/physics_flow_parent_vpm.py",
+        "tools/physics_flow_parent_parity.py",
         "tools/physics_flow_lpips.py",
         "tools/snapshot_model_state_receipt.py",
         "tools/physics_flow_stage1_workflow.py",
@@ -2201,6 +2220,15 @@ def command_register_study(args: argparse.Namespace) -> int:
     parent = file_record(args.parent_snapshot)
     if parent["sha256"] != PARENT_SNAPSHOT_SHA256:
         raise PhysicsFlowStage1Error("VPM parent snapshot differs")
+    parent_resolved_config = file_record(args.parent_resolved_config)
+    if (
+        parent_resolved_config["sha256"] != PARENT_RESOLVED_CONFIG_SHA256
+        or Path(parent_resolved_config["path"]).name
+        != "resolved_update_1000.yaml"
+        or Path(parent_resolved_config["path"]).parent
+        != Path(parent["path"]).parent
+    ):
+        raise PhysicsFlowStage1Error("VPM parent resolved config differs")
     try:
         import torch
 
@@ -2259,6 +2287,7 @@ def command_register_study(args: argparse.Namespace) -> int:
             "flow_caches": {"train": train_cache, "val": val_cache},
             "parent": {
                 "snapshot": parent,
+                "resolved_config": parent_resolved_config,
                 "run_identity_sha256": PARENT_RUN_IDENTITY_SHA256,
                 "canonical_model_state_sha256": (
                     PARENT_CANONICAL_MODEL_STATE_SHA256
@@ -2267,6 +2296,7 @@ def command_register_study(args: argparse.Namespace) -> int:
                 "completed_updates": 1000,
                 "ema": False,
                 "sole_parent_and_control": True,
+                "native_evaluation_endpoint": PARENT_EVALUATION_MODEL_CODE,
                 "direct_residual_weights_or_outcomes_imported": False,
             },
             "parent_performance_lineage": parent_lineage,
@@ -2301,6 +2331,23 @@ def command_register_study(args: argparse.Namespace) -> int:
                 "same_noise_across_all_endpoints": True,
                 "equal_Wan_calls_within_each_nfe_contrast": True,
                 "complete_noise_by_endpoint_materialization_before_future_rgb_open": True,
+                "untouched_parent_evaluation_only": True,
+                "native_parent_parity_required_before_validation_open": True,
+                "native_parent_parity": {
+                    "kind": PARENT_PARITY_KIND,
+                    "output": str(output / PARENT_PARITY_FILENAME),
+                    "input_split": "train",
+                    "clip_index": PARENT_PARITY_TRAIN_INDEX,
+                    "rgb_indexed_frames_half_open": [0, 5],
+                    "sample_id": PARENT_PARITY_SAMPLE_ID,
+                    "condition_source": "off",
+                    "nfe_grid": list(NFE_GRID),
+                    "public_reference_method": "sample_future_deployable",
+                    "adapter_method": "materialize_native_parent_endpoint",
+                    "bitwise_parity_required": True,
+                    "future_rgb_bytes_opened": False,
+                    "validation_dataset_opened": False,
+                },
                 "top_view_pixel_columns": [0, 320],
                 "top_view_latent_columns": [0, 40],
                 "metrics": [
@@ -2310,7 +2357,8 @@ def command_register_study(args: argparse.Namespace) -> int:
                     "all_decoded_mse",
                     "all_temporal_mse",
                     "future_video_latent_nmse",
-                    "latency_components",
+                    "continuation_latency_components",
+                    "native_parent_end_to_end_latency_only",
                 ],
                 "bootstrap": {
                     "episode_clustered": True,
@@ -2321,6 +2369,19 @@ def command_register_study(args: argparse.Namespace) -> int:
             },
             "primary_gate": {
                 "nfe": PRIMARY_NFE,
+                "raw_vs_unmodified_parent_vpm": {
+                    "top_decoded_and_temporal_min_point_improvement_percent": (
+                        PRIMARY_MIN_POINT_PERCENT
+                    ),
+                    "top_decoded_and_temporal_lower_bound_percent_strictly_above": (
+                        PRIMARY_MIN_CI_PERCENT
+                    ),
+                    "top_lpips_lower_bound_percent_strictly_positive": True,
+                    "all_view_and_latent_point_nonnegative": True,
+                    "all_view_and_latent_lower_bound_percent_above": (
+                        GUARDRAIL_CI_PERCENT
+                    ),
+                },
                 "raw_vs_matched_flow_off": {
                     "top_decoded_and_temporal_min_point_improvement_percent": (
                         PRIMARY_MIN_POINT_PERCENT
@@ -2383,6 +2444,9 @@ def command_register_study(args: argparse.Namespace) -> int:
 
 def validate_study_registration(path: Path) -> dict[str, Any]:
     registration = read_json(path, "study registration")
+    parity_contract = registration.get("evaluation_contract", {}).get(
+        "native_parent_parity", {}
+    )
     if (
         not identity_valid(registration)
         or registration.get("kind") != STUDY_REGISTRATION_KIND
@@ -2391,12 +2455,18 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         or registration.get("parent", {}).get("sole_parent_and_control") is not True
         or registration.get("parent", {}).get("snapshot", {}).get("sha256")
         != PARENT_SNAPSHOT_SHA256
+        or registration.get("parent", {}).get("resolved_config", {}).get(
+            "sha256"
+        )
+        != PARENT_RESOLVED_CONFIG_SHA256
         or registration.get("parent", {}).get("run_identity_sha256")
         != PARENT_RUN_IDENTITY_SHA256
         or registration.get("parent", {}).get("canonical_model_state_sha256")
         != PARENT_CANONICAL_MODEL_STATE_SHA256
         or registration.get("parent", {}).get("model_schema_sha256")
         != PARENT_MODEL_SCHEMA_SHA256
+        or registration.get("parent", {}).get("native_evaluation_endpoint")
+        != PARENT_EVALUATION_MODEL_CODE
         or registration.get("parent", {}).get(
             "direct_residual_weights_or_outcomes_imported"
         )
@@ -2405,6 +2475,30 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
             "complete_noise_by_endpoint_materialization_before_future_rgb_open"
         )
         is not True
+        or registration.get("evaluation_contract", {}).get(
+            "untouched_parent_evaluation_only"
+        )
+        is not True
+        or registration.get("evaluation_contract", {}).get(
+            "native_parent_parity_required_before_validation_open"
+        )
+        is not True
+        or registration.get("evaluation_contract", {}).get("endpoints")
+        != [asdict(endpoint) for endpoint in ENDPOINTS]
+        or parity_contract.get("kind") != PARENT_PARITY_KIND
+        or parity_contract.get("input_split") != "train"
+        or parity_contract.get("clip_index") != PARENT_PARITY_TRAIN_INDEX
+        or parity_contract.get("rgb_indexed_frames_half_open") != [0, 5]
+        or parity_contract.get("sample_id") != PARENT_PARITY_SAMPLE_ID
+        or parity_contract.get("condition_source") != "off"
+        or parity_contract.get("nfe_grid") != list(NFE_GRID)
+        or parity_contract.get("public_reference_method")
+        != "sample_future_deployable"
+        or parity_contract.get("adapter_method")
+        != "materialize_native_parent_endpoint"
+        or parity_contract.get("bitwise_parity_required") is not True
+        or parity_contract.get("future_rgb_bytes_opened") is not False
+        or parity_contract.get("validation_dataset_opened") is not False
         or not isinstance(
             registration.get("runtime", {}).get("lpips_alex"), Mapping
         )
@@ -2433,6 +2527,10 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
     output = Path(registration["output_root"]).resolve(strict=True)
     if path.resolve(strict=True) != output / "registration.json":
         raise PhysicsFlowStage1Error("study registration path is noncanonical")
+    if Path(str(parity_contract.get("output", ""))).absolute() != (
+        output / PARENT_PARITY_FILENAME
+    ):
+        raise PhysicsFlowStage1Error("native parent parity output differs")
     source = registration["source_repository"]
     if clean_repository(
         Path(source["path"]), source["git_commit"], "study source"
@@ -2456,6 +2554,12 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         "parent"
     ]["snapshot"]:
         raise PhysicsFlowStage1Error("parent snapshot changed after registration")
+    if file_record(
+        Path(registration["parent"]["resolved_config"]["path"])
+    ) != registration["parent"]["resolved_config"]:
+        raise PhysicsFlowStage1Error(
+            "parent resolved config changed after registration"
+        )
     lineage = registration.get("parent_performance_lineage", {})
     if (
         lineage.get("selected_parent", {}).get("canonical_model_state_sha256")
@@ -2488,6 +2592,128 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         if file_record(Path(record["path"])) != record:
             raise PhysicsFlowStage1Error("parent lineage artifact changed")
     return registration
+
+
+def load_parent_sampler_parity(
+    registration: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate the pre-validation target-blind native parent parity receipt."""
+
+    root = Path(registration["output_root"])
+    path = root / PARENT_PARITY_FILENAME
+    parity = read_json(path, "native parent sampler parity")
+    contract = registration["evaluation_contract"]["native_parent_parity"]
+    comparisons = parity.get("comparisons")
+    if (
+        path.resolve(strict=True) != Path(contract["output"]).resolve(strict=True)
+        or not identity_valid(parity)
+        or parity.get("kind") != PARENT_PARITY_KIND
+        or parity.get("status")
+        != "bitwise_native_parent_sampler_parity_passed"
+        or parity.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or parity.get("public_reference_method")
+        != contract["public_reference_method"]
+        or parity.get("evaluation_adapter_method") != contract["adapter_method"]
+        or parity.get("condition_source") != "off"
+        or parity.get("schedule_mode") != "aligned"
+        or parity.get("nfe_grid") != list(NFE_GRID)
+        or parity.get("bitwise_parity_required") is not True
+        or parity.get("all_bitwise") is not True
+        or parity.get("validation_dataset_opened") is not False
+        or parity.get("future_rgb_bytes_opened") is not False
+        or parity.get("future_measured_state_opened") is not False
+        or parity.get("online_teacher_or_feature_calls") != 0
+        or parity.get("protected_test_accessed") is not False
+        or not isinstance(comparisons, list)
+        or len(comparisons) != len(NFE_GRID)
+    ):
+        raise PhysicsFlowStage1Error("native parent sampler parity differs")
+    parent = parity.get("parent")
+    if (
+        not isinstance(parent, Mapping)
+        or parent.get("snapshot") != registration["parent"]["snapshot"]
+        or parent.get("resolved_config")
+        != registration["parent"]["resolved_config"]
+        or parent.get("run_identity_sha256") != PARENT_RUN_IDENTITY_SHA256
+        or parent.get("canonical_model_state_sha256")
+        != PARENT_CANONICAL_MODEL_STATE_SHA256
+        or parent.get("model_schema_sha256") != PARENT_MODEL_SCHEMA_SHA256
+        or parent.get("strict_state_load") is not True
+        or parent.get("native_public_sampler")
+        != "sample_future_deployable"
+        or parent.get("continued_training_updates") != 0
+        or parent.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("native parent parity state binding differs")
+    input_evidence = parity.get("input")
+    train_metadata = load_cache_metadata(
+        Path(registration["flow_caches"]["train"]["metadata"]["path"]),
+        split="train",
+    )
+    cache_registration = read_json(
+        Path(train_metadata["cache_registration"]["path"]),
+        "cache registration",
+    )
+    immutable = cache_registration["inputs"]["train"]["cache"]["arrays"]
+    descriptor = cache_registration["splits"]["train"]["descriptors"][
+        PARENT_PARITY_TRAIN_INDEX
+    ]
+    if (
+        not isinstance(input_evidence, Mapping)
+        or input_evidence.get("split") != "train"
+        or input_evidence.get("clip_index") != PARENT_PARITY_TRAIN_INDEX
+        or input_evidence.get("clip_id") != descriptor["clip_id"]
+        or input_evidence.get("rgb_indexed_frames_half_open") != [0, 5]
+        or input_evidence.get("rgb_future_frames_indexed") is not False
+        or input_evidence.get("actions_indexed_frames_half_open") != [0, 13]
+        or input_evidence.get("sample_id") != PARENT_PARITY_SAMPLE_ID
+        or input_evidence.get("immutable_rgb_array") != immutable["rgb"]
+        or input_evidence.get("immutable_actions_array") != immutable["actions"]
+        or input_evidence.get("future_rgb_bytes_opened") is not False
+        or input_evidence.get("future_measured_state_opened") is not False
+        or input_evidence.get("protected_test_accessed") is not False
+        or any(
+            SHA256_RE.fullmatch(str(input_evidence.get(name, ""))) is None
+            for name in (
+                "history_rgb_sha256",
+                "actions_sha256",
+                "morphology_index_sha256",
+            )
+        )
+    ):
+        raise PhysicsFlowStage1Error("native parent parity input differs")
+    by_nfe = {row.get("nfe"): row for row in comparisons if isinstance(row, Mapping)}
+    if set(by_nfe) != set(NFE_GRID):
+        raise PhysicsFlowStage1Error("native parent parity NFE population differs")
+    for nfe, row in by_nfe.items():
+        if (
+            row.get("direct_native_wan_calls") != nfe
+            or row.get("adapter_wan_calls") != nfe
+            or row.get("latent_bitwise_equal") is not True
+            or row.get("decoded_uint8_bitwise_equal") is not True
+            or row.get("initial_video_noise_fp16_bitwise_equal") is not True
+            or row.get(
+                "adapter_full_precision_initial_noise_bitwise_equal"
+            )
+            is not True
+            or row.get("direct_latent_sha256")
+            != row.get("adapter_latent_sha256")
+            or row.get("direct_decoded_sha256")
+            != row.get("adapter_decoded_sha256")
+            or any(
+                SHA256_RE.fullmatch(str(row.get(name, ""))) is None
+                for name in (
+                    "explicit_video_noise_sha256",
+                    "direct_latent_sha256",
+                    "direct_decoded_sha256",
+                )
+            )
+        ):
+            raise PhysicsFlowStage1Error(
+                f"native parent parity comparison differs at NFE {nfe}"
+            )
+    return parity, file_record(path)
 
 
 def _training_trace(
@@ -2707,6 +2933,7 @@ LOWER_BETTER_METRICS = (
 def load_evaluation_rows(
     registration: Mapping[str, Any]
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    parent_parity, parent_parity_record = load_parent_sampler_parity(registration)
     root = Path(registration["output_root"]) / "evaluation"
     inventory_path = root / "inventory.json"
     inventory = read_json(inventory_path, "evaluation inventory")
@@ -2725,6 +2952,11 @@ def load_evaluation_rows(
         or inventory.get("lpips_evaluator")
         != registration.get("runtime", {}).get("lpips_alex")
         or inventory.get("lpips_same_on_all_ranks_and_all_arm_endpoints") is not True
+        or inventory.get("native_parent_sampler_parity")
+        != parent_parity_record
+        or inventory.get("native_parent_sampler_parity_identity_sha256")
+        != parent_parity["identity_sha256"]
+        or inventory.get("unmodified_de65_parent_endpoint_included") is not True
         or inventory.get("future_rgb_sampler_input") is not False
         or inventory.get("future_measured_state_sampler_input") is not False
         or inventory.get("protected_test_accessed") is not False
@@ -2750,6 +2982,20 @@ def load_evaluation_rows(
             receipts[rank], parent=root, label=f"rank {rank} receipt"
         )
         receipt = read_json(receipt_path, f"rank {rank} receipt")
+        local_indexes = receipt.get("d405_clip_indexes", [])
+        local_batches = math.ceil(len(local_indexes) / 2)
+        expected_transformer_calls = {
+            "FLOW-OFF": local_batches * len(NOISE_SEEDS) * sum(NFE_GRID),
+            "RAW-FLOW": (
+                local_batches
+                * len(NOISE_SEEDS)
+                * len(RUNTIME_SOURCES)
+                * sum(NFE_GRID)
+            ),
+            PARENT_EVALUATION_MODEL_CODE: (
+                local_batches * len(NOISE_SEEDS) * sum(NFE_GRID)
+            ),
+        }
         if (
             receipt_path != (root / f"rank_{rank:02d}.json").resolve(strict=True)
             or not identity_valid(receipt)
@@ -2766,6 +3012,14 @@ def load_evaluation_rows(
             or receipt.get("rows") != len(rank_rows)
             or receipt.get("lpips_evaluator_identity_sha256")
             != registration["runtime"]["lpips_alex"]["identity_sha256"]
+            or receipt.get("native_parent_sampler_parity")
+            != parent_parity_record
+            or receipt.get("native_parent_sampler_parity_identity_sha256")
+            != parent_parity["identity_sha256"]
+            or receipt.get("transformer_calls_by_evaluation_model")
+            != expected_transformer_calls
+            or receipt.get("expected_transformer_calls_by_evaluation_model")
+            != expected_transformer_calls
             or receipt.get("protected_test_accessed") is not False
         ):
             raise PhysicsFlowStage1Error(f"rank {rank} evaluation receipt differs")
@@ -2784,6 +3038,37 @@ def load_evaluation_rows(
         key = (row.get("clip_index"), row.get("noise_seed_id"), str(code))
         metrics = row.get("metrics")
         seam = row.get("seam_diagnostics")
+        latency = row.get("latency_seconds")
+        latency_values = (
+            "history_encode_seconds",
+            "adapter_and_wan_seconds",
+            "decode_seconds",
+            "end_to_end_seconds",
+        )
+        if endpoint is not None and endpoint.arm == PARENT_EVALUATION_MODEL_CODE:
+            latency_valid = (
+                isinstance(latency, Mapping)
+                and latency.get("measurement_scope")
+                == "native_public_sampler_end_to_end_only"
+                and all(latency.get(name) is None for name in latency_values[:3])
+                and isinstance(latency.get(latency_values[3]), (int, float))
+                and not isinstance(latency.get(latency_values[3]), bool)
+                and math.isfinite(float(latency[latency_values[3]]))
+                and float(latency[latency_values[3]]) >= 0.0
+            )
+        else:
+            latency_valid = (
+                isinstance(latency, Mapping)
+                and latency.get("measurement_scope")
+                == "component_and_end_to_end"
+                and all(
+                    isinstance(latency.get(name), (int, float))
+                    and not isinstance(latency.get(name), bool)
+                    and math.isfinite(float(latency[name]))
+                    and float(latency[name]) >= 0.0
+                    for name in latency_values
+                )
+            )
         if (
             not identity_valid(row)
             or row.get("kind") != EVALUATION_KIND
@@ -2791,10 +3076,35 @@ def load_evaluation_rows(
             != registration["identity_sha256"]
             or endpoint is None
             or endpoint_value != asdict(endpoint)
+            or not latency_valid
             or key not in expected_keys
             or key in observed
             or row.get("actual_transformer_call_count") != endpoint.nfe
             or row.get("flow_model_call_count") != 0
+            or row.get("online_teacher_or_feature_calls") != 0
+            or row.get("native_parent_sampler")
+            is not (endpoint.arm == PARENT_EVALUATION_MODEL_CODE)
+            or row.get("native_parent_full_precision_noise_verified")
+            is not (endpoint.arm == PARENT_EVALUATION_MODEL_CODE)
+            or row.get("native_parent_sampler_parity_identity_sha256")
+            != parent_parity["identity_sha256"]
+            or not isinstance(row.get("arm_artifacts"), Mapping)
+            or (
+                endpoint.arm == PARENT_EVALUATION_MODEL_CODE
+                and (
+                    row["arm_artifacts"].get("snapshot")
+                    != registration["parent"]["snapshot"]
+                    or row["arm_artifacts"].get("resolved_config")
+                    != registration["parent"]["resolved_config"]
+                    or row["arm_artifacts"].get("canonical_model_state_sha256")
+                    != PARENT_CANONICAL_MODEL_STATE_SHA256
+                    or row["arm_artifacts"].get("strict_state_load") is not True
+                    or row["arm_artifacts"].get("native_public_sampler")
+                    != "sample_future_deployable"
+                    or row["arm_artifacts"].get("continued_training_updates")
+                    != 0
+                )
+            )
             or row.get("future_rgb_sampler_input") is not False
             or row.get("future_measured_state_sampler_input") is not False
             or row.get("all_endpoints_materialized_before_future_rgb_open") is not True
@@ -2941,13 +3251,23 @@ def analyze_study(
         if replay_pairing.get(key) != value:
             raise PhysicsFlowStage1Error(f"training pairing replay differs at {key}")
     rows, inventory = load_evaluation_rows(registration)
+    parent_parity, _parent_parity_record = load_parent_sampler_parity(
+        registration
+    )
     raw_code = "raw_checkpoint_raw_nfe_1"
     baseline_code = "matched_off_nfe_1"
+    parent_code = "parent_vpm_off_nfe_1"
     raw_rows = _endpoint_rows(rows, raw_code)
     effects = {}
     effects["raw_vs_matched_off"] = {
         metric: _paired_cluster_effect(
             raw_rows, _endpoint_rows(rows, baseline_code), metric
+        )
+        for metric in LOWER_BETTER_METRICS
+    }
+    effects["raw_vs_unmodified_parent_vpm"] = {
+        metric: _paired_cluster_effect(
+            raw_rows, _endpoint_rows(rows, parent_code), metric
         )
         for metric in LOWER_BETTER_METRICS
     }
@@ -2975,16 +3295,43 @@ def analyze_study(
             )
             for metric in LOWER_BETTER_METRICS
         }
+        secondary[f"nfe_{nfe}_raw_vs_unmodified_parent_vpm"] = {
+            metric: _paired_cluster_effect(
+                _endpoint_rows(rows, f"raw_checkpoint_raw_nfe_{nfe}"),
+                _endpoint_rows(rows, f"parent_vpm_off_nfe_{nfe}"),
+                metric,
+            )
+            for metric in LOWER_BETTER_METRICS
+        }
     baseline_effect = effects["raw_vs_matched_off"]
-    decoded_primary = all(
+    parent_effect = effects["raw_vs_unmodified_parent_vpm"]
+    matched_decoded_primary = all(
         baseline_effect[metric]["relative_improvement_percent"]
         >= PRIMARY_MIN_POINT_PERCENT
         and baseline_effect[metric]["paired_episode_cluster_bootstrap_95_ci_percent"][0]
         > PRIMARY_MIN_CI_PERCENT
         for metric in ("top_decoded_mse_unit_range", "top_temporal_mse_unit_range")
     )
-    lpips_primary = (
+    matched_lpips_primary = (
         baseline_effect["top_lpips_alex"][
+            "paired_episode_cluster_bootstrap_95_ci_percent"
+        ][0]
+        > 0.0
+    )
+    parent_decoded_primary = all(
+        parent_effect[metric]["relative_improvement_percent"]
+        >= PRIMARY_MIN_POINT_PERCENT
+        and parent_effect[metric][
+            "paired_episode_cluster_bootstrap_95_ci_percent"
+        ][0]
+        > PRIMARY_MIN_CI_PERCENT
+        for metric in (
+            "top_decoded_mse_unit_range",
+            "top_temporal_mse_unit_range",
+        )
+    )
+    parent_lpips_primary = (
+        parent_effect["top_lpips_alex"][
             "paired_episode_cluster_bootstrap_95_ci_percent"
         ][0]
         > 0.0
@@ -2999,19 +3346,32 @@ def analyze_study(
             > 0.0
             for metric in ("top_decoded_mse_unit_range", "top_temporal_mse_unit_range")
         )
-    guardrails = {}
+    matched_guardrails = {}
+    parent_guardrails = {}
     for metric in (
         "all_decoded_mse_unit_range",
         "all_temporal_mse_unit_range",
         "future_video_latent_nmse",
     ):
         effect = baseline_effect[metric]
-        guardrails[metric] = (
+        matched_guardrails[metric] = (
             effect["relative_improvement_percent"] >= 0.0
             and effect["paired_episode_cluster_bootstrap_95_ci_percent"][0]
             > GUARDRAIL_CI_PERCENT
         )
+        parent_metric_effect = parent_effect[metric]
+        parent_guardrails[metric] = (
+            parent_metric_effect["relative_improvement_percent"] >= 0.0
+            and parent_metric_effect[
+                "paired_episode_cluster_bootstrap_95_ci_percent"
+            ][0]
+            > GUARDRAIL_CI_PERCENT
+        )
     causal = {
+        "native_parent_sampler_bitwise_parity_before_validation": (
+            parent_parity["all_bitwise"] is True
+            and parent_parity["validation_dataset_opened"] is False
+        ),
         "paired_200_update_trace": pairing["paired_updates"] == 200,
         "all_primary_rows_one_Wan_call": all(
             row["actual_transformer_call_count"] == 1
@@ -3030,10 +3390,13 @@ def analyze_study(
         ),
     }
     passed = (
-        decoded_primary
-        and lpips_primary
+        matched_decoded_primary
+        and matched_lpips_primary
+        and parent_decoded_primary
+        and parent_lpips_primary
         and all(attribution.values())
-        and all(guardrails.values())
+        and all(matched_guardrails.values())
+        and all(parent_guardrails.values())
         and all(causal.values())
     )
     decision = "ADVANCE_RAW_FLOW_SCAFFOLD" if passed else "STOP_FIXED_RAW_FLOW"
@@ -3112,10 +3475,19 @@ def analyze_study(
             "effects": effects,
             "secondary_dose_response": secondary,
             "gate": {
-                "raw_vs_matched_off_top_decoded_and_temporal": decoded_primary,
-                "raw_vs_matched_off_top_lpips": lpips_primary,
+                "raw_vs_unmodified_parent_vpm_top_decoded_and_temporal": (
+                    parent_decoded_primary
+                ),
+                "raw_vs_unmodified_parent_vpm_top_lpips": (
+                    parent_lpips_primary
+                ),
+                "raw_vs_unmodified_parent_vpm_guardrails": parent_guardrails,
+                "raw_vs_matched_off_top_decoded_and_temporal": (
+                    matched_decoded_primary
+                ),
+                "raw_vs_matched_off_top_lpips": matched_lpips_primary,
                 "same_checkpoint_attribution": attribution,
-                "guardrails": guardrails,
+                "raw_vs_matched_off_guardrails": matched_guardrails,
                 "causal_and_compute": causal,
                 "all_conditions_required": True,
                 "passed": passed,
@@ -3144,6 +3516,9 @@ def command_analyze(args: argparse.Namespace) -> int:
 def command_audit_study(args: argparse.Namespace) -> int:
     registration = validate_study_registration(args.registration)
     pairing = compare_training_traces(registration, write=False)
+    parent_parity, parent_parity_record = load_parent_sampler_parity(
+        registration
+    )
     rows, inventory = load_evaluation_rows(registration)
     analysis_path = Path(registration["output_root"]) / "analysis" / "analysis.json"
     analysis = read_json(analysis_path, "study analysis")
@@ -3162,7 +3537,7 @@ def command_audit_study(args: argparse.Namespace) -> int:
             continue
         if replay.get(key) != value:
             raise PhysicsFlowStage1Error(f"analysis replay differs at {key}")
-    artifact_hashes = 0
+    artifact_hashes = 1  # target-blind native parent parity receipt
     for record in inventory["rank_files"]:
         _resolve_record(
             record,
@@ -3179,6 +3554,7 @@ def command_audit_study(args: argparse.Namespace) -> int:
         artifact_hashes += 1
     false_flags = require_false_flags(registration, "registration")
     false_flags += require_false_flags(pairing, "pairing")
+    false_flags += require_false_flags(parent_parity, "parent parity")
     false_flags += require_false_flags(inventory, "inventory")
     false_flags += require_false_flags(rows, "rows")
     false_flags += require_false_flags(analysis, "analysis")
@@ -3190,6 +3566,10 @@ def command_audit_study(args: argparse.Namespace) -> int:
             "audited_at_utc": now(),
             "registration_identity_sha256": registration["identity_sha256"],
             "training_pairing_identity_sha256": pairing["identity_sha256"],
+            "native_parent_sampler_parity_identity_sha256": parent_parity[
+                "identity_sha256"
+            ],
+            "native_parent_sampler_parity": parent_parity_record,
             "evaluation_inventory_identity_sha256": inventory["identity_sha256"],
             "analysis_identity_sha256": analysis["identity_sha256"],
             "decision": analysis["decision"],
@@ -3201,6 +3581,8 @@ def command_audit_study(args: argparse.Namespace) -> int:
             "artifact_hashes_verified": artifact_hashes,
             "explicit_false_flags": false_flags,
             "equal_Wan_calls_verified": True,
+            "unmodified_de65_parent_endpoint_verified": True,
+            "native_parent_sampler_bitwise_parity_verified": True,
             "lpips_evaluator_identity_sha256": registration["runtime"][
                 "lpips_alex"
             ]["identity_sha256"],
@@ -3254,6 +3636,7 @@ def build_parser() -> argparse.ArgumentParser:
     study.add_argument("--train-flow-metadata", type=Path, required=True)
     study.add_argument("--val-flow-metadata", type=Path, required=True)
     study.add_argument("--parent-snapshot", type=Path, required=True)
+    study.add_argument("--parent-resolved-config", type=Path, required=True)
     study.add_argument("--legacy-parent-snapshot", type=Path, required=True)
     study.add_argument("--lineage-failed-log", type=Path, required=True)
     study.add_argument("--lineage-comparison-log", type=Path, required=True)

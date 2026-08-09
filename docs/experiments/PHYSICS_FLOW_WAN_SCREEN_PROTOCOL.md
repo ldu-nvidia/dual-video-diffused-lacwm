@@ -32,7 +32,9 @@ older `f67c7bae…` snapshot: although its 1,686-tensor schema matches, 495 mode
 tensors differ from the faithful-cascade frontier. Both arms therefore use
 only `de65e832…/d79c3699…`; the registration binds both canonical model-state
 hashes, the full mismatch receipt, its failed predecessor, and the ladder and
-direct-residual lineages.
+direct-residual lineages. It also binds the exact parent resolved configuration
+with SHA-256
+`ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38`.
 
 Recurrent-delta and hybrid-anchor trajectories are deliberately excluded. The
 fresh renderer study found a large recurrent flow improvement but did not pass
@@ -175,6 +177,8 @@ Use every prospectively registered D405 val64 row, stateless noise IDs
 0/1/2/3, and NFE 1/2/4. For each evaluation batch, materialize the complete
 noise-by-endpoint grid below to CPU before opening any clean future RGB bytes:
 
+- the untouched update-1,000 `PARENT-VPM` with its native condition-off public
+  deployable sampler and no continuation updates;
 - `FLOW-OFF` checkpoint with condition off;
 - `RAW-FLOW` checkpoint with `raw`;
 - the same `RAW-FLOW` checkpoint with `off`, `episode_shuffled`,
@@ -182,6 +186,19 @@ noise-by-endpoint grid below to CPU before opening any clean future RGB bytes:
 
 All same-NFE contrasts use identical explicit video noise and exactly NFE Wan
 calls. No endpoint makes a field-model, teacher, or online feature call.
+
+Before the validation mmap is constructed, a separate fail-closed receipt uses
+only frames 0:5 and candidate actions from prospectively fixed immutable train
+clip 0. At NFE 1/2/4 it compares the evaluation adapter bit-for-bit with a
+direct invocation of the exact de65 model's public
+`sample_future_deployable` method under condition off, its native aligned VPM
+schedule, and fixed sample ID 7,000,000. The snapshot, canonical 1,686-tensor
+state identity, resolved configuration, input hashes, explicit video noise,
+full-precision equality between that noise and the first Wan input, Wan-call
+counts, final latent, and decoded uint8 output are bound in
+`parent_sampler_parity.json`. Any non-bitwise result stops before validation
+outcomes; no train future RGB, validation RGB, future measured state, teacher,
+or protected test data are opened by this proof.
 
 Primary scope is top-view pixels 0:320 / latent columns 0:40 at NFE 1. Report:
 
@@ -191,6 +208,11 @@ Primary scope is top-view pixels 0:320 / latent columns 0:40 at NFE 1. Report:
 - all-view decoded and temporal MSE;
 - future video-latent NMSE; and
 - history VAE, adapter-plus-Wan, decoder, and end-to-end latency.
+
+Component latency is reported for the two continuation models. To keep the
+untouched parent's public sampler unmodified, its timing field reports only the
+native public-call end-to-end duration; it is a quality/catastrophic-regression
+control and is excluded from any component-latency claim.
 
 LPIPS is a registered offline instrument, not a runtime dependency fetched
 after outcomes. Registration hashes the installed LPIPS implementation and
@@ -221,18 +243,25 @@ with seed 20260831; all four noise seeds remain inside their episode cluster.
 
 `ADVANCE_RAW_FLOW_SCAFFOLD` requires every condition:
 
-1. Versus matched `FLOW-OFF`, NFE-1 raw improves top-view decoded and temporal
+1. Versus the untouched de65 `PARENT-VPM`, NFE-1 raw improves top-view decoded
+   and temporal MSE by at least 3%, with paired lower bounds strictly above 1%,
+   and has a strictly positive LPIPS improvement lower bound. All-view decoded
+   and temporal MSE and latent NMSE must have nonnegative point effects and
+   lower bounds strictly above -1%.
+2. Versus matched `FLOW-OFF`, NFE-1 raw improves top-view decoded and temporal
    MSE by at least 3%, with paired lower bounds strictly above 1%.
-2. Versus matched `FLOW-OFF`, top-view LPIPS has a strictly positive lower
+3. Versus matched `FLOW-OFF`, top-view LPIPS has a strictly positive lower
    improvement bound.
-3. At the same `RAW-FLOW` checkpoint, raw beats each of off, episode-shuffled,
+4. At the same `RAW-FLOW` checkpoint, raw beats each of off, episode-shuffled,
    +1 time, and hold on both top decoded and temporal MSE by at least 1%, with
    strictly positive lower bounds.
-4. Versus matched `FLOW-OFF`, all-view decoded and temporal MSE and latent NMSE
+5. Versus matched `FLOW-OFF`, all-view decoded and temporal MSE and latent NMSE
    have nonnegative point effects and lower bounds strictly above -1%.
-5. The exact 200-update pairing trace passes; every NFE-1 endpoint reports one
-   Wan call; flow-model calls are zero; future RGB and future measured state do
-   not enter cache prediction or sampling; and protected test remains unopened.
+6. Native-parent train-history parity passes bit-for-bit before validation is
+   opened; the exact 200-update pairing trace passes; every NFE-1 endpoint
+   reports one Wan call; flow-model calls are zero; future RGB and future
+   measured state do not enter cache prediction or sampling; and protected test
+   remains unopened.
 
 Otherwise the decision is `STOP_FIXED_RAW_FLOW`. No secondary endpoint or
 qualitative video can override the gate.

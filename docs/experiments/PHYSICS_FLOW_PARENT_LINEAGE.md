@@ -20,6 +20,8 @@ The faithful-cascade causal-compressibility frontier instead used:
 - file SHA-256: `de65e832c56f82be1472edb1fd789e16d3a6c8a7adc9b1f31306779951cb463a`
 - run identity: `d79c3699f0c68dcd17321fcb0ea2846fca4d96f8c815f91dff02a19d3140787f`
 - canonical model-state SHA-256: `d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0`
+- resolved update-1,000 configuration SHA-256:
+  `ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38`
 
 Both checkpoints contain 1,686 tensors and have the same canonical schema
 SHA-256, `9626c924be5ead5fdf5dc7d5887e7435a621845b1b3f739cd72344d94404b97a`,
@@ -38,6 +40,13 @@ the actual frontier. It is rejected as the Stage-1 parent. Both matched arms
 must start from `de65…/d79c…`; `FLOW-OFF` remains the paired baseline, and
 `RAW-FLOW` must add useful causal structure beyond this same frontier's
 ordinary direct-residual capacity.
+
+The untouched de65 state is also a mandatory evaluation-only reference at NFE
+1/2/4. Before any validation mmap is opened, its exact resolved configuration
+is instantiated, all 1,686 tensors are loaded strictly, and the evaluation
+adapter must match the public target-blind `sample_future_deployable` endpoint
+bit-for-bit on a fixed immutable train history. This prevents a favorable
+contrast caused by both 200-update continuations regressing together.
 
 ## Immutable evidence
 
@@ -70,5 +79,6 @@ ordinary direct-residual capacity.
   Its frozen source commit is `4f75f9c08dbd64f7ad7d13373a98f25e397f7f4b`.
 
 The Stage-1 prospective registration must content-bind both logs, both
-snapshots, this note, the ladder lineage, and the direct-residual frontier
-lineage before any new outcome is opened.
+snapshots, the selected parent's resolved configuration, this note, the ladder
+lineage, and the direct-residual frontier lineage before any new outcome is
+opened.

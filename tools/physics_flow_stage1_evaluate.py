@@ -5,6 +5,8 @@ For each D405 validation clip and stateless noise seed, every registered causal
 endpoint is fully materialized before this process reads the clean future RGB
 bytes for scoring.  Sampler APIs receive only five observed frames, candidate
 actions, morphology, explicit Gaussian noise, and a registered fixed field.
+The third evaluation-only model is the untouched de65 parent, invoked through
+its native public deployment sampler after a pre-validation bitwise parity gate.
 """
 
 from __future__ import annotations
@@ -26,6 +28,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import physics_flow_stage1 as stage  # noqa: E402
+from tools.physics_flow_parent_vpm import (  # noqa: E402
+    NativeParentVPMError,
+    load_exact_parent_model,
+    materialize_native_parent_endpoint,
+)
 from tools.physics_flow_lpips import load_offline_lpips  # noqa: E402
 
 
@@ -350,6 +357,8 @@ def _materialize(
         "injected_flow": sample.injected_flow.detach().cpu().to(torch.float16),
         "wan_calls": calls,
         "flow_model_calls": sample.flow_model_calls,
+        "native_parent_sampler": False,
+        "native_parent_full_precision_noise_verified": False,
         "effective_adapter_gate": float(
             model.forward_model.tf_token_adapter.effective_gate()
             .detach()
@@ -357,11 +366,70 @@ def _materialize(
             .cpu()
         ),
         "latency": {
+            "measurement_scope": "component_and_end_to_end",
             "history_encode_seconds": float(sample.history_encode_seconds),
             "adapter_and_wan_seconds": float(sample.adapter_and_wan_seconds),
             "decode_seconds": float(sample.decode_seconds),
             "end_to_end_seconds": float(sample.end_to_end_seconds),
         },
+    }
+
+
+def _materialize_parent(
+    *,
+    model: Any,
+    endpoint: stage.Endpoint,
+    batch: Mapping[str, Any],
+    noise: Any,
+    zero_flow: Any,
+    sampling_ids: Any,
+    hook_counter: list[int],
+) -> dict[str, Any]:
+    """Materialize the exact parent's unmodified public deployable sampler."""
+
+    import torch
+
+    before = hook_counter[0]
+    sample = materialize_native_parent_endpoint(
+        model,
+        history_rgb=batch["history_rgb"],
+        actions=batch["actions"],
+        morphology_index=batch["morphology_index"],
+        sample_ids=sampling_ids,
+        nfe=endpoint.nfe,
+        expected_video_noise=noise,
+    )
+    calls = hook_counter[0] - before
+    if (
+        endpoint.arm != stage.PARENT_EVALUATION_MODEL_CODE
+        or endpoint.condition_source != "off"
+        or calls != endpoint.nfe
+        or sample["wan_calls"] != endpoint.nfe
+        or sample["flow_model_calls"] != 0
+        or sample["online_teacher_or_feature_calls"] != 0
+        or sample["auxiliary_clean_available"] is not False
+        or sample["deployment_mode"] is not True
+    ):
+        raise PhysicsFlowEvaluationError(
+            "native parent materialization contract differs"
+        )
+    return {
+        "video_latent": sample["video_latent"],
+        "decoded_uint8": sample["decoded_uint8"],
+        "injected_flow": zero_flow.detach().cpu().to(torch.float16),
+        "wan_calls": calls,
+        "flow_model_calls": 0,
+        "effective_adapter_gate": float(
+            model.forward_model.tf_token_adapter.effective_gate()
+            .detach()
+            .float()
+            .cpu()
+        ),
+        "latency": sample["latency"],
+        "native_parent_sampler": True,
+        "native_parent_full_precision_noise_verified": sample[
+            "full_precision_initial_noise_bitwise_equal"
+        ],
     }
 
 
@@ -482,6 +550,7 @@ def _score_rows(
     device: Any,
     registration: Mapping[str, Any],
     model_artifacts: Mapping[str, Mapping[str, Any]],
+    parent_parity_identity_sha256: str,
 ) -> list[dict[str, Any]]:
     rows = []
     history_hashes = _slice_hashes(batch["history_rgb"])
@@ -540,6 +609,17 @@ def _score_rows(
                         "future_measured_state_sampler_input": False,
                         "clean_video_latent_sampler_input": False,
                         "online_teacher_or_feature_calls": 0,
+                        "native_parent_sampler": output[
+                            "native_parent_sampler"
+                        ],
+                        "native_parent_full_precision_noise_verified": (
+                            output[
+                                "native_parent_full_precision_noise_verified"
+                            ]
+                        ),
+                        "native_parent_sampler_parity_identity_sha256": (
+                            parent_parity_identity_sha256
+                        ),
                         "lpips_evaluator_identity_sha256": registration["runtime"][
                             "lpips_alex"
                         ]["identity_sha256"],
@@ -598,6 +678,12 @@ def command_evaluate(args: argparse.Namespace) -> int:
     if "B200" not in torch.cuda.get_device_properties(device).name.upper():
         raise PhysicsFlowEvaluationError("evaluation requires B200 GPUs")
     registration = stage.validate_study_registration(args.registration)
+    # This receipt is validated before the validation mmap is constructed.  It
+    # proves that the third endpoint delegates bit-for-bit to the untouched
+    # parent's public target-blind sampler on a registered train history.
+    parent_parity, parent_parity_record = stage.load_parent_sampler_parity(
+        registration
+    )
     output = Path(registration["output_root"]) / "evaluation"
     if args.output_dir.expanduser().absolute() != output:
         raise PhysicsFlowEvaluationError(f"evaluation output must be {output}")
@@ -613,8 +699,15 @@ def command_evaluate(args: argparse.Namespace) -> int:
         models[arm.code], artifacts[arm.code] = _load_model(
             registration, arm, device
         )
-    if models["FLOW-OFF"].evaluation_noise_seed != models["RAW-FLOW"].evaluation_noise_seed:
-        raise PhysicsFlowEvaluationError("arm evaluation noise base seeds differ")
+    models[stage.PARENT_EVALUATION_MODEL_CODE], artifacts[
+        stage.PARENT_EVALUATION_MODEL_CODE
+    ] = load_exact_parent_model(registration, device)
+    if {
+        model.evaluation_noise_seed for model in models.values()
+    } != {20260729}:
+        raise PhysicsFlowEvaluationError(
+            "training arms and native parent evaluation noise base seeds differ"
+        )
     lpips_model, lpips_receipt = load_offline_lpips(device=device)
     if lpips_receipt != registration["runtime"].get("lpips_alex"):
         raise PhysicsFlowEvaluationError(
@@ -626,15 +719,15 @@ def command_evaluate(args: argparse.Namespace) -> int:
     )
     if set(rank_lpips_identities) != {lpips_receipt["identity_sha256"]}:
         raise PhysicsFlowEvaluationError("LPIPS identity differs across ranks")
-    hook_counts = {arm.code: [0] for arm in stage.ARMS}
+    hook_counts = {code: [0] for code in models}
     handles = []
-    for arm in stage.ARMS:
-        counter = hook_counts[arm.code]
+    for code, model in models.items():
+        counter = hook_counts[code]
 
         def count_call(_module: Any, _inputs: Any, _output: Any, counter=counter) -> None:
             counter[0] += 1
 
-        handles.append(models[arm.code].forward_model.register_forward_hook(count_call))
+        handles.append(model.forward_model.register_forward_hook(count_call))
     assigned = _rank_indexes(dataset.d405_indexes, rank)
     rows = []
     try:
@@ -663,14 +756,25 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 materialized = []
                 for endpoint in stage.ENDPOINTS:
                     model = models[endpoint.arm]
-                    output_value = _materialize(
-                        model=model,
-                        endpoint=endpoint,
-                        batch=batch,
-                        noise=noise,
-                        flow=flows[endpoint.condition_source],
-                        hook_counter=hook_counts[endpoint.arm],
-                    )
+                    if endpoint.arm == stage.PARENT_EVALUATION_MODEL_CODE:
+                        output_value = _materialize_parent(
+                            model=model,
+                            endpoint=endpoint,
+                            batch=batch,
+                            noise=noise,
+                            zero_flow=flows["off"],
+                            sampling_ids=sampling_ids,
+                            hook_counter=hook_counts[endpoint.arm],
+                        )
+                    else:
+                        output_value = _materialize(
+                            model=model,
+                            endpoint=endpoint,
+                            batch=batch,
+                            noise=noise,
+                            flow=flows[endpoint.condition_source],
+                            hook_counter=hook_counts[endpoint.arm],
+                        )
                     materialized.append((endpoint, output_value))
                 materialized_by_seed.append(
                     (noise_seed_id, sampling_ids, noise, materialized)
@@ -696,6 +800,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
                         device=device,
                         registration=registration,
                         model_artifacts=artifacts,
+                        parent_parity_identity_sha256=parent_parity[
+                            "identity_sha256"
+                        ],
                     )
                 )
             del materialized_by_seed, target, full_rgb
@@ -716,6 +823,26 @@ def command_evaluate(args: argparse.Namespace) -> int:
             handle.remove()
     rank_path = output / f"rank_{rank:02d}.jsonl"
     stage.exclusive_jsonl(rank_path, rows)
+    local_batches = math.ceil(len(assigned) / EXPECTED_BATCH_SIZE)
+    expected_transformer_calls = {
+        "FLOW-OFF": local_batches * len(stage.NOISE_SEEDS) * sum(stage.NFE_GRID),
+        "RAW-FLOW": (
+            local_batches
+            * len(stage.NOISE_SEEDS)
+            * len(stage.RUNTIME_SOURCES)
+            * sum(stage.NFE_GRID)
+        ),
+        stage.PARENT_EVALUATION_MODEL_CODE: (
+            local_batches * len(stage.NOISE_SEEDS) * sum(stage.NFE_GRID)
+        ),
+    }
+    observed_transformer_calls = {
+        code: counter[0] for code, counter in hook_counts.items()
+    }
+    if observed_transformer_calls != expected_transformer_calls:
+        raise PhysicsFlowEvaluationError(
+            "rank transformer-call inventory differs from endpoint grid"
+        )
     receipt = stage.identity_payload(
         {
             "schema_version": stage.SCHEMA_VERSION,
@@ -728,9 +855,16 @@ def command_evaluate(args: argparse.Namespace) -> int:
             "endpoints": [asdict(endpoint) for endpoint in stage.ENDPOINTS],
             "rows": len(rows),
             "rows_file": stage.file_record(rank_path),
-            "transformer_calls_by_arm": {
-                arm.code: hook_counts[arm.code][0] for arm in stage.ARMS
+            "transformer_calls_by_evaluation_model": {
+                **observed_transformer_calls
             },
+            "expected_transformer_calls_by_evaluation_model": (
+                expected_transformer_calls
+            ),
+            "native_parent_sampler_parity": parent_parity_record,
+            "native_parent_sampler_parity_identity_sha256": parent_parity[
+                "identity_sha256"
+            ],
             "lpips_evaluator_identity_sha256": lpips_receipt["identity_sha256"],
             "future_rgb_sampler_input": False,
             "future_measured_state_sampler_input": False,
@@ -760,6 +894,18 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 or source_receipt.get("rows_file") != rank_files[-1]
                 or source_receipt.get("lpips_evaluator_identity_sha256")
                 != registration["runtime"]["lpips_alex"]["identity_sha256"]
+                or source_receipt.get(
+                    "native_parent_sampler_parity_identity_sha256"
+                )
+                != parent_parity["identity_sha256"]
+                or source_receipt.get("native_parent_sampler_parity")
+                != parent_parity_record
+                or source_receipt.get(
+                    "transformer_calls_by_evaluation_model"
+                )
+                != source_receipt.get(
+                    "expected_transformer_calls_by_evaluation_model"
+                )
                 or source_receipt.get("protected_test_accessed") is not False
             ):
                 raise PhysicsFlowEvaluationError("rank evaluation receipt differs")
@@ -784,6 +930,11 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 "rank_files": rank_files,
                 "rank_receipts": rank_receipts,
                 "lpips_evaluator": registration["runtime"]["lpips_alex"],
+                "native_parent_sampler_parity": parent_parity_record,
+                "native_parent_sampler_parity_identity_sha256": parent_parity[
+                    "identity_sha256"
+                ],
+                "unmodified_de65_parent_endpoint_included": True,
                 "lpips_same_on_all_ranks_and_all_arm_endpoints": True,
                 "all_endpoints_materialized_before_future_rgb_open": True,
                 "future_rgb_sampler_input": False,
@@ -810,7 +961,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return command_evaluate(args)
-    except (PhysicsFlowEvaluationError, stage.PhysicsFlowStage1Error) as exc:
+    except (
+        PhysicsFlowEvaluationError,
+        NativeParentVPMError,
+        stage.PhysicsFlowStage1Error,
+    ) as exc:
         raise SystemExit(f"error: {exc}") from exc
 
 
