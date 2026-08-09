@@ -106,7 +106,9 @@ test -d "$(dirname "$STUDY_ROOT")"
 The following prefix explicitly enters Bash inside every Slurm `--wrap`
 script before using `pipefail` or sourcing the B200 activation helper. Large
 artifacts remain on Lustre. No protected test split is named anywhere in the
-chain.
+chain. The cluster's `batch` partition requires a GPU request even for the
+CPU-dominant registration and sealing stages, so all four wrapped jobs request
+one B200 and leave it otherwise unused where appropriate.
 
 ```bash
 BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME MUJOCO_GL=egl; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO;"
@@ -114,8 +116,10 @@ BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITE
 REGISTER_JOB=$(sbatch --parsable \
   --job-name=pf-register-$SHORT \
   --output="$LOG_ROOT/register-%j.out" \
-  --nodes=1 --ntasks=1 --cpus-per-task=32 --mem=256G --time=02:00:00 \
+  --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=32 \
+  --mem=256G --time=02:00:00 \
   --partition=batch --account=coreai_chef_posttrain --qos=short --no-requeue \
+  --exclude=pool0-0081,pool0-0089 \
   --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py register-cache \
     --output $CACHE_ROOT --source-repo $SOURCE_REPO \
     --expected-commit $EXPECTED_COMMIT --official-abc-root $OFFICIAL_ABC \
@@ -128,7 +132,7 @@ CACHE_TRAIN_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
   --job-name=pf-cache-train-$SHORT \
   --output="$LOG_ROOT/cache-train-%j.out" \
   --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=32 \
-  --mem=256G --time=04:00:00 --partition=batch \
+  --mem=256G --time=02:00:00 --partition=batch \
   --account=coreai_chef_posttrain --qos=short --no-requeue \
   --exclude=pool0-0081,pool0-0089 \
   --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py build-cache \
@@ -138,7 +142,7 @@ CACHE_VAL_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
   --job-name=pf-cache-val-$SHORT \
   --output="$LOG_ROOT/cache-val-%j.out" \
   --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=32 \
-  --mem=256G --time=04:00:00 --partition=batch \
+  --mem=256G --time=02:00:00 --partition=batch \
   --account=coreai_chef_posttrain --qos=short --no-requeue \
   --exclude=pool0-0081,pool0-0089 \
   --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py build-cache \
@@ -147,8 +151,10 @@ CACHE_VAL_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
 SEAL_JOB=$(sbatch --parsable \
   --dependency=afterok:$CACHE_TRAIN_JOB:$CACHE_VAL_JOB \
   --job-name=pf-seal-$SHORT --output="$LOG_ROOT/seal-%j.out" \
-  --nodes=1 --ntasks=1 --cpus-per-task=32 --mem=256G --time=02:00:00 \
+  --nodes=1 --ntasks=1 --gpus-per-node=1 --cpus-per-task=32 \
+  --mem=256G --time=02:00:00 \
   --partition=batch --account=coreai_chef_posttrain --qos=short --no-requeue \
+  --exclude=pool0-0081,pool0-0089 \
   --wrap="$BASH_PREFIX \
     $PYTHON_BIN tools/physics_flow_stage1.py audit-cache --metadata $CACHE_ROOT/train/metadata.json; \
     $PYTHON_BIN tools/physics_flow_stage1.py audit-cache --metadata $CACHE_ROOT/val/metadata.json; \
