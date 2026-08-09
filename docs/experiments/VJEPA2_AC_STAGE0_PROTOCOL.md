@@ -45,6 +45,11 @@ state dictionaries have no missing keys, no unexpected keys, and no shape
 mismatches.  The evaluator encodes those empty sets as an explicit fail-closed
 contract.
 
+As in `app/vjepa_droid/train.py`, checkpoint parameters and state/action inputs
+remain FP32 while model forwards run under CUDA BF16 autocast.  The evaluator
+does not cast parameter storage itself to BF16, which would change residual and
+normalization numerics relative to the released training recipe.
+
 The hub default `num_frames=64` is preserved.  It controls the predictor's
 causal-mask capacity (32 tubelet groups); it is not changed to the sampled
 eight-frame clip length.  A value of eight would allocate only four groups and
