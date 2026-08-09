@@ -7,6 +7,7 @@ pytest.importorskip("cv2")
 
 from tools import object_contact_distribution_stage0 as dist
 from tools import object_contact_distribution_pca_repair as repair
+from tools import object_contact_distribution_duplicate_keyword_repair as repair2
 from tools import object_contact_slot_stage0 as slot
 
 
@@ -119,3 +120,24 @@ def test_mechanical_pca_hydration_is_exact_for_nonwhitened_transform() -> None:
     assert result["passed"] is True
     assert result["hydrated_max_abs_difference"] <= 1e-12
     assert result["explicit_map_max_abs_difference"] <= 1e-12
+
+
+def test_duplicate_keyword_ast_shim_has_exactly_one_allowed_difference() -> None:
+    source = open(dist.__file__, encoding="utf-8").read()
+    transformed, proof = repair2.transform_registered_run(source)
+    original = repair2._registered_run_node(source)
+    original_call = repair2._savez_call(original)
+    transformed_call = repair2._savez_call(transformed)
+    assert proof["removed_keyword_arg"] == "final_motion_strata"
+    assert proof["removed_keyword_value_ast"] == "Name(id='strata', ctx=Load())"
+    assert proof["prior_errors_assignment_count"] == 1
+    assert proof["prior_errors_assignment_value_ast"] == "Name(id='strata', ctx=Load())"
+    assert proof["same_savez_errors_expansion_count"] == 1
+    assert proof["assignment_precedes_savez_call"] is True
+    assert proof["same_savez_contains_errors_expansion"] is True
+    assert proof["prior_errors_assignment_lineno"] < proof["removed_keyword_lineno"]
+    assert proof["restoration_is_byte_identical_ast_dump"] is True
+    assert proof["any_other_ast_difference"] is False
+    assert len(original_call.keywords) == len(transformed_call.keywords) + 1
+    assert sum(keyword.arg == "final_motion_strata" for keyword in original_call.keywords) == 1
+    assert sum(keyword.arg == "final_motion_strata" for keyword in transformed_call.keywords) == 0
