@@ -5309,6 +5309,7 @@ def command_register_frozen_v7_evaluation(args: argparse.Namespace) -> int:
         args.v5_reference_study_root,
         verify_snapshot_digests=False,
     )
+    v5_cache_reference = _validated_v5_cache_reference(Path(V5_CACHE_ROOT))
     validate_main_python_runtime_receipt(
         v7_reference.get("runtime", {}).get("python_runtime")
     )
@@ -5318,7 +5319,9 @@ def command_register_frozen_v7_evaluation(args: argparse.Namespace) -> int:
         or file_record(Path(str(lpips_log.get("path", "")))) != lpips_log
     ):
         raise PhysicsFlowStage1Error("frozen v7 LPIPS runtime evidence changed")
-    replay_gate = _v7_v5_causal_input_replay(v7_reference, v5_reference)
+    replay_gate = _v7_v5_causal_input_replay(
+        v7_reference, v5_reference, v5_cache_reference
+    )
     if (
         replay_gate.get("exact_causal_input_hash_comparisons") != 2_000
         or replay_gate.get("exact_cache_array_comparisons") != 8
@@ -5369,6 +5372,7 @@ def command_register_frozen_v7_evaluation(args: argparse.Namespace) -> int:
             "source_files": source_files,
             "v7_frozen_reference": v7_reference,
             "v5_input_lineage_reference": v5_reference,
+            "v5_cache_input_lineage_reference": v5_cache_reference,
             "input_replay_gate": gate_record,
             "flow_caches": v7_reference["flow_caches"],
             "parent": parent,
@@ -5832,6 +5836,11 @@ def _validate_v8_evaluation_registration(path: Path) -> dict[str, Any]:
     )
     if v5_reference != registration["v5_input_lineage_reference"]:
         raise PhysicsFlowStage1Error("v5 input-lineage reference changed")
+    v5_cache_reference = _validated_v5_cache_reference(
+        Path(registration["v5_cache_input_lineage_reference"]["root"])
+    )
+    if v5_cache_reference != registration["v5_cache_input_lineage_reference"]:
+        raise PhysicsFlowStage1Error("v5 cache input-lineage reference changed")
     if registration.get("flow_caches") != v7_reference["flow_caches"]:
         raise PhysicsFlowStage1Error("v8 frozen cache binding differs")
     if registration.get("parent_performance_lineage") != v7_reference.get(
@@ -5917,6 +5926,8 @@ def _validate_v8_evaluation_registration(path: Path) -> dict[str, Any]:
         != "exact_causal_input_replay_and_frozen_state_guard_passed"
         or gate.get("v7_terminal_decision_preserved")
         != "STOP_EXACT_REPAIR_EQUIVALENCE"
+        or gate.get("v5_cache_reference_identity_sha256")
+        != v5_cache_reference["identity_sha256"]
         or gate.get("exact_causal_input_hash_comparisons") != 2_000
         or gate.get("exact_cache_array_comparisons") != 8
         or gate.get("exact_input_probe_clock_index_order_comparisons") != 9_200
@@ -6652,6 +6663,7 @@ def _expected_v7_trainable_mismatch_names(arm_code: str) -> set[str]:
 def _v7_v5_causal_input_replay(
     v7_reference: Mapping[str, Any],
     v5_reference: Mapping[str, Any],
+    v5_cache_reference: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Prove exact causal-input replay and describe, never gate, CUDA drift."""
 
@@ -6665,7 +6677,7 @@ def _v7_v5_causal_input_replay(
         cache_array_receipts[split] = {}
         for source_name in CACHE_SOURCES:
             v7_array = v7_reference["flow_caches"][split]["arrays"][source_name]
-            v5_array = v5_reference["flow_caches"][split]["arrays"][source_name]
+            v5_array = v5_cache_reference["splits"][split]["arrays"][source_name]
             _absolute_file_record_matches(
                 v7_array, f"v7 {split} {source_name} cache array"
             )
@@ -6924,6 +6936,9 @@ def _v7_v5_causal_input_replay(
             "status": "exact_causal_input_replay_and_frozen_state_guard_passed",
             "v7_reference_identity_sha256": v7_reference["identity_sha256"],
             "v5_reference_identity_sha256": v5_reference["identity_sha256"],
+            "v5_cache_reference_identity_sha256": v5_cache_reference[
+                "identity_sha256"
+            ],
             "v7_terminal_decision_preserved": "STOP_EXACT_REPAIR_EQUIVALENCE",
             "v8_scope": "prospective_evaluation_only_exploratory",
             "paired_updates": 200,
@@ -6966,6 +6981,7 @@ def compare_training_traces(
         return _v7_v5_causal_input_replay(
             registration["v7_frozen_reference"],
             registration["v5_input_lineage_reference"],
+            registration["v5_cache_input_lineage_reference"],
         )
     off_header, off_events, off_artifacts = _training_trace(
         registration, ARM_BY_CODE["FLOW-OFF"]
@@ -7224,6 +7240,8 @@ def load_input_replay_gate(
         or gate.get("model_state_drift_acceptance_threshold") is not None
         or gate.get("v7_terminal_decision_preserved")
         != "STOP_EXACT_REPAIR_EQUIVALENCE"
+        or gate.get("v5_cache_reference_identity_sha256")
+        != registration["v5_cache_input_lineage_reference"]["identity_sha256"]
         or gate.get("future_rgb_opened") is not False
         or gate.get("future_measured_state_opened") is not False
         or gate.get("protected_test_accessed") is not False

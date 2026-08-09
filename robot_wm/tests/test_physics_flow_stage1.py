@@ -1568,7 +1568,7 @@ def _v8_input_replay_fixture(
     *,
     change_exact_input: bool = False,
     nonfinite_output: bool = False,
-) -> tuple[dict, dict, dict[str, tuple[dict, str]]]:
+) -> tuple[dict, dict, dict, dict[str, tuple[dict, str]]]:
     cache_roots = {
         "v5": tmp_path / "v5-cache",
         "v7": tmp_path / "v7-cache",
@@ -1777,7 +1777,11 @@ def _v8_input_replay_fixture(
             "mismatched_tensors": mismatches,
         }
         drift_states[str(Path(v7_snapshot["path"]).resolve())] = (state, arm.code)
-    return references["v7"], references["v5"], drift_states
+    v5_cache_reference = {
+        "identity_sha256": "4" * 64,
+        "splits": flow_caches["v5"],
+    }
+    return references["v7"], references["v5"], v5_cache_reference, drift_states
 
 
 def _install_v8_drift_stub(
@@ -1800,9 +1804,9 @@ def _install_v8_drift_stub(
 def test_v8_input_replay_accepts_finite_output_and_trainable_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    v7, v5, states = _v8_input_replay_fixture(tmp_path)
+    v7, v5, v5_cache, states = _v8_input_replay_fixture(tmp_path)
     _install_v8_drift_stub(monkeypatch, states)
-    receipt = stage._v7_v5_causal_input_replay(v7, v5)
+    receipt = stage._v7_v5_causal_input_replay(v7, v5, v5_cache)
     assert receipt["exact_cache_array_comparisons"] == 8
     assert receipt["exact_causal_input_hash_comparisons"] == 2_000
     assert receipt["exact_input_probe_clock_index_order_comparisons"] == 9_200
@@ -1818,6 +1822,42 @@ def test_v8_input_replay_accepts_finite_output_and_trainable_drift(
     assert receipt["arms"]["RAW-FLOW"][
         "observed_trainable_mismatch_tensor_count"
     ] == 500
+
+
+def test_v8_routes_exact_v5_study_and_cache_registrations_separately() -> None:
+    expected_cache_hashes = {
+        "train": {
+            "raw": "fda3f874e0f9bccb1a830ac29f966a467e1e019c9f073a7fbc93cda29d3e8ca4",
+            "episode_shuffled": "04f7c4fe25d57e82b64bc1d2909562f09e73d344847a613aeb89dd4711d65048",
+            "timeshift_plus_one": "dbc9bf2bf1902054ed9911d91c3b1d18275c6d40edb1743c228fb32d3aa82123",
+            "hold_current": "65e77c06b71775e76f67a7141a2fdb0871f80e24913b1ea6e1855f68dc03cf77",
+        },
+        "val": {
+            "raw": "0c28706f769bd23cc70c373d2eb622e647f313eabdd2d1637b0e7eff82834357",
+            "episode_shuffled": "22d51e6068f0200dba8e906b90a627080727d2e58aebddfe303d7c251a8bfb31",
+            "timeshift_plus_one": "d431b506c933779d869aec4e1f083f210611b2902d458687b534842df9581367",
+            "hold_current": "98c8543d17abec4a831837c7b408149fa561c25638eaf383a9acef271931417c",
+        },
+    }
+    assert {
+        split: {
+            source: stage.V5_CACHE_SPLITS[split]["arrays"][source]["sha256"]
+            for source in stage.CACHE_SOURCES
+        }
+        for split in ("train", "val")
+    } == expected_cache_hashes
+    source = (ROOT / "tools/physics_flow_stage1.py").read_text()
+    register = source.split(
+        "def command_register_frozen_v7_evaluation", 1
+    )[1].split("def _validate_training_study_registration", 1)[0]
+    assert "_validated_v5_study_reference(" in register
+    assert "_validated_v5_cache_reference(Path(V5_CACHE_ROOT))" in register
+    assert "v7_reference, v5_reference, v5_cache_reference" in register
+    replay = source.split("def _v7_v5_causal_input_replay", 1)[1].split(
+        "def compare_training_traces", 1
+    )[0]
+    assert 'v5_cache_reference["splits"][split]["arrays"]' in replay
+    assert 'v5_reference["flow_caches"]' not in replay
 
 
 @pytest.mark.parametrize(
@@ -1836,7 +1876,7 @@ def test_v8_input_replay_rejects_invalid_evidence(
     schema_identical: bool,
     match: str,
 ) -> None:
-    v7, v5, states = _v8_input_replay_fixture(
+    v7, v5, v5_cache, states = _v8_input_replay_fixture(
         tmp_path,
         change_exact_input=change_exact_input,
         nonfinite_output=nonfinite_output,
@@ -1845,7 +1885,7 @@ def test_v8_input_replay_rejects_invalid_evidence(
         monkeypatch, states, schema_identical=schema_identical
     )
     with pytest.raises(stage.PhysicsFlowStage1Error, match=match):
-        stage._v7_v5_causal_input_replay(v7, v5)
+        stage._v7_v5_causal_input_replay(v7, v5, v5_cache)
 
 
 def test_finite_model_state_drift_is_descriptive_and_fail_closed(
