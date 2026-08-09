@@ -1,10 +1,66 @@
-# Raw physics-flow Stage-1 renderer-runtime repair
+# Raw physics-flow Stage-1 split-runtime repairs
 
 Date: 2026-08-09
 
 Status: **prospective source repair; no relaunch authority**
 
-## Preserved failed chain
+The first fail-closed chain used exact source
+`838e8da6fb69231d03cf9254a0fa79c5da27eb6c` (jobs 507546--507552) and
+stopped at registration on the corrected-renderer prerequisite identity; its
+source and `838e8da-v1` logs remain preserved. It is not a runtime or
+scientific result.
+
+## Preserved third failed chain: main-runtime symlink resolution
+
+The exact audited source
+`78e33861f763334b0a0d77508f2e51c6c7339770` was submitted as jobs
+507620--507626. Registration and both cache builders completed; the train and
+validation cache audits also passed. Seal job 507623 then failed before study
+root creation because `_registered_runtime` resolved
+`lacwm-b200-py310/bin/python` to the shared base CPython before launching the
+offline LPIPS child. The base interpreter correctly had no LACWM
+site-packages, producing `ModuleNotFoundError: No module named 'lpips'`.
+`afterok` cancelled jobs 507624--507626 before either training arm or
+evaluation ran.
+
+This chain is preserved and must not be reused:
+
+- source: `.../src/worktrees/raw-physics-flow-stage1-78e3386`;
+- logs: `.../logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-78e3386-v2`;
+- completed cache: `.../artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-78e3386-v2`.
+
+Read-only diagnostic allocations 507630 and 507631 are preserved in the same
+log root. The first had an introspection-command quoting error. The second
+recorded on compute node `pool0-0171` that the lexical entry selects
+`lacwm-b200-py310` and sees the pinned LPIPS module, while the failed seal's
+resolved invocation selected base CPython and lost that venv. These diagnostic
+failures are provenance evidence, not scientific outcomes.
+
+The source-only repair mirrors the cache-runtime rule. It converts the supplied
+path to an absolute lexical path without resolving the final symlink, records
+the complete symlink chain and resolved executable bytes, records and rehashes
+`pyvenv.cfg`, requires `sys.executable` and `sys.prefix` to name that lexical
+venv with user-site disabled, and content-binds its site-packages plus the
+LPIPS, torch, and torchvision module and distribution `RECORD` files. Both the
+runtime probe and offline LPIPS subprocess use the lexical entry. Registration
+stores that same entry for all subsequent train/evaluation commands, and every
+registration replay revalidates the receipt. The runbook also performs this
+probe before creating a cache or study root.
+
+Pinned main-runtime operator checks are:
+
+| File | SHA-256 |
+|---|---|
+| `lacwm-b200-py310/pyvenv.cfg` | `1462a3436cb7564a778b577ed97d7b8adee292ba7f03ae92d544761a11fcbc2d` |
+| `lpips-0.1.4.dist-info/RECORD` | `43d3121c0b0c2d34380a1f786dd9501be8f64270bea81f6118bbb98c384df7ae` |
+| `torch-2.7.1+cu128.dist-info/RECORD` | `277c9bbc200c0507440f5b6da4b681199f7dd72250e52028e308aa81eb285d6b` |
+| `torchvision-0.22.1+cu128.dist-info/RECORD` | `ae8a47757ba5c4a89c8d2f3bdbaefb7f9ca7a0cc4af350fdb58288885fde4cd2` |
+
+A relaunch requires another independently audited source commit and fresh
+commit-derived `v3` source/cache/study/log paths. Neither the successful `v2`
+caches nor any failed-chain path may be resumed or overwritten.
+
+## Preserved second failed chain: cache-renderer runtime
 
 The exact audited source `a72d159de635d8dff3daab3a684dc4cf99c53b96`
 was submitted as jobs 507569--507575. Registration completed, both cache jobs
