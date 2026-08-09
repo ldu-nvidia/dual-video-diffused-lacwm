@@ -149,6 +149,18 @@ def test_external_strict_audit_binding(tmp_path: Path, monkeypatch: pytest.Monke
     result = bridge.validate_strict_external_audit(path, root)
     assert result["status"] == "strict_audit_passed"
     assert result["auditor_source_commit"] == bridge.STRICT_AUDITOR_SOURCE_COMMIT
+    alias = tmp_path / "strict-alias.json"
+    alias.symlink_to(path)
+    with pytest.raises(bridge.RecurrentFlowBridgeError, match="symlink"):
+        bridge.validate_strict_external_audit(alias, root)
+
+
+def test_registration_source_must_be_executing_physical_checkout(tmp_path: Path) -> None:
+    assert bridge._validate_executing_source_repo(bridge.REPO_ROOT) == bridge.REPO_ROOT
+    alias = tmp_path / "source-alias"
+    alias.symlink_to(bridge.REPO_ROOT, target_is_directory=True)
+    with pytest.raises(bridge.RecurrentFlowBridgeError, match="executing bridge checkout"):
+        bridge._validate_executing_source_repo(alias)
 
 
 def test_history_reader_reads_state_prefix_and_action_slice_once(tmp_path: Path) -> None:
@@ -249,6 +261,13 @@ def test_recurrent_dataset_metadata_is_not_raw_family(tmp_path: Path) -> None:
     assert obj._validate_flow_metadata() == str(flow.resolve())
     obj.flow_metadata["condition_family"] = "raw_geometry_scaffold"
     with pytest.raises(RuntimeError, match="recurrent-flow metadata"):
+        obj._validate_flow_metadata()
+    obj.flow_metadata["condition_family"] = "sealed_recurrent_delta_geometry"
+    alias = tmp_path / "aligned-alias.npy"
+    alias.symlink_to(flow)
+    obj.flow_metadata["aligned_flow_file"] = str(alias)
+    obj.flow_metadata["identity_sha256"] = _canonical_identity(obj.flow_metadata)
+    with pytest.raises(RuntimeError, match="symlink"):
         obj._validate_flow_metadata()
 
 

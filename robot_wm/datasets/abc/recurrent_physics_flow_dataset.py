@@ -79,10 +79,11 @@ class ABCRecurrentPhysicsFlowDataset(ABCPhysicsFlowDataset):
         path = Path(value)
         if not path.is_absolute():
             path = Path(self.flow_metadata_path).parent / path
+        if path.is_symlink():
+            raise RuntimeError("recurrent aligned-flow path may not be a symlink")
         path = path.resolve(strict=True)
         if (
             not path.is_file()
-            or path.is_symlink()
             or _sha256(path) != self.expected_flow_sha256
         ):
             raise RuntimeError("recurrent aligned-flow identity differs")
