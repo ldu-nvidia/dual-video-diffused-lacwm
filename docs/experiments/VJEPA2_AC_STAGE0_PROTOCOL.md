@@ -183,6 +183,12 @@ If the native gate passes, the following remain mandatory before ABC or Wan:
    auxiliary latency, peak memory, and amortized latency across candidate
    action sequences.  All auxiliary work counts against the 5--10 Hz target.
 
+Timing excludes one explicit full-shape warmup that runs after registration and
+data materialization but before any measured clip.  Artifacts record GPU name,
+compute capability, Torch/CUDA versions, total device memory, peak allocated and
+reserved bytes, the six-control batch latency, and its per-condition amortized
+latency.  Amortized batch latency is not relabelled as singleton latency.
+
 Only a pass through those gates authorizes a fixed-budget generator experiment:
 `OFF`, `AC-PRED`, `AC-SHUFFLED`, and target-feature `ORACLE`, with equal Wan
 calls and parameter count.  The oracle is a ceiling, never an inference claim.
