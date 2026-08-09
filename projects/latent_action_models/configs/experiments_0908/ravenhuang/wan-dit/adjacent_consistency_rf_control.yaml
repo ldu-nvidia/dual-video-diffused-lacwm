@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /experiments_0908/adjacent_consistency_common
+  - _self_
+
+name: acd-p0-rf-control-seed1234-u000400
+model:
+  adjacent_consistency:
+    arm_mode: rf_control
+wandb:
+  tags: [abc, vpm, acd-p0, rf-control, seed-1234]
