@@ -682,6 +682,34 @@ def _validate_metrics(metrics: Mapping[str, Any], label: str) -> None:
     )
 
 
+def validate_bundle_camera(
+    arrays: Mapping[str, np.ndarray], calibration: Mapping[str, Any], clip_id: str
+) -> None:
+    """Bind variable native video geometry and intrinsics to raw MCAP metadata."""
+
+    expected_height = int(calibration["camera_height"])
+    expected_width = int(calibration["camera_width"])
+    _require(
+        arrays["rgb"].shape == (9, expected_height, expected_width, 3)
+        and arrays["rgb"].dtype == np.uint8,
+        f"bundle RGB/calibration geometry differs: {clip_id}",
+    )
+    _require(
+        arrays["K"].shape == (3, 3)
+        and arrays["K"].dtype == np.float64
+        and arrays["D"].ndim == 1
+        and arrays["D"].dtype == np.float64,
+        f"bundle calibration geometry differs: {clip_id}",
+    )
+    _require(
+        np.array_equal(
+            arrays["K"], np.asarray(calibration["K"], dtype=np.float64).reshape(3, 3)
+        )
+        and np.array_equal(arrays["D"], np.asarray(calibration["D"], dtype=np.float64)),
+        f"bundle calibration values differ from raw MCAP: {clip_id}",
+    )
+
+
 def validate_metric_rows(
     rows: Sequence[dict[str, Any]],
     selected: Sequence[dict[str, Any]],
@@ -845,10 +873,8 @@ def validate_bundles(
                 for endpoint in ("source", "target"):
                     expected_names.add(f"pose_{rendered}_{endpoint}_{arm}")
         _require(set(arrays) == expected_names, f"bundle array-name set differs: {clip_id}")
-        _require(
-            arrays["rgb"].shape == (9, 480, 640, 3) and arrays["rgb"].dtype == np.uint8,
-            f"bundle RGB geometry differs: {clip_id}",
-        )
+        calibration = study._decode_top_calibration(Path(item["raw_mcap"]))
+        validate_bundle_camera(arrays, calibration, clip_id)
         frame_indices = np.asarray(manifest["frame_indices"][4:13], dtype=np.int64)
         _require(
             np.array_equal(arrays["frame_indices"], frame_indices),
@@ -857,13 +883,6 @@ def validate_bundles(
         _require(
             arrays["frame_ts"].shape == (9,) and arrays["frame_ts"].dtype == np.int64,
             f"bundle timestamps differ: {clip_id}",
-        )
-        _require(
-            arrays["K"].shape == (3, 3)
-            and arrays["K"].dtype == np.float64
-            and arrays["D"].ndim == 1
-            and arrays["D"].dtype == np.float64,
-            f"bundle calibration geometry differs: {clip_id}",
         )
         measured = arrays["measured_trajectory"]
         _require(
