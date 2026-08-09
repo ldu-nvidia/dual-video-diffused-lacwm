@@ -156,12 +156,23 @@ repair.
 
 The built-in audit passed 168 artifact hashes, the 2,200 transition rows, 275
 episode/arm rows, causal replay, bootstrap, identities, and protected-data false
-flags. An additional strict read-only reconstruction independently rehashed the
-registered inputs and caches, reconstructed all causal inputs from observed
-prefixes, reproduced every trajectory/control with maximum error zero, checked
-row/index uniqueness, and regenerated the exact 100,000-draw bootstrap. A
-separately sealed strict-audit receipt is required before this package is used
-as the lineage root for a Wan run.
+flags. Standalone CPU job `508106` then completed the external strict replay in
+21 seconds. It independently checked 731 records covering 356 unique files and
+9,069,194,268 referenced bytes; reconstructed 25 causal arrays with maximum
+absolute error zero; checked all row/index/donor bindings; rebuilt the exact
+`[100000,55]` bootstrap; and reproduced the same GO from the analysis,
+completion, and built-in audit. Its sealed identity is
+`d7afdf0bddcd8dee32351b2356137503cf5485dcdaa5f8e0b699a63d1dc86b69` and
+the report SHA-256 is
+`8e0475d40aabb7ed3d200ef900cf012e58f0096b27fa46642384869b92f545ea`.
+
+The first standalone-audit job, `508100`, failed closed because the auditor
+incorrectly assumed every native D405 video was 640 pixels wide. The triggering
+clip is legitimately `848x480`; no report was written. Commit `ff32449` instead
+binds every bundle's variable native shape and exact `K/D` values to an
+independent raw-MCAP calibration decode. Seventeen focused tests passed and the
+fresh report namespace was used for job `508106`. The failed log is preserved;
+the canonical run was never mutated.
 
 Canonical cluster root:
 
