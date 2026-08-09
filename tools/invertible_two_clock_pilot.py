@@ -563,7 +563,17 @@ def command_readiness(args: argparse.Namespace) -> int:
             "outcomes_opened": 0,
         }
     )
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    if args.output is None:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        output = args.output.expanduser()
+        if not output.is_absolute():
+            raise IPQPilotError("readiness output must be absolute")
+        output = output.parent.resolve(strict=True) / output.name
+        if output.exists() or output.is_symlink():
+            raise IPQPilotError("readiness output must be fresh")
+        exclusive_json(output, payload)
+        print(str(output))
     return 0
 
 
@@ -831,6 +841,7 @@ def _parser() -> argparse.ArgumentParser:
     readiness.add_argument("--expected-commit", required=True)
     readiness.add_argument("--test-report", type=Path)
     readiness.add_argument("--remote", default="origin")
+    readiness.add_argument("--output", type=Path)
     readiness.add_argument(
         "--ilsf-handoff-decision",
         choices=("ADVANCE_IPQ_TC1", "NO_GO_GENERIC_EARLY_SUBSPACE"),
