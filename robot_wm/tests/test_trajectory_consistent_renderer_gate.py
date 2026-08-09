@@ -11,6 +11,7 @@ from tools.trajectory_consistent_renderer_gate import (
     EXPECTED_UNTOUCHED_D405,
     PRIMARY_FLOW_LABELS,
     RidgeState,
+    analyze_aggregates,
     apply_holm,
     bootstrap_indices,
     hybrid_anchor_raw_delta,
@@ -124,6 +125,40 @@ class TrajectoryConsistentRendererGateTest(unittest.TestCase):
                 "measured_oracle",
             },
         )
+
+    def test_analysis_keeps_three_decision_families_independent(self):
+        values = {
+            "raw_command": (10.0, 5.0, 5.0, 0.80),
+            "raw_episode_shuffled": (20.0, 10.0, 10.0, 0.60),
+            "absolute_ridge": (8.0, 4.0, 4.0, 0.85),
+            "recurrent_delta": (6.0, 3.0, 3.0, 0.90),
+            "recurrent_delta_shuffled": (12.0, 8.0, 8.0, 0.70),
+            "hybrid_anchor_raw_delta": (6.0, 3.0, 3.0, 0.90),
+            "hold_current": (30.0, 15.0, 15.0, 0.40),
+            "measured_oracle": (0.0, 0.0, 0.0, 1.00),
+        }
+        clip_order = [f"clip-{index:02d}" for index in range(24)]
+        rows = []
+        for clip_id in clip_order:
+            for arm, (flow, silhouette, rgb, iou) in values.items():
+                rows.append(
+                    {
+                        "clip_id": clip_id,
+                        "arm": arm,
+                        "metrics": {
+                            "robot_flow_epe_px": flow,
+                            "silhouette_boundary_chamfer_px": silhouette,
+                            "rgb_robot_band_chamfer_px": rgb,
+                            "silhouette_iou": iou,
+                        },
+                    }
+                )
+        _, effects, holm, gates = analyze_aggregates(rows, clip_order)
+        self.assertEqual(len(effects), 25)
+        self.assertEqual(holm["family_size"], 7)
+        self.assertTrue(gates["recurrent_delta_pass"])
+        self.assertTrue(gates["hybrid_anchor_raw_delta_pass"])
+        self.assertTrue(gates["raw_geometry_scaffold_pass"])
 
 
 if __name__ == "__main__":
