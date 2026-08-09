@@ -148,6 +148,20 @@ def test_decoded_temporal_metric_includes_raw_history_boundary():
     assert temporal.item() > 0.0
 
 
+def test_decoded_endpoint_fails_closed_on_horizon_or_missing_boundary():
+    assert ladder._validate_decoded_horizon(
+        model_future_frames=8, decoded_frames=13, raw_frames=13, endpoint="J1"
+    ) == 8
+    with pytest.raises(ladder.LadderError, match="eight future frames"):
+        ladder._validate_decoded_horizon(
+            model_future_frames=7, decoded_frames=13, raw_frames=13, endpoint="J1"
+        )
+    with pytest.raises(ladder.LadderError, match="history-boundary"):
+        ladder._validate_decoded_horizon(
+            model_future_frames=8, decoded_frames=8, raw_frames=13, endpoint="VPM"
+        )
+
+
 def test_identity_detects_mutation_and_one_step_sign_is_noise_minus_velocity():
     payload = ladder.identity_payload({"value": 3})
     assert ladder.identity_valid(payload)
