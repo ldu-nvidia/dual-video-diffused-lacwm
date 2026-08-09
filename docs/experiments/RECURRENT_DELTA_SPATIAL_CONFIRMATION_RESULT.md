@@ -110,6 +110,20 @@ the expected signature of the recurrent correction: its benefit accumulates
 after the first predicted state rather than merely improving the initial
 anchor.
 
+## Post-hoc heterogeneity diagnostic
+
+This diagnostic did not enter the registered decision. The recurrent relative
+flow gain versus raw commands was stable across low, medium, and high planned
+motion: `41.142%`, `42.380%`, and `41.852%`, respectively. Versus absolute
+ridge it was `36.358%`, `32.996%`, and `35.139%`. Absolute benefit scales with
+difficulty: the episode-level recurrent-minus-raw improvement has Pearson
+correlation `0.884` with raw EPE and `0.711` with oracle motion magnitude.
+Thus a future Wan screen should not cherry-pick only easy clips; it should keep
+all frozen motion strata and report clustered effects by stratum. Spatial
+equivalence remains tightest in the high-motion stratum, where recurrent-minus-
+ridge IoU is `-0.000434`, reinforcing the need for the registered spatial
+guardrails.
+
 ## Causality and freshness boundary
 
 The candidate trajectories were materialized and hash-closed before future
