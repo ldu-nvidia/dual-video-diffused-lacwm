@@ -130,6 +130,51 @@ PARENT_CANONICAL_MODEL_STATE_SHA256 = (
 PARENT_RESOLVED_CONFIG_SHA256 = (
     "ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38"
 )
+PARENT_TRAINING_SOURCE_COMMIT = "656086686dae723c942a4209a9d71cdb17ed6ccc"
+PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE = (
+    "projects/latent_action_models/lam/dual_explicit_action_dit_model.py"
+)
+PARENT_NATIVE_SAMPLER_SOURCE_SHA256 = (
+    "a10fe3730f7bb3bacd20bd14ebbcfab2b3cf8c63a2db27783f1e8a9787b87ee6"
+)
+PARENT_NATIVE_SAMPLER_GIT_BLOB = "abc6d4df165f684c2c93920d079585c600562dbb"
+PARENT_HISTORICAL_REFERENCE_FILENAME = "parent_historical_reference.pt"
+PARENT_TRANSITIVE_SOURCE_FILES = (
+    "robot_wm/modeling/dual_diffusion/adapters.py",
+    "robot_wm/modeling/networks/wan_forward_model.py",
+)
+PARENT_HISTORICAL_TRANSITIVE_SHA256 = {
+    "robot_wm/modeling/dual_diffusion/adapters.py": (
+        "3688f6e5d7a66b80c72f1ff078f2e179323e4c30d7bfd94da10c4707163dfe97"
+    ),
+    "robot_wm/modeling/networks/wan_forward_model.py": (
+        "5cd471dc65940aa32cf953ddb2b05c799ac6c6cc274bda3a6221ef7722e7c4dd"
+    ),
+}
+PARENT_HISTORICAL_TRANSITIVE_BLOBS = {
+    "robot_wm/modeling/dual_diffusion/adapters.py": (
+        "5b861945d58c3bed751e056382841efc6652e6ce"
+    ),
+    "robot_wm/modeling/networks/wan_forward_model.py": (
+        "e8b2fd4449f9cd56109d3da4257c9d5ca0c267f6"
+    ),
+}
+PARENT_CURRENT_TRANSITIVE_SHA256 = {
+    "robot_wm/modeling/dual_diffusion/adapters.py": (
+        "f905840fe0ffe54da47279eba01029ef7c228ae8b5595624c88a66b1f317733e"
+    ),
+    "robot_wm/modeling/networks/wan_forward_model.py": (
+        "4d2d49b23c7efc391379b7eb0e2437e6555b40770402d82c17dd03f777e814c1"
+    ),
+}
+PARENT_CURRENT_TRANSITIVE_BLOBS = {
+    "robot_wm/modeling/dual_diffusion/adapters.py": (
+        "e908586003f761bd819b5864e151713c60258fdb"
+    ),
+    "robot_wm/modeling/networks/wan_forward_model.py": (
+        "53bbbb77d39567574169bc8048ec12e7dc984a15"
+    ),
+}
 PARENT_EVALUATION_MODEL_CODE = "PARENT-VPM"
 PARENT_PARITY_KIND = "raw_physics_flow_native_parent_sampler_parity"
 PARENT_PARITY_FILENAME = "parent_sampler_parity.json"
@@ -489,6 +534,23 @@ def tensor_sha256(value: np.ndarray) -> str:
     digest.update(canonical_json(list(array.shape)))
     digest.update(b"\0")
     digest.update(memoryview(array).cast("B"))
+    return digest.hexdigest()
+
+
+def torch_tensor_sha256(value: Any) -> str:
+    """Hash a torch tensor, including scalar tensors, with parity semantics."""
+
+    import torch
+
+    if not isinstance(value, torch.Tensor):
+        raise PhysicsFlowStage1Error("torch tensor hash requires a tensor")
+    tensor = value.detach().cpu().contiguous()
+    digest = hashlib.sha256()
+    digest.update(str(tensor.dtype).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(canonical_json(list(tensor.shape)))
+    digest.update(b"\0")
+    digest.update(memoryview(tensor.reshape(-1).view(torch.uint8).numpy()))
     return digest.hexdigest()
 
 
@@ -1974,15 +2036,18 @@ def _study_source_files(repo: Path) -> dict[str, Any]:
     relative_paths = (
         "docs/experiments/PHYSICS_FLOW_WAN_SCREEN_PROTOCOL.md",
         "docs/experiments/PHYSICS_FLOW_PARENT_LINEAGE.md",
+        "docs/experiments/PHYSICS_FLOW_STAGE1_LAUNCH_RUNBOOK.md",
         "tools/physics_flow_stage1.py",
         "tools/physics_flow_stage1_evaluate.py",
         "tools/physics_flow_parent_vpm.py",
         "tools/physics_flow_parent_parity.py",
+        "tools/physics_flow_parent_reference.py",
         "tools/physics_flow_lpips.py",
         "tools/snapshot_model_state_receipt.py",
         "tools/physics_flow_stage1_workflow.py",
         "tools/slurm/physics_flow_stage1.sbatch",
         "projects/latent_action_models/physics_flow_train.py",
+        PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE,
         "projects/latent_action_models/lam/physics_flow_model.py",
         "projects/latent_action_models/configs/experiments_0908/physics_flow_common.yaml",
         "projects/latent_action_models/configs/experiments_0908/ravenhuang/wan-dit/physics_flow_off.yaml",
@@ -1990,6 +2055,7 @@ def _study_source_files(repo: Path) -> dict[str, Any]:
         "projects/latent_action_models/configs/models/physics_flow_model.yaml",
         "robot_wm/datasets/abc/physics_flow_dataset.py",
         "robot_wm/modeling/dual_diffusion/physics_flow.py",
+        *PARENT_TRANSITIVE_SOURCE_FILES,
         "robot_wm/utils/physics_flow_trainer.py",
     )
     records = {}
@@ -2253,6 +2319,111 @@ def command_register_study(args: argparse.Namespace) -> int:
     parent_lineage = _validate_parent_lineage(args, parent)
     runtime = _registered_runtime(args, Path(source["path"]))
     source_files = _study_source_files(Path(source["path"]))
+    historical_source = clean_repository(
+        args.parent_source_repo,
+        PARENT_TRAINING_SOURCE_COMMIT,
+        "historical native-parent source",
+    )
+    if historical_source["path"] == source["path"]:
+        raise PhysicsFlowStage1Error(
+            "historical parent source requires an isolated worktree"
+        )
+    native_sampler_source = source_files[PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE]
+    if (
+        native_sampler_source["sha256"]
+        != PARENT_NATIVE_SAMPLER_SOURCE_SHA256
+        or git(
+            Path(source["path"]),
+            "rev-parse",
+            f"{PARENT_TRAINING_SOURCE_COMMIT}:"
+            f"{PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE}",
+        )
+        != PARENT_NATIVE_SAMPLER_GIT_BLOB
+        or git(
+            Path(source["path"]),
+            "hash-object",
+            PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE,
+        )
+        != PARENT_NATIVE_SAMPLER_GIT_BLOB
+        or git(
+            Path(source["path"]),
+            "diff",
+            "--exit-code",
+            PARENT_TRAINING_SOURCE_COMMIT,
+            "--",
+            PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE,
+        )
+    ):
+        raise PhysicsFlowStage1Error(
+            "native parent sampler source differs from its training commit"
+        )
+    historical_native_sampler = file_record(
+        Path(historical_source["path"]) / PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE
+    )
+    if historical_native_sampler["sha256"] != PARENT_NATIVE_SAMPLER_SOURCE_SHA256:
+        raise PhysicsFlowStage1Error("historical native parent sampler changed")
+    changed_runtime_files = set(
+        filter(
+            None,
+            git(
+                Path(source["path"]),
+                "diff",
+                "--name-only",
+                PARENT_TRAINING_SOURCE_COMMIT,
+                "--",
+                PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE,
+                *PARENT_TRANSITIVE_SOURCE_FILES,
+            ).splitlines(),
+        )
+    )
+    if changed_runtime_files != set(PARENT_TRANSITIVE_SOURCE_FILES):
+        raise PhysicsFlowStage1Error(
+            "native parent transitive runtime delta inventory differs"
+        )
+    historical_transitive = {}
+    current_transitive = {}
+    for relative in PARENT_TRANSITIVE_SOURCE_FILES:
+        historical_record = file_record(Path(historical_source["path"]) / relative)
+        current_record = source_files[relative]
+        historical_blob = git(
+            Path(historical_source["path"]), "hash-object", relative
+        )
+        current_blob = git(Path(source["path"]), "hash-object", relative)
+        if (
+            historical_record["sha256"]
+            != PARENT_HISTORICAL_TRANSITIVE_SHA256[relative]
+            or historical_blob != PARENT_HISTORICAL_TRANSITIVE_BLOBS[relative]
+            or current_record["sha256"]
+            != PARENT_CURRENT_TRANSITIVE_SHA256[relative]
+            or current_blob != PARENT_CURRENT_TRANSITIVE_BLOBS[relative]
+        ):
+            raise PhysicsFlowStage1Error(
+                f"native parent transitive source differs: {relative}"
+            )
+        historical_transitive[relative] = {
+            "file": historical_record,
+            "git_blob": historical_blob,
+        }
+        current_transitive[relative] = {
+            "file": current_record,
+            "git_blob": current_blob,
+        }
+    if b"preserve_zero_support" in Path(
+        parent_resolved_config["path"]
+    ).read_bytes():
+        raise PhysicsFlowStage1Error(
+            "historical parent config unexpectedly names preserve_zero_support"
+        )
+    transitive_runtime_delta = {
+        "changed_files": sorted(changed_runtime_files),
+        "historical": historical_transitive,
+        "current": current_transitive,
+        "only_added_runtime_option": "preserve_zero_support",
+        "historical_config_key_present": False,
+        "current_default_when_key_absent": False,
+        "current_runtime_false_required": True,
+        "behavioral_equivalence_requires_isolated_bitwise_output_parity": True,
+    }
     output.mkdir(mode=0o700)
     arm_identities = {
         arm.code: hashlib.sha256(
@@ -2297,6 +2468,15 @@ def command_register_study(args: argparse.Namespace) -> int:
                 "ema": False,
                 "sole_parent_and_control": True,
                 "native_evaluation_endpoint": PARENT_EVALUATION_MODEL_CODE,
+                "native_sampler_training_source_commit": (
+                    PARENT_TRAINING_SOURCE_COMMIT
+                ),
+                "native_sampler_source": native_sampler_source,
+                "historical_source_repository": historical_source,
+                "historical_native_sampler_source": historical_native_sampler,
+                "native_sampler_git_blob": PARENT_NATIVE_SAMPLER_GIT_BLOB,
+                "native_sampler_source_bit_identical_to_training_commit": True,
+                "transitive_runtime_source_delta": transitive_runtime_delta,
                 "direct_residual_weights_or_outcomes_imported": False,
             },
             "parent_performance_lineage": parent_lineage,
@@ -2324,6 +2504,12 @@ def command_register_study(args: argparse.Namespace) -> int:
             },
             "evaluation_contract": {
                 "population": "all prospectively registered D405 rows in immutable val64",
+                "prospective_scope": (
+                    "Stage-1 branch endpoints, gate, and analysis frozen before this "
+                    "branch's training or generated-video outcomes"
+                ),
+                "val64_globally_new_or_untouched_claim": False,
+                "val64_may_have_prior_use_elsewhere_in_research_program": True,
                 "d405_count": val_cache["d405_count"],
                 "noise_seed_ids": list(NOISE_SEEDS),
                 "nfe_grid": list(NFE_GRID),
@@ -2344,6 +2530,12 @@ def command_register_study(args: argparse.Namespace) -> int:
                     "nfe_grid": list(NFE_GRID),
                     "public_reference_method": "sample_future_deployable",
                     "adapter_method": "materialize_native_parent_endpoint",
+                    "historical_reference_output": str(
+                        output / PARENT_HISTORICAL_REFERENCE_FILENAME
+                    ),
+                    "historical_reference_process_isolated": True,
+                    "historical_source_commit": PARENT_TRAINING_SOURCE_COMMIT,
+                    "historical_vs_current_bitwise_parity_required": True,
                     "bitwise_parity_required": True,
                     "future_rgb_bytes_opened": False,
                     "validation_dataset_opened": False,
@@ -2415,6 +2607,7 @@ def command_register_study(args: argparse.Namespace) -> int:
                     "future_rgb_sampler_input": False,
                     "future_measured_state_cache_or_sampler_input": False,
                     "paired_200_update_trace_required": True,
+                    "isolated_historical_parent_bitwise_parity_required": True,
                     "protected_test_accessed": False,
                 },
                 "all_conditions_required": True,
@@ -2468,6 +2661,52 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         or registration.get("parent", {}).get("native_evaluation_endpoint")
         != PARENT_EVALUATION_MODEL_CODE
         or registration.get("parent", {}).get(
+            "native_sampler_training_source_commit"
+        )
+        != PARENT_TRAINING_SOURCE_COMMIT
+        or registration.get("parent", {}).get("native_sampler_source", {}).get(
+            "sha256"
+        )
+        != PARENT_NATIVE_SAMPLER_SOURCE_SHA256
+        or registration.get("parent", {}).get("native_sampler_git_blob")
+        != PARENT_NATIVE_SAMPLER_GIT_BLOB
+        or registration.get("parent", {}).get(
+            "native_sampler_source_bit_identical_to_training_commit"
+        )
+        is not True
+        or registration.get("parent", {})
+        .get("historical_source_repository", {})
+        .get("git_commit")
+        != PARENT_TRAINING_SOURCE_COMMIT
+        or registration.get("parent", {})
+        .get("historical_native_sampler_source", {})
+        .get("sha256")
+        != PARENT_NATIVE_SAMPLER_SOURCE_SHA256
+        or registration.get("parent", {})
+        .get("transitive_runtime_source_delta", {})
+        .get("changed_files")
+        != sorted(PARENT_TRANSITIVE_SOURCE_FILES)
+        or registration.get("parent", {})
+        .get("transitive_runtime_source_delta", {})
+        .get("only_added_runtime_option")
+        != "preserve_zero_support"
+        or registration.get("parent", {})
+        .get("transitive_runtime_source_delta", {})
+        .get("historical_config_key_present")
+        is not False
+        or registration.get("parent", {})
+        .get("transitive_runtime_source_delta", {})
+        .get("current_default_when_key_absent")
+        is not False
+        or registration.get("parent", {})
+        .get("transitive_runtime_source_delta", {})
+        .get("current_runtime_false_required")
+        is not True
+        or registration.get("parent", {})
+        .get("transitive_runtime_source_delta", {})
+        .get("behavioral_equivalence_requires_isolated_bitwise_output_parity")
+        is not True
+        or registration.get("parent", {}).get(
             "direct_residual_weights_or_outcomes_imported"
         )
         is not False
@@ -2485,6 +2724,14 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         is not True
         or registration.get("evaluation_contract", {}).get("endpoints")
         != [asdict(endpoint) for endpoint in ENDPOINTS]
+        or registration.get("evaluation_contract", {}).get(
+            "val64_globally_new_or_untouched_claim"
+        )
+        is not False
+        or registration.get("evaluation_contract", {}).get(
+            "val64_may_have_prior_use_elsewhere_in_research_program"
+        )
+        is not True
         or parity_contract.get("kind") != PARENT_PARITY_KIND
         or parity_contract.get("input_split") != "train"
         or parity_contract.get("clip_index") != PARENT_PARITY_TRAIN_INDEX
@@ -2496,6 +2743,14 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         != "sample_future_deployable"
         or parity_contract.get("adapter_method")
         != "materialize_native_parent_endpoint"
+        or parity_contract.get("historical_reference_process_isolated")
+        is not True
+        or parity_contract.get("historical_source_commit")
+        != PARENT_TRAINING_SOURCE_COMMIT
+        or parity_contract.get(
+            "historical_vs_current_bitwise_parity_required"
+        )
+        is not True
         or parity_contract.get("bitwise_parity_required") is not True
         or parity_contract.get("future_rgb_bytes_opened") is not False
         or parity_contract.get("validation_dataset_opened") is not False
@@ -2531,6 +2786,12 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         output / PARENT_PARITY_FILENAME
     ):
         raise PhysicsFlowStage1Error("native parent parity output differs")
+    if Path(
+        str(parity_contract.get("historical_reference_output", ""))
+    ).absolute() != (output / PARENT_HISTORICAL_REFERENCE_FILENAME):
+        raise PhysicsFlowStage1Error(
+            "historical parent reference output differs"
+        )
     source = registration["source_repository"]
     if clean_repository(
         Path(source["path"]), source["git_commit"], "study source"
@@ -2540,6 +2801,109 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         observed = file_record(Path(source["path"]) / relative)
         if observed != record:
             raise PhysicsFlowStage1Error(f"registered source file changed: {relative}")
+    native_sampler_source = registration["parent"]["native_sampler_source"]
+    if (
+        native_sampler_source
+        != registration["source_files"][PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE]
+        or git(
+            Path(source["path"]),
+            "rev-parse",
+            f"{PARENT_TRAINING_SOURCE_COMMIT}:"
+            f"{PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE}",
+        )
+        != PARENT_NATIVE_SAMPLER_GIT_BLOB
+        or git(
+            Path(source["path"]),
+            "hash-object",
+            PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE,
+        )
+        != PARENT_NATIVE_SAMPLER_GIT_BLOB
+        or git(
+            Path(source["path"]),
+            "diff",
+            "--exit-code",
+            PARENT_TRAINING_SOURCE_COMMIT,
+            "--",
+            PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE,
+        )
+    ):
+        raise PhysicsFlowStage1Error(
+            "registered native sampler differs from parent training source"
+        )
+    historical_source = registration["parent"]["historical_source_repository"]
+    if clean_repository(
+        Path(historical_source["path"]),
+        PARENT_TRAINING_SOURCE_COMMIT,
+        "historical native-parent source",
+    ) != historical_source:
+        raise PhysicsFlowStage1Error(
+            "historical native-parent source changed after registration"
+        )
+    if historical_source["path"] == source["path"]:
+        raise PhysicsFlowStage1Error(
+            "historical native-parent source is not isolated"
+        )
+    historical_native = file_record(
+        Path(historical_source["path"]) / PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE
+    )
+    if (
+        historical_native
+        != registration["parent"]["historical_native_sampler_source"]
+        or historical_native["sha256"] != PARENT_NATIVE_SAMPLER_SOURCE_SHA256
+    ):
+        raise PhysicsFlowStage1Error("historical native sampler source differs")
+    delta = registration["parent"]["transitive_runtime_source_delta"]
+    changed_runtime_files = set(
+        filter(
+            None,
+            git(
+                Path(source["path"]),
+                "diff",
+                "--name-only",
+                PARENT_TRAINING_SOURCE_COMMIT,
+                "--",
+                PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE,
+                *PARENT_TRANSITIVE_SOURCE_FILES,
+            ).splitlines(),
+        )
+    )
+    if changed_runtime_files != set(PARENT_TRANSITIVE_SOURCE_FILES):
+        raise PhysicsFlowStage1Error(
+            "registered parent transitive runtime delta changed"
+        )
+    for relative in PARENT_TRANSITIVE_SOURCE_FILES:
+        historical_record = file_record(Path(historical_source["path"]) / relative)
+        current_record = registration["source_files"][relative]
+        expected_historical = {
+            "file": historical_record,
+            "git_blob": PARENT_HISTORICAL_TRANSITIVE_BLOBS[relative],
+        }
+        expected_current = {
+            "file": current_record,
+            "git_blob": PARENT_CURRENT_TRANSITIVE_BLOBS[relative],
+        }
+        if (
+            historical_record["sha256"]
+            != PARENT_HISTORICAL_TRANSITIVE_SHA256[relative]
+            or git(Path(historical_source["path"]), "hash-object", relative)
+            != PARENT_HISTORICAL_TRANSITIVE_BLOBS[relative]
+            or current_record["sha256"]
+            != PARENT_CURRENT_TRANSITIVE_SHA256[relative]
+            or git(Path(source["path"]), "hash-object", relative)
+            != PARENT_CURRENT_TRANSITIVE_BLOBS[relative]
+            or delta.get("historical", {}).get(relative)
+            != expected_historical
+            or delta.get("current", {}).get(relative) != expected_current
+        ):
+            raise PhysicsFlowStage1Error(
+                f"registered parent transitive source differs: {relative}"
+            )
+    if b"preserve_zero_support" in Path(
+        registration["parent"]["resolved_config"]["path"]
+    ).read_bytes():
+        raise PhysicsFlowStage1Error(
+            "registered parent config preserve-zero default changed"
+        )
     for split in ("train", "val"):
         receipt = registration["flow_caches"][split]
         metadata = Path(receipt["metadata"]["path"])
@@ -2620,6 +2984,10 @@ def load_parent_sampler_parity(
         or parity.get("nfe_grid") != list(NFE_GRID)
         or parity.get("bitwise_parity_required") is not True
         or parity.get("all_bitwise") is not True
+        or parity.get("historical_reference_process_isolated") is not True
+        or parity.get("historical_vs_current_bitwise_parity_required") is not True
+        or parity.get("historical_vs_current_all_bitwise") is not True
+        or parity.get("temporary_target_blind_bundle_removed") is not True
         or parity.get("validation_dataset_opened") is not False
         or parity.get("future_rgb_bytes_opened") is not False
         or parity.get("future_measured_state_opened") is not False
@@ -2642,10 +3010,85 @@ def load_parent_sampler_parity(
         or parent.get("strict_state_load") is not True
         or parent.get("native_public_sampler")
         != "sample_future_deployable"
+        or parent.get("native_sampler_training_source_commit")
+        != PARENT_TRAINING_SOURCE_COMMIT
+        or parent.get("native_sampler_source")
+        != registration["parent"]["native_sampler_source"]
+        or parent.get("native_sampler_git_blob")
+        != PARENT_NATIVE_SAMPLER_GIT_BLOB
+        or parent.get(
+            "native_sampler_source_bit_identical_to_training_commit"
+        )
+        is not True
+        or parent.get("transitive_runtime_source_delta")
+        != registration["parent"]["transitive_runtime_source_delta"]
+        or parent.get("historical_config_preserve_zero_support_key_present")
+        is not False
+        or parent.get("current_runtime_preserve_zero_support") is not False
+        or parent.get("isolated_historical_output_parity_required") is not True
         or parent.get("continued_training_updates") != 0
         or parent.get("protected_test_accessed") is not False
     ):
         raise PhysicsFlowStage1Error("native parent parity state binding differs")
+    historical_reference = parity.get("historical_reference")
+    historical_reference_path = Path(
+        registration["output_root"]
+    ) / PARENT_HISTORICAL_REFERENCE_FILENAME
+    if (
+        parity.get("historical_source_repository")
+        != registration["parent"]["historical_source_repository"]
+        or not isinstance(historical_reference, Mapping)
+        or file_record(historical_reference_path) != historical_reference
+        or Path(historical_reference["path"]).resolve(strict=True)
+        != historical_reference_path.resolve(strict=True)
+    ):
+        raise PhysicsFlowStage1Error(
+            "isolated historical parent reference binding differs"
+        )
+    try:
+        import torch
+
+        historical_payload = torch.load(
+            historical_reference_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+    except Exception as exc:
+        raise PhysicsFlowStage1Error(
+            "unable to replay isolated historical parent reference"
+        ) from exc
+    historical_results = (
+        historical_payload.get("results")
+        if isinstance(historical_payload, Mapping)
+        else None
+    )
+    if (
+        not isinstance(historical_payload, Mapping)
+        or historical_payload.get("kind")
+        != "raw_physics_flow_historical_parent_reference"
+        or historical_payload.get("implementation_commit")
+        != PARENT_TRAINING_SOURCE_COMMIT
+        or historical_payload.get("native_public_sampler")
+        != "sample_future_deployable"
+        or historical_payload.get("condition_source") != "off"
+        or historical_payload.get("schedule_mode") != "aligned"
+        or historical_payload.get("nfe_grid") != list(NFE_GRID)
+        or historical_payload.get("strict_state_load") is not True
+        or historical_payload.get(
+            "historical_preserve_zero_support_attribute_absent"
+        )
+        is not True
+        or historical_payload.get("total_wan_calls") != sum(NFE_GRID)
+        or historical_payload.get("validation_dataset_opened") is not False
+        or historical_payload.get("future_rgb_bytes_opened") is not False
+        or historical_payload.get("future_measured_state_opened") is not False
+        or historical_payload.get("protected_test_accessed") is not False
+        or not isinstance(historical_results, Mapping)
+        or set(historical_results) != {str(nfe) for nfe in NFE_GRID}
+    ):
+        raise PhysicsFlowStage1Error(
+            "isolated historical parent reference payload differs"
+        )
     input_evidence = parity.get("input")
     train_metadata = load_cache_metadata(
         Path(registration["flow_caches"]["train"]["metadata"]["path"]),
@@ -2687,6 +3130,7 @@ def load_parent_sampler_parity(
     if set(by_nfe) != set(NFE_GRID):
         raise PhysicsFlowStage1Error("native parent parity NFE population differs")
     for nfe, row in by_nfe.items():
+        historical_result = historical_results[str(nfe)]
         if (
             row.get("direct_native_wan_calls") != nfe
             or row.get("adapter_wan_calls") != nfe
@@ -2697,10 +3141,40 @@ def load_parent_sampler_parity(
                 "adapter_full_precision_initial_noise_bitwise_equal"
             )
             is not True
+            or row.get(
+                "historical_6560866_vs_current_latent_bitwise_equal"
+            )
+            is not True
+            or row.get(
+                "historical_6560866_vs_current_decoded_bitwise_equal"
+            )
+            is not True
+            or row.get(
+                "historical_6560866_vs_current_initial_noise_bitwise_equal"
+            )
+            is not True
             or row.get("direct_latent_sha256")
+            != row.get("adapter_latent_sha256")
+            or row.get("historical_latent_sha256")
             != row.get("adapter_latent_sha256")
             or row.get("direct_decoded_sha256")
             != row.get("adapter_decoded_sha256")
+            or row.get("historical_decoded_sha256")
+            != row.get("adapter_decoded_sha256")
+            or not isinstance(historical_result, Mapping)
+            or historical_result.get("wan_calls") != nfe
+            or historical_result.get("online_teacher_or_feature_calls") != 0
+            or historical_result.get("future_rgb_sampler_input") is not False
+            or historical_result.get("clean_video_latent_sampler_input")
+            is not False
+            or torch_tensor_sha256(historical_result.get("video_latent"))
+            != row.get("historical_latent_sha256")
+            or torch_tensor_sha256(historical_result.get("decoded_uint8"))
+            != row.get("historical_decoded_sha256")
+            or torch_tensor_sha256(
+                historical_result.get("video_initial_state_full_precision")
+            )
+            != row.get("explicit_video_noise_sha256")
             or any(
                 SHA256_RE.fullmatch(str(row.get(name, ""))) is None
                 for name in (
@@ -2930,6 +3404,29 @@ LOWER_BETTER_METRICS = (
 )
 
 
+def validate_evaluation_causal_flags(
+    value: Mapping[str, Any], *, label: str
+) -> None:
+    """Require the complete target-blind materialization boundary on evidence."""
+
+    required = {
+        "all_endpoints_materialized_before_future_rgb_open": True,
+        "future_rgb_sampler_input": False,
+        "future_measured_state_sampler_input": False,
+        "clean_video_latent_sampler_input": False,
+        "protected_test_accessed": False,
+    }
+    changed = {
+        key: value.get(key)
+        for key, expected in required.items()
+        if value.get(key) is not expected
+    }
+    if changed:
+        raise PhysicsFlowStage1Error(
+            f"{label} violates target-blind materialization flags: {changed}"
+        )
+
+
 def load_evaluation_rows(
     registration: Mapping[str, Any]
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -2937,6 +3434,7 @@ def load_evaluation_rows(
     root = Path(registration["output_root"]) / "evaluation"
     inventory_path = root / "inventory.json"
     inventory = read_json(inventory_path, "evaluation inventory")
+    validate_evaluation_causal_flags(inventory, label="evaluation inventory")
     d405_count = int(registration["evaluation_contract"]["d405_count"])
     expected_rows = d405_count * len(NOISE_SEEDS) * len(ENDPOINTS)
     if (
@@ -2956,9 +3454,17 @@ def load_evaluation_rows(
         != parent_parity_record
         or inventory.get("native_parent_sampler_parity_identity_sha256")
         != parent_parity["identity_sha256"]
+        or inventory.get("historical_parent_reference")
+        != parent_parity["historical_reference"]
+        or inventory.get("historical_vs_current_parent_all_bitwise") is not True
         or inventory.get("unmodified_de65_parent_endpoint_included") is not True
+        or inventory.get(
+            "all_endpoints_materialized_before_future_rgb_open"
+        )
+        is not True
         or inventory.get("future_rgb_sampler_input") is not False
         or inventory.get("future_measured_state_sampler_input") is not False
+        or inventory.get("clean_video_latent_sampler_input") is not False
         or inventory.get("protected_test_accessed") is not False
     ):
         raise PhysicsFlowStage1Error("evaluation inventory differs")
@@ -2982,6 +3488,9 @@ def load_evaluation_rows(
             receipts[rank], parent=root, label=f"rank {rank} receipt"
         )
         receipt = read_json(receipt_path, f"rank {rank} receipt")
+        validate_evaluation_causal_flags(
+            receipt, label=f"rank {rank} evaluation receipt"
+        )
         local_indexes = receipt.get("d405_clip_indexes", [])
         local_batches = math.ceil(len(local_indexes) / 2)
         expected_transformer_calls = {
@@ -3016,10 +3525,18 @@ def load_evaluation_rows(
             != parent_parity_record
             or receipt.get("native_parent_sampler_parity_identity_sha256")
             != parent_parity["identity_sha256"]
+            or receipt.get("historical_parent_reference")
+            != parent_parity["historical_reference"]
+            or receipt.get("historical_vs_current_parent_all_bitwise") is not True
             or receipt.get("transformer_calls_by_evaluation_model")
             != expected_transformer_calls
             or receipt.get("expected_transformer_calls_by_evaluation_model")
             != expected_transformer_calls
+            or receipt.get(
+                "all_endpoints_materialized_before_future_rgb_open"
+            )
+            is not True
+            or receipt.get("clean_video_latent_sampler_input") is not False
             or receipt.get("protected_test_accessed") is not False
         ):
             raise PhysicsFlowStage1Error(f"rank {rank} evaluation receipt differs")
@@ -3032,6 +3549,7 @@ def load_evaluation_rows(
     observed = {}
     metric_names = (*LOWER_BETTER_METRICS, "decoded_psnr_db")
     for row in rows:
+        validate_evaluation_causal_flags(row, label="evaluation row")
         endpoint_value = row.get("endpoint")
         code = endpoint_value.get("code") if isinstance(endpoint_value, Mapping) else None
         endpoint = ENDPOINT_BY_CODE.get(str(code))
@@ -3101,12 +3619,43 @@ def load_evaluation_rows(
                     or row["arm_artifacts"].get("strict_state_load") is not True
                     or row["arm_artifacts"].get("native_public_sampler")
                     != "sample_future_deployable"
+                    or row["arm_artifacts"].get(
+                        "native_sampler_training_source_commit"
+                    )
+                    != PARENT_TRAINING_SOURCE_COMMIT
+                    or row["arm_artifacts"].get("native_sampler_source")
+                    != registration["parent"]["native_sampler_source"]
+                    or row["arm_artifacts"].get(
+                        "transitive_runtime_source_delta"
+                    )
+                    != registration["parent"][
+                        "transitive_runtime_source_delta"
+                    ]
+                    or row["arm_artifacts"].get("native_sampler_git_blob")
+                    != PARENT_NATIVE_SAMPLER_GIT_BLOB
+                    or row["arm_artifacts"].get(
+                        "native_sampler_source_bit_identical_to_training_commit"
+                    )
+                    is not True
+                    or row["arm_artifacts"].get(
+                        "historical_config_preserve_zero_support_key_present"
+                    )
+                    is not False
+                    or row["arm_artifacts"].get(
+                        "current_runtime_preserve_zero_support"
+                    )
+                    is not False
+                    or row["arm_artifacts"].get(
+                        "isolated_historical_output_parity_required"
+                    )
+                    is not True
                     or row["arm_artifacts"].get("continued_training_updates")
                     != 0
                 )
             )
             or row.get("future_rgb_sampler_input") is not False
             or row.get("future_measured_state_sampler_input") is not False
+            or row.get("clean_video_latent_sampler_input") is not False
             or row.get("all_endpoints_materialized_before_future_rgb_open") is not True
             or row.get("lpips_evaluator_identity_sha256")
             != registration.get("runtime", {})
@@ -3372,6 +3921,11 @@ def analyze_study(
             parent_parity["all_bitwise"] is True
             and parent_parity["validation_dataset_opened"] is False
         ),
+        "isolated_historical_6560866_vs_current_bitwise_parity": (
+            parent_parity["historical_reference_process_isolated"] is True
+            and parent_parity["historical_vs_current_all_bitwise"] is True
+            and parent_parity["validation_dataset_opened"] is False
+        ),
         "paired_200_update_trace": pairing["paired_updates"] == 200,
         "all_primary_rows_one_Wan_call": all(
             row["actual_transformer_call_count"] == 1
@@ -3384,6 +3938,13 @@ def analyze_study(
         ),
         "future_measured_state_not_sampler_input": all(
             row["future_measured_state_sampler_input"] is False for row in rows
+        ),
+        "clean_video_latent_not_sampler_input": all(
+            row["clean_video_latent_sampler_input"] is False for row in rows
+        ),
+        "inventory_complete_materialization_before_future_rgb": (
+            inventory["all_endpoints_materialized_before_future_rgb_open"] is True
+            and inventory["clean_video_latent_sampler_input"] is False
         ),
         "protected_test_unopened": all(
             row["protected_test_accessed"] is False for row in rows
@@ -3537,7 +4098,8 @@ def command_audit_study(args: argparse.Namespace) -> int:
             continue
         if replay.get(key) != value:
             raise PhysicsFlowStage1Error(f"analysis replay differs at {key}")
-    artifact_hashes = 1  # target-blind native parent parity receipt
+    # Target-blind parity JSON plus isolated historical-reference tensor file.
+    artifact_hashes = 2
     for record in inventory["rank_files"]:
         _resolve_record(
             record,
@@ -3570,6 +4132,9 @@ def command_audit_study(args: argparse.Namespace) -> int:
                 "identity_sha256"
             ],
             "native_parent_sampler_parity": parent_parity_record,
+            "historical_parent_reference": parent_parity[
+                "historical_reference"
+            ],
             "evaluation_inventory_identity_sha256": inventory["identity_sha256"],
             "analysis_identity_sha256": analysis["identity_sha256"],
             "decision": analysis["decision"],
@@ -3583,12 +4148,15 @@ def command_audit_study(args: argparse.Namespace) -> int:
             "equal_Wan_calls_verified": True,
             "unmodified_de65_parent_endpoint_verified": True,
             "native_parent_sampler_bitwise_parity_verified": True,
+            "isolated_historical_parent_output_bitwise_parity_verified": True,
+            "all_endpoints_materialized_before_future_rgb_open": True,
             "lpips_evaluator_identity_sha256": registration["runtime"][
                 "lpips_alex"
             ]["identity_sha256"],
             "lpips_same_on_all_ranks_and_all_arm_endpoints": True,
             "future_rgb_sampler_input": False,
             "future_measured_state_cache_or_sampler_input": False,
+            "clean_video_latent_sampler_input": False,
             "recurrent_or_hybrid_condition_included": False,
             "protected_test_accessed": False,
         }
@@ -3632,6 +4200,7 @@ def build_parser() -> argparse.ArgumentParser:
     study = subparsers.add_parser("register-study")
     study.add_argument("--output", type=Path, required=True)
     study.add_argument("--source-repo", type=Path, required=True)
+    study.add_argument("--parent-source-repo", type=Path, required=True)
     study.add_argument("--expected-commit", required=True)
     study.add_argument("--train-flow-metadata", type=Path, required=True)
     study.add_argument("--val-flow-metadata", type=Path, required=True)

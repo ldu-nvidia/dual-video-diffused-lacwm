@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -167,10 +169,18 @@ def command_parity(args: argparse.Namespace) -> int:
     canonical_output = (
         Path(registration["output_root"]) / stage.PARENT_PARITY_FILENAME
     )
+    historical_output = (
+        Path(registration["output_root"])
+        / stage.PARENT_HISTORICAL_REFERENCE_FILENAME
+    )
     if args.output.expanduser().absolute() != canonical_output:
         raise ParentParityError(f"parity output must be {canonical_output}")
     if canonical_output.exists() or canonical_output.is_symlink():
         raise ParentParityError("fresh parent parity output already exists")
+    if historical_output.exists() or historical_output.is_symlink():
+        raise ParentParityError(
+            "fresh historical parent reference output already exists"
+        )
     if not torch.cuda.is_available():
         raise ParentParityError("parent parity requires a B200 GPU")
     device = torch.device("cuda", 0)
@@ -181,6 +191,103 @@ def command_parity(args: argparse.Namespace) -> int:
     # Train history is opened before model sampling; no validation dataset or
     # train future RGB is ever indexed by this command.
     batch, input_evidence = _registered_train_input(registration, device)
+    target_blind_bundle = canonical_output.with_name(
+        f".parent_parity_input.{os.getpid()}.pt"
+    )
+    if target_blind_bundle.exists() or target_blind_bundle.is_symlink():
+        raise ParentParityError("fresh target-blind bundle path already exists")
+    torch.save(
+        {
+            "history_rgb": batch["history_rgb"].detach().cpu(),
+            "actions": batch["actions"].detach().cpu(),
+            "morphology_index": batch["morphology_index"].detach().cpu(),
+            "sample_ids": batch["sample_ids"].detach().cpu(),
+        },
+        target_blind_bundle,
+    )
+    reference_tool = REPO_ROOT / "tools" / "physics_flow_parent_reference.py"
+    reference_command = [
+        registration["runtime"]["python"],
+        str(reference_tool),
+        "--implementation-repo",
+        registration["parent"]["historical_source_repository"]["path"],
+        "--parent-config",
+        registration["parent"]["resolved_config"]["path"],
+        "--parent-snapshot",
+        registration["parent"]["snapshot"]["path"],
+        "--input",
+        str(target_blind_bundle),
+        "--output",
+        str(historical_output),
+        "--wan-dir",
+        registration["runtime"]["wan_dir"],
+        "--videox-home",
+        registration["runtime"]["videox_home"],
+    ]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = ""
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = None
+    try:
+        try:
+            completed = subprocess.run(
+                reference_command,
+                cwd=registration["parent"][
+                    "historical_source_repository"
+                ]["path"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1800,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ParentParityError(
+                "isolated historical parent reference timed out"
+            ) from exc
+    finally:
+        if target_blind_bundle.exists():
+            target_blind_bundle.unlink()
+    if completed is None or completed.returncode or not historical_output.is_file():
+        detail = (
+            "subprocess returned no result"
+            if completed is None
+            else completed.stderr.strip() or completed.stdout.strip()
+        )
+        raise ParentParityError(
+            f"isolated historical parent reference failed: {detail}"
+        )
+    historical = torch.load(
+        historical_output, map_location="cpu", weights_only=True
+    )
+    historical_results = historical.get("results") if isinstance(
+        historical, Mapping
+    ) else None
+    if (
+        not isinstance(historical, Mapping)
+        or historical.get("kind")
+        != "raw_physics_flow_historical_parent_reference"
+        or historical.get("implementation_commit")
+        != stage.PARENT_TRAINING_SOURCE_COMMIT
+        or historical.get("native_public_sampler")
+        != "sample_future_deployable"
+        or historical.get("condition_source") != "off"
+        or historical.get("schedule_mode") != "aligned"
+        or historical.get("nfe_grid") != list(stage.NFE_GRID)
+        or historical.get("strict_state_load") is not True
+        or historical.get(
+            "historical_preserve_zero_support_attribute_absent"
+        )
+        is not True
+        or historical.get("total_wan_calls") != sum(stage.NFE_GRID)
+        or historical.get("validation_dataset_opened") is not False
+        or historical.get("future_rgb_bytes_opened") is not False
+        or historical.get("future_measured_state_opened") is not False
+        or historical.get("protected_test_accessed") is not False
+        or not isinstance(historical_results, Mapping)
+        or set(historical_results) != {str(nfe) for nfe in stage.NFE_GRID}
+    ):
+        raise ParentParityError("isolated historical parent evidence differs")
     model, parent_artifacts = load_exact_parent_model(registration, device)
     hook_counter = [0]
 
@@ -228,6 +335,17 @@ def command_parity(args: argparse.Namespace) -> int:
                 direct["video_initial_state_fp16"],
                 adapted["video_initial_state_fp16"],
             )
+            historical_result = historical_results[str(nfe)]
+            historical_latent_bitwise = torch.equal(
+                historical_result["video_latent"], adapted["video_latent"]
+            )
+            historical_decoded_bitwise = torch.equal(
+                historical_result["decoded_uint8"], adapted["decoded_uint8"]
+            )
+            historical_noise_bitwise = torch.equal(
+                historical_result["video_initial_state_full_precision"],
+                expected_noise.detach().cpu(),
+            )
             if (
                 direct["hook_wan_calls"] != nfe
                 or direct["wan_calls"] != nfe
@@ -240,6 +358,14 @@ def command_parity(args: argparse.Namespace) -> int:
                 or not latent_bitwise
                 or not decoded_bitwise
                 or not initial_noise_bitwise
+                or historical_result.get("wan_calls") != nfe
+                or historical_result.get("online_teacher_or_feature_calls") != 0
+                or historical_result.get("future_rgb_sampler_input") is not False
+                or historical_result.get("clean_video_latent_sampler_input")
+                is not False
+                or not historical_latent_bitwise
+                or not historical_decoded_bitwise
+                or not historical_noise_bitwise
             ):
                 raise ParentParityError(
                     f"native parent adapter is not bitwise at NFE {nfe}"
@@ -255,6 +381,15 @@ def command_parity(args: argparse.Namespace) -> int:
                         initial_noise_bitwise
                     ),
                     "adapter_full_precision_initial_noise_bitwise_equal": True,
+                    "historical_6560866_vs_current_latent_bitwise_equal": (
+                        historical_latent_bitwise
+                    ),
+                    "historical_6560866_vs_current_decoded_bitwise_equal": (
+                        historical_decoded_bitwise
+                    ),
+                    "historical_6560866_vs_current_initial_noise_bitwise_equal": (
+                        historical_noise_bitwise
+                    ),
                     "explicit_video_noise_sha256": _torch_tensor_hash(
                         expected_noise
                     ),
@@ -270,6 +405,12 @@ def command_parity(args: argparse.Namespace) -> int:
                     "adapter_decoded_sha256": _torch_tensor_hash(
                         adapted["decoded_uint8"]
                     ),
+                    "historical_latent_sha256": _torch_tensor_hash(
+                        historical_result["video_latent"]
+                    ),
+                    "historical_decoded_sha256": _torch_tensor_hash(
+                        historical_result["decoded_uint8"]
+                    ),
                 }
             )
     finally:
@@ -282,6 +423,16 @@ def command_parity(args: argparse.Namespace) -> int:
             "status": "bitwise_native_parent_sampler_parity_passed",
             "registration_identity_sha256": registration["identity_sha256"],
             "parent": parent_artifacts,
+            "historical_source_repository": registration["parent"][
+                "historical_source_repository"
+            ],
+            "historical_reference": stage.file_record(historical_output),
+            "historical_reference_process_isolated": True,
+            "historical_vs_current_bitwise_parity_required": True,
+            "historical_vs_current_all_bitwise": True,
+            "temporary_target_blind_bundle_removed": (
+                not target_blind_bundle.exists()
+            ),
             "public_reference_method": "sample_future_deployable",
             "evaluation_adapter_method": (
                 "materialize_native_parent_endpoint"

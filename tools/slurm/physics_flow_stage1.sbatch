@@ -70,11 +70,12 @@ STAGE_TOOL="$REPO_ROOT/tools/physics_flow_stage1.py"
 EVALUATOR="$REPO_ROOT/tools/physics_flow_stage1_evaluate.py"
 PARENT_PARITY="$REPO_ROOT/tools/physics_flow_parent_parity.py"
 PARENT_ADAPTER="$REPO_ROOT/tools/physics_flow_parent_vpm.py"
+PARENT_REFERENCE="$REPO_ROOT/tools/physics_flow_parent_reference.py"
 TRAINER="$REPO_ROOT/projects/latent_action_models/physics_flow_train.py"
 ACTIVATE="$REPO_ROOT/tools/env/activate_b200.sh"
 VERIFY_RUNTIME="$REPO_ROOT/tools/env/verify_b200_runtime.py"
 for path in "$WORKFLOW" "$STAGE_TOOL" "$EVALUATOR" "$PARENT_PARITY" \
-  "$PARENT_ADAPTER" "$TRAINER" "$ACTIVATE" "$VERIFY_RUNTIME"; do
+  "$PARENT_ADAPTER" "$PARENT_REFERENCE" "$TRAINER" "$ACTIVATE" "$VERIFY_RUNTIME"; do
   [[ -f "$path" && ! -L "$path" ]] || die "required implementation missing: $path"
 done
 

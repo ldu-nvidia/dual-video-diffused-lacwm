@@ -865,9 +865,15 @@ def command_evaluate(args: argparse.Namespace) -> int:
             "native_parent_sampler_parity_identity_sha256": parent_parity[
                 "identity_sha256"
             ],
+            "historical_parent_reference": parent_parity[
+                "historical_reference"
+            ],
+            "historical_vs_current_parent_all_bitwise": True,
             "lpips_evaluator_identity_sha256": lpips_receipt["identity_sha256"],
+            "all_endpoints_materialized_before_future_rgb_open": True,
             "future_rgb_sampler_input": False,
             "future_measured_state_sampler_input": False,
+            "clean_video_latent_sampler_input": False,
             "protected_test_accessed": False,
         }
     )
@@ -900,12 +906,24 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 != parent_parity["identity_sha256"]
                 or source_receipt.get("native_parent_sampler_parity")
                 != parent_parity_record
+                or source_receipt.get("historical_parent_reference")
+                != parent_parity["historical_reference"]
+                or source_receipt.get(
+                    "historical_vs_current_parent_all_bitwise"
+                )
+                is not True
                 or source_receipt.get(
                     "transformer_calls_by_evaluation_model"
                 )
                 != source_receipt.get(
                     "expected_transformer_calls_by_evaluation_model"
                 )
+                or source_receipt.get(
+                    "all_endpoints_materialized_before_future_rgb_open"
+                )
+                is not True
+                or source_receipt.get("clean_video_latent_sampler_input")
+                is not False
                 or source_receipt.get("protected_test_accessed") is not False
             ):
                 raise PhysicsFlowEvaluationError("rank evaluation receipt differs")
@@ -934,11 +952,16 @@ def command_evaluate(args: argparse.Namespace) -> int:
                 "native_parent_sampler_parity_identity_sha256": parent_parity[
                     "identity_sha256"
                 ],
+                "historical_parent_reference": parent_parity[
+                    "historical_reference"
+                ],
+                "historical_vs_current_parent_all_bitwise": True,
                 "unmodified_de65_parent_endpoint_included": True,
                 "lpips_same_on_all_ranks_and_all_arm_endpoints": True,
                 "all_endpoints_materialized_before_future_rgb_open": True,
                 "future_rgb_sampler_input": False,
                 "future_measured_state_sampler_input": False,
+                "clean_video_latent_sampler_input": False,
                 "protected_test_accessed": False,
             }
         )

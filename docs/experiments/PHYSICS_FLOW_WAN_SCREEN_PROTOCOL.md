@@ -6,6 +6,12 @@ Status: **prospective; no video-model training or generated-video outcome may
 open until the exact source commit, caches, audits, parent, runtime, and this
 protocol are sealed in `registration.json`**
 
+“Prospective” is strictly branch-scoped: the Stage-1 endpoints, thresholds,
+analysis, and D405 subset are frozen before this branch's training or generated
+video outcomes. The immutable val64 rows may have been used elsewhere in the
+broader research program; this protocol makes no claim that val64 is globally
+new, untouched, or a protected final test set.
+
 ## Question and claim boundary
 
 At equal Wan transformer calls, does a deterministic robot-motion field built
@@ -35,6 +41,17 @@ hashes, the full mismatch receipt, its failed predecessor, and the ladder and
 direct-residual lineages. It also binds the exact parent resolved configuration
 with SHA-256
 `ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38`.
+The public sampler source is additionally proven byte-identical to parent
+training commit `656086686dae723c942a4209a9d71cdb17ed6ccc`: file SHA-256
+`a10fe3730f7bb3bacd20bd14ebbcfab2b3cf8c63a2db27783f1e8a9787b87ee6`,
+git blob `abc6d4df165f684c2c93920d079585c600562dbb`.
+Two transitive files differ only by the later `preserve_zero_support` option:
+`adapters.py` historical/current blobs `5b861945…`/`e9085860…` and
+`wan_forward_model.py` `e8b2fd44…`/`53bbbb77…`. Registration binds both old
+and new files/blobs and the exact changed-file inventory. The historical YAML
+must omit the option, the current default and instantiated runtime value must
+both be false, and this source argument alone is not accepted as behavioral
+proof.
 
 Recurrent-delta and hybrid-anchor trajectories are deliberately excluded. The
 fresh renderer study found a large recurrent flow improvement but did not pass
@@ -189,16 +206,23 @@ calls. No endpoint makes a field-model, teacher, or online feature call.
 
 Before the validation mmap is constructed, a separate fail-closed receipt uses
 only frames 0:5 and candidate actions from prospectively fixed immutable train
-clip 0. At NFE 1/2/4 it compares the evaluation adapter bit-for-bit with a
-direct invocation of the exact de65 model's public
+clip 0. First, a separate Python process imports the exact de65 model and all
+repository-owned transitive model code from an independently registered clean
+worktree at exact commit 6560866. The historical and current source paths use
+the same separately registered Python, Wan, and VideoX external runtime. At
+NFE 1/2/4 the historical process runs the public
 `sample_future_deployable` method under condition off, its native aligned VPM
-schedule, and fixed sample ID 7,000,000. The snapshot, canonical 1,686-tensor
-state identity, resolved configuration, input hashes, explicit video noise,
-full-precision equality between that noise and the first Wan input, Wan-call
-counts, final latent, and decoded uint8 output are bound in
-`parent_sampler_parity.json`. Any non-bitwise result stops before validation
-outcomes; no train future RGB, validation RGB, future measured state, teacher,
-or protected test data are opened by this proof.
+schedule, and fixed sample ID 7,000,000. The current evaluation adapter then
+must equal those historical-process latents and decoded uint8 tensors bit for
+bit; it must also equal a direct current public-method invocation bit for bit.
+The snapshot, canonical 1,686-tensor state identity, resolved configuration,
+both source worktrees/deltas, input hashes, explicit video noise,
+full-precision equality between that noise and each first Wan input, Wan-call
+counts, final latent, and decoded output are bound by
+`parent_historical_reference.pt` and `parent_sampler_parity.json`. Any
+non-bitwise result stops before validation outcomes; no train future RGB,
+validation RGB, future measured state, clean video latent, teacher, or
+protected test data are opened by this proof.
 
 Primary scope is top-view pixels 0:320 / latent columns 0:40 at NFE 1. Report:
 
