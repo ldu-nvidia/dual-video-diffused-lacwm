@@ -532,13 +532,25 @@ def _batch_samples(dataset: Any, indexes: Sequence[int], device: Any) -> dict[st
     import torch
     from torch.utils.data import default_collate
 
-    batch = default_collate([dataset[int(index)] for index in indexes])
+    requested = [int(index) for index in indexes]
+    access_counts = {index: 0 for index in requested}
+    samples = []
+    for index in requested:
+        access_counts[index] += 1
+        sample = dataset[index]
+        observed = int(torch.as_tensor(sample.get("clip_index", -1)).item())
+        if observed != index:
+            raise LadderError(f"dataset substituted clip {observed} for {index}")
+        samples.append(sample)
+    if any(count != 1 for count in access_counts.values()):
+        raise LadderError(f"dataset access-count invariant differs: {access_counts}")
+    batch = default_collate(samples)
     for key, value in list(batch.items()):
         if isinstance(value, torch.Tensor):
             batch[key] = value.to(device=device, non_blocking=False)
     observed = [int(value) for value in batch["clip_index"].detach().cpu().tolist()]
-    if observed != [int(index) for index in indexes]:
-        raise LadderError(f"dataset substituted clips: {observed} != {list(indexes)}")
+    if observed != requested:
+        raise LadderError(f"dataset substituted clips: {observed} != {requested}")
     return batch
 
 
@@ -1286,11 +1298,42 @@ def _load_weights(output: Path, registration: Mapping[str, Any]) -> tuple[dict[s
     return fit, dict(weights)
 
 
-def _decoded_metrics(prediction: Any, target: Any) -> tuple[Any, Any]:
-    prediction = prediction.float().add(1.0).mul(0.5).clamp(0.0, 1.0)
-    target = target.float().add(1.0).mul(0.5).clamp(0.0, 1.0)
+def _to_uint8_video(value: Any) -> Any:
+    import torch
+
+    return value.float().clamp(-1.0, 1.0).add(1.0).mul(127.5).round().to(torch.uint8)
+
+
+def _decoded_metrics(
+    prediction: Any,
+    target: Any,
+    *,
+    prediction_history: Any,
+    target_history: Any,
+) -> tuple[Any, Any]:
+    import torch
+
+    prediction = prediction.double() / 255.0
+    target = target.double() / 255.0
+    expected_history_shape = (
+        prediction.shape[0],
+        prediction.shape[1],
+        1,
+        prediction.shape[3],
+        prediction.shape[4],
+    )
+    if tuple(prediction_history.shape) != expected_history_shape or tuple(target_history.shape) != expected_history_shape:
+        raise LadderError("decoded temporal-boundary history shape differs")
+    temporal_prediction = torch.cat(
+        (prediction_history.double() / 255.0, prediction), dim=2
+    )
+    temporal_target = torch.cat(
+        (target_history.double() / 255.0, target), dim=2
+    )
     mse = (prediction - target).square().flatten(1).mean(1)
-    temporal = (prediction.diff(dim=2) - target.diff(dim=2)).square().flatten(1).mean(1)
+    temporal = (
+        temporal_prediction.diff(dim=2) - temporal_target.diff(dim=2)
+    ).square().flatten(1).mean(1)
     return mse, temporal
 
 
@@ -1302,7 +1345,10 @@ def _per_sample_future_metrics(
     final: Any,
     clean: Any,
     decoded: Any,
-    decoded_target: Any,
+    raw_target: Any,
+    raw_history: Any,
+    vae_target: Any,
+    vae_history: Any,
     history_frames: int,
 ) -> dict[str, Any]:
     import torch
@@ -1323,7 +1369,24 @@ def _per_sample_future_metrics(
     numerator = (final[:, :, history_frames:].float() - clean[:, :, history_frames:].float()).square().flatten(1).sum(1)
     denominator = clean[:, :, history_frames:].float().square().flatten(1).sum(1).clamp_min(1e-12)
     latent_nmse = numerator / denominator
-    decoded_mse, temporal_mse = _decoded_metrics(decoded, decoded_target)
+    decoded_mse, temporal_mse = _decoded_metrics(
+        decoded,
+        raw_target,
+        prediction_history=raw_history,
+        target_history=raw_history,
+    )
+    decoded_vs_vae_mse, decoded_vs_vae_temporal = _decoded_metrics(
+        decoded,
+        vae_target,
+        prediction_history=raw_history,
+        target_history=vae_history,
+    )
+    vae_vs_raw_mse, vae_vs_raw_temporal = _decoded_metrics(
+        vae_target,
+        raw_target,
+        prediction_history=vae_history,
+        target_history=raw_history,
+    )
     return {
         "residual_r2": r2,
         "residual_cosine": cosine,
@@ -1331,6 +1394,10 @@ def _per_sample_future_metrics(
         "video_future_nmse": latent_nmse,
         "decoded_mse_unit_range": decoded_mse,
         "decoded_temporal_difference_mse_unit_range": temporal_mse,
+        "prediction_vs_vae_reconstruction_mse_unit_range": decoded_vs_vae_mse,
+        "prediction_vs_vae_reconstruction_temporal_mse_unit_range": decoded_vs_vae_temporal,
+        "vae_reconstruction_vs_raw_mse_unit_range": vae_vs_raw_mse,
+        "vae_reconstruction_vs_raw_temporal_mse_unit_range": vae_vs_raw_temporal,
     }
 
 
@@ -1422,7 +1489,23 @@ def _endpoint_rows_j1(output: Path, registration: Mapping[str, Any], fit: Mappin
                         video_clean, out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1])
                     )
                     future_pixel_frames = min(model.num_future_frames, decoded_clean.shape[2])
-                    decoded_target = decoded_clean[:, :, -future_pixel_frames:]
+                    vae_target = _to_uint8_video(
+                        decoded_clean[:, :, -future_pixel_frames:]
+                    )
+                    vae_history = _to_uint8_video(
+                        decoded_clean[
+                            :, :, -(future_pixel_frames + 1) : -future_pixel_frames
+                        ]
+                    )
+                    raw_video = batch["rgb"].permute(0, 2, 1, 3, 4)
+                    raw_target = _to_uint8_video(
+                        raw_video[:, :, -future_pixel_frames:]
+                    )
+                    raw_history = _to_uint8_video(
+                        raw_video[
+                            :, :, -(future_pixel_frames + 1) : -future_pixel_frames
+                        ]
+                    )
                     direct_residual = prepared["video_target"] - off_velocity
                     finals = {}
                     for endpoint, velocity in velocities.items():
@@ -1430,10 +1513,12 @@ def _endpoint_rows_j1(output: Path, registration: Mapping[str, Any], fit: Mappin
                             prepared["initial_video"], velocity, prepared["reference"], history_frames
                         )
                         finals[endpoint] = final
-                        decoded = model.rgb_tokenizer.decode_temporal(
-                            final.to(batch["rgb"].dtype),
-                            out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
-                        )[:, :, -future_pixel_frames:]
+                        decoded = _to_uint8_video(
+                            model.rgb_tokenizer.decode_temporal(
+                                final.to(batch["rgb"].dtype),
+                                out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
+                            )[:, :, -future_pixel_frames:]
+                        )
                         metrics = _per_sample_future_metrics(
                             velocity=velocity,
                             base_velocity=off_velocity,
@@ -1441,7 +1526,10 @@ def _endpoint_rows_j1(output: Path, registration: Mapping[str, Any], fit: Mappin
                             final=final,
                             clean=video_clean,
                             decoded=decoded,
-                            decoded_target=decoded_target,
+                            raw_target=raw_target,
+                            raw_history=raw_history,
+                            vae_target=vae_target,
+                            vae_history=vae_history,
                             history_frames=history_frames,
                         )
                         for local, clip_index in enumerate(indexes):
@@ -1476,6 +1564,12 @@ def _endpoint_rows_j1(output: Path, registration: Mapping[str, Any], fit: Mappin
                                             "final_video": _safe_tensor_sha256(
                                                 final[local : local + 1]
                                             ),
+                                            "raw_future_target": _safe_tensor_sha256(
+                                                raw_target[local : local + 1]
+                                            ),
+                                            "raw_history_boundary": _safe_tensor_sha256(
+                                                raw_history[local : local + 1]
+                                            ),
                                         },
                                         "validation_opened": False,
                                         "protected_test_opened": False,
@@ -1507,6 +1601,9 @@ def _endpoint_rows_j1(output: Path, registration: Mapping[str, Any], fit: Mappin
             "auxiliary_target_array_opened": False,
             "opened_numpy_arrays": [str(path) for path in opened],
             "zero_equals_off_bit_exact": True,
+            "primary_decoded_target": "cached raw held-out future RGB uint8",
+            "temporal_metric_includes_history_to_first_future_boundary": True,
+            "prediction_vs_vae_reconstruction_is_diagnostic": True,
             "adapter_latency_ms_per_batch": {
                 arm: {
                     "mean": float(sum(values) / len(values)),
@@ -1562,11 +1659,29 @@ def _endpoint_rows_vpm(output: Path, registration: Mapping[str, Any], fit: Mappi
                         out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
                     )
                     future_pixel_frames = min(model.num_future_frames, decoded_clean.shape[2])
-                    decoded_target = decoded_clean[:, :, -future_pixel_frames:]
-                    decoded = model.rgb_tokenizer.decode_temporal(
-                        final.to(batch["rgb"].dtype),
-                        out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
-                    )[:, :, -future_pixel_frames:]
+                    vae_target = _to_uint8_video(
+                        decoded_clean[:, :, -future_pixel_frames:]
+                    )
+                    vae_history = _to_uint8_video(
+                        decoded_clean[
+                            :, :, -(future_pixel_frames + 1) : -future_pixel_frames
+                        ]
+                    )
+                    raw_video = batch["rgb"].permute(0, 2, 1, 3, 4)
+                    raw_target = _to_uint8_video(
+                        raw_video[:, :, -future_pixel_frames:]
+                    )
+                    raw_history = _to_uint8_video(
+                        raw_video[
+                            :, :, -(future_pixel_frames + 1) : -future_pixel_frames
+                        ]
+                    )
+                    decoded = _to_uint8_video(
+                        model.rgb_tokenizer.decode_temporal(
+                            final.to(batch["rgb"].dtype),
+                            out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
+                        )[:, :, -future_pixel_frames:]
+                    )
                     direct_residual = prepared["video_target"] - velocity
                     metrics = _per_sample_future_metrics(
                         velocity=velocity,
@@ -1575,7 +1690,10 @@ def _endpoint_rows_vpm(output: Path, registration: Mapping[str, Any], fit: Mappi
                         final=final,
                         clean=prepared["video_clean"],
                         decoded=decoded,
-                        decoded_target=decoded_target,
+                        raw_target=raw_target,
+                        raw_history=raw_history,
+                        vae_target=vae_target,
+                        vae_history=vae_history,
                         history_frames=history_frames,
                     )
                     for local, clip_index in enumerate(indexes):
@@ -1606,6 +1724,12 @@ def _endpoint_rows_vpm(output: Path, registration: Mapping[str, Any], fit: Mappi
                                         "final_video": _safe_tensor_sha256(
                                             final[local : local + 1]
                                         ),
+                                        "raw_future_target": _safe_tensor_sha256(
+                                            raw_target[local : local + 1]
+                                        ),
+                                        "raw_history_boundary": _safe_tensor_sha256(
+                                            raw_history[local : local + 1]
+                                        ),
                                     },
                                     "validation_opened": False,
                                     "protected_test_opened": False,
@@ -1634,6 +1758,9 @@ def _endpoint_rows_vpm(output: Path, registration: Mapping[str, Any], fit: Mappi
             "teacher_calls": 0,
             "auxiliary_target_array_opened": False,
             "opened_numpy_arrays": [str(path) for path in opened],
+            "primary_decoded_target": "cached raw held-out future RGB uint8",
+            "temporal_metric_includes_history_to_first_future_boundary": True,
+            "prediction_vs_vae_reconstruction_is_diagnostic": True,
             "validation_opened": False,
             "protected_test_opened": False,
             "reserve_opened": False,
@@ -1738,12 +1865,17 @@ def analyze_development_rows(
 
     for clip in range(*DEV_RANGE):
         for seed in DEV_NOISE_SEEDS:
-            hashes = {
-                inventory[(endpoint, clip, seed)]["tensor_sha256"]["initial_video"]
-                for endpoint in ALL_ENDPOINTS
-            }
-            if len(hashes) != 1:
-                raise LadderError(f"J1/VPM initial Gaussian noise differs for {(clip, seed)}")
+            for field, label in (
+                ("initial_video", "initial Gaussian noise"),
+                ("raw_future_target", "raw future target"),
+                ("raw_history_boundary", "raw history boundary"),
+            ):
+                hashes = {
+                    inventory[(endpoint, clip, seed)]["tensor_sha256"][field]
+                    for endpoint in ALL_ENDPOINTS
+                }
+                if len(hashes) != 1:
+                    raise LadderError(f"J1/VPM {label} differs for {(clip, seed)}")
             off = inventory[("J1_OFF", clip, seed)]
             zero = inventory[("ZERO", clip, seed)]
             if off["tensor_sha256"]["final_video"] != zero["tensor_sha256"]["final_video"] or off["metrics"] != zero["metrics"]:
@@ -1844,6 +1976,9 @@ def analyze_development_rows(
             "development_episode_count": len(clips),
             "noise_seeds_per_episode": len(seeds),
             "paired_outcome_count": len(clips) * len(seeds),
+            "primary_decoded_target": "cached raw held-out future RGB uint8",
+            "temporal_metric_includes_history_to_first_future_boundary": True,
+            "prediction_vs_vae_reconstruction_is_diagnostic": True,
             "aggregates": aggregates,
             "comparisons": comparisons,
             "gates": {**gates, "all_passed": all_passed},

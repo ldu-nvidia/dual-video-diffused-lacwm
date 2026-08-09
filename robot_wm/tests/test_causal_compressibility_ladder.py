@@ -115,6 +115,39 @@ def test_target_open_guard_records_rgb_actions_and_fails_closed():
         assert set(guard.opened) == {rgb.resolve(), actions.resolve()}
 
 
+def test_batch_samples_accesses_each_requested_item_exactly_once():
+    class CountingDataset:
+        def __init__(self):
+            self.counts = {}
+
+        def __getitem__(self, index):
+            self.counts[index] = self.counts.get(index, 0) + 1
+            return {
+                "clip_index": torch.tensor(index),
+                "value": torch.tensor(float(index)),
+            }
+
+    dataset = CountingDataset()
+    batch = ladder._batch_samples(dataset, (3, 7), torch.device("cpu"))
+    assert dataset.counts == {3: 1, 7: 1}
+    assert batch["clip_index"].tolist() == [3, 7]
+
+
+def test_decoded_temporal_metric_includes_raw_history_boundary():
+    prediction = torch.full((1, 3, 2, 1, 1), 100, dtype=torch.uint8)
+    target = prediction.clone()
+    prediction_history = torch.zeros((1, 3, 1, 1, 1), dtype=torch.uint8)
+    target_history = torch.full((1, 3, 1, 1, 1), 100, dtype=torch.uint8)
+    mse, temporal = ladder._decoded_metrics(
+        prediction,
+        target,
+        prediction_history=prediction_history,
+        target_history=target_history,
+    )
+    assert mse.item() == 0.0
+    assert temporal.item() > 0.0
+
+
 def test_identity_detects_mutation_and_one_step_sign_is_noise_minus_velocity():
     payload = ladder.identity_payload({"value": 3})
     assert ladder.identity_valid(payload)
@@ -148,6 +181,8 @@ def _row(endpoint: str, clip: int, seed: int, value: float):
             },
             "tensor_sha256": {
                 "initial_video": f"noise-{clip}-{seed}",
+                "raw_future_target": f"raw-future-{clip}",
+                "raw_history_boundary": f"raw-history-{clip}",
                 "final_video": (
                     f"off-{clip}-{seed}"
                     if endpoint in {"J1_OFF", "ZERO"}

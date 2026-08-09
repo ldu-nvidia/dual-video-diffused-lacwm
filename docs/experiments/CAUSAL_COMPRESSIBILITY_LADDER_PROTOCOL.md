@@ -121,9 +121,14 @@ match their initial video noise for every paired row. Stored historical VPM
 aggregates are context only and are not accepted as the frontier comparison.
 
 Normal clean RGB is evaluator-owned only: it constructs the flow target and
-quality metrics after the model input has been assembled. Future RGB, direct
-residuals, V-JEPA, the target array, and teacher outputs never enter an
-adapter.
+quality metrics after the model input has been assembled. The primary decoded
+target is the cached raw held-out future RGB, quantized to uint8 exactly as the
+established V-JEPA/VPM frontier evaluator. The temporal metric prepends the
+last observed raw history frame to prediction and target, so it includes the
+history-to-first-future boundary. Prediction versus VAE reconstruction remains
+a named diagnostic and is never substituted for the primary raw target.
+Future RGB, direct residuals, V-JEPA, the target array, and teacher outputs
+never enter an adapter.
 
 ## Metrics and inference accounting
 
