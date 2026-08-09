@@ -271,6 +271,8 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     ):
         assert token in protocol
     assert "--no-requeue" in launcher
+    assert "#SBATCH --time=02:00:00" in launcher
+    assert "04:00:00" not in launcher
     assert "compare-traces" in launcher
     assert "physics_flow_parent_parity.py" in launcher
     assert launcher.index('"$PYTHON_BIN" "$PARENT_PARITY"') < launcher.rindex(
@@ -305,5 +307,8 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "REPLACE_WITH_AUDITOR_ACKNOWLEDGED_40_CHARACTER_COMMIT" in launch_runbook
     assert 'BASH_PREFIX="/bin/bash -lc' in launch_runbook
     assert 'mkdir -p "$(dirname "$CACHE_ROOT")"' in launch_runbook
+    assert launch_runbook.count("--gpus-per-node=1") == 4
+    assert "04:00:00" not in launch_runbook
+    assert launch_runbook.count("--time=02:00:00") == 4
     assert "--parent-source-repo $PARENT_SOURCE_REPO" in launch_runbook
     assert "--dependency=afterok:$FLOW_OFF_JOB:$RAW_FLOW_JOB" in launch_runbook
