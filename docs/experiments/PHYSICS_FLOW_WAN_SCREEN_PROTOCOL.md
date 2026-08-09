@@ -266,10 +266,15 @@ control and is excluded from any component-latency claim.
 LPIPS is a registered offline instrument, not a runtime dependency fetched
 after outcomes. Registration hashes the installed LPIPS implementation and
 packaged linear weights, the already-cached torchvision AlexNet checkpoint,
-and the exact loaded state dictionary. Every evaluation rank must reconstruct
-the identical receipt without network access, and the final auditor verifies
-that one identity served every arm and endpoint. The frozen preflight is job
-`507388`: LPIPS 0.1.4 / torch 2.7.1+cu128 / torchvision 0.22.1+cu128,
+and the exact loaded state dictionary. The LACWM Python entry remains the
+absolute lexical venv symlink: registration separately binds its symlink chain,
+resolved base executable, `pyvenv.cfg`, isolated site-packages, and
+LPIPS/torch/torchvision module and distribution `RECORD` files. Resolving the
+entry is forbidden because it drops the LACWM site-packages. Every evaluation
+rank must reconstruct the identical receipt without network access, and the
+final auditor verifies that one identity served every arm and endpoint. The
+frozen preflight is job `507388`: LPIPS 0.1.4 / torch 2.7.1+cu128 /
+torchvision 0.22.1+cu128,
 receipt `04f5013b7161fbf91ed6116d25f7e6ec66afc661024236ad27564b1899cb94be`,
 loaded-state SHA-256
 `abc218a76418de010923a57c9c55afb1c1040503b46e5015694ee79ea7c90a7d`,

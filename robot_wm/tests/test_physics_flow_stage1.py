@@ -3,7 +3,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 import numpy as np
@@ -210,6 +213,93 @@ def test_cache_python_identity_preserves_venv_symlink_entry(tmp_path: Path) -> N
     # Regression: resolving before execution would select the model/shared
     # environment rather than the cache virtual environment.
     assert Path(identity["entry_path"]) != Path(identity["entry_path"]).resolve()
+
+
+def test_main_python_runtime_preserves_lexical_venv_and_packages(
+    tmp_path: Path,
+) -> None:
+    prefix = tmp_path / "main-runtime"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(prefix)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    entry = prefix / "bin" / "python"
+    assert entry.is_symlink()
+    site_packages = next((prefix / "lib").glob("python*/site-packages"))
+    for distribution, (import_name, version) in (
+        stage.MAIN_PYTHON_RUNTIME_DISTRIBUTIONS.items()
+    ):
+        module = site_packages / import_name / "__init__.py"
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text(f"# isolated {distribution} {version}\n")
+        dist_info = site_packages / f"{distribution}-{version}.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(
+            "Metadata-Version: 2.1\n"
+            f"Name: {distribution}\n"
+            f"Version: {version}\n"
+        )
+        (dist_info / "top_level.txt").write_text(f"{import_name}\n")
+        (dist_info / "RECORD").write_text(
+            f"{import_name}/__init__.py,,\n"
+            f"{dist_info.name}/METADATA,,\n"
+            f"{dist_info.name}/top_level.txt,,\n"
+            f"{dist_info.name}/RECORD,,\n"
+        )
+
+    receipt = stage._collect_main_python_runtime(entry)
+
+    assert receipt["python_entry"]["entry_path"] == str(entry)
+    assert receipt["python"]["sys_executable"] == str(entry)
+    assert receipt["python"]["sys_prefix"] == str(prefix)
+    assert receipt["python"]["no_user_site"] is True
+    assert receipt["site_packages"] == [str(site_packages)]
+    assert set(receipt["packages"]) == set(
+        stage.MAIN_PYTHON_RUNTIME_DISTRIBUTIONS
+    )
+    assert stage.validate_main_python_runtime_receipt(receipt) == receipt
+
+    # The old implementation resolved the symlink before subprocess launch.
+    # The base interpreter may have an unrelated global LPIPS, but it cannot
+    # see this venv's deliberately isolated package or prefix.
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    resolved = subprocess.run(
+        [
+            str(entry.resolve(strict=True)),
+            "-c",
+            (
+                "import importlib.util,json,sys;"
+                "s=importlib.util.find_spec('lpips');"
+                "print(json.dumps({'prefix':sys.prefix,'origin':"
+                "None if s is None else s.origin}))"
+            ),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    base_probe = json.loads(resolved.stdout)
+    assert base_probe["prefix"] != str(prefix)
+    assert str(site_packages) not in str(base_probe["origin"])
+
+    pyvenv = prefix / "pyvenv.cfg"
+    original_pyvenv = pyvenv.read_bytes()
+    pyvenv.write_text("mutated runtime\n")
+    with pytest.raises(stage.PhysicsFlowStage1Error):
+        stage.validate_main_python_runtime_receipt(receipt)
+    pyvenv.write_bytes(original_pyvenv)
+    lpips_record = Path(
+        receipt["packages"]["lpips"]["distribution_record"]["path"]
+    )
+    lpips_record.write_text(lpips_record.read_text() + "mutated,,\n")
+    with pytest.raises(stage.PhysicsFlowStage1Error):
+        stage.validate_main_python_runtime_receipt(receipt)
 
 
 def test_cache_runtime_declares_complete_mcap_decode_stack() -> None:
@@ -598,12 +688,17 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python" in launch_runbook
     assert "PYTHONNOUSERSITE=1" in launch_runbook
     assert "--cache-python $CACHE_PYTHON_BIN" in launch_runbook
-    assert launch_runbook.count("-20260808-$SHORT-v2") == 3
+    assert launch_runbook.count("-20260808-$SHORT-v3") == 3
+    assert "-20260808-$SHORT-v2" not in launch_runbook
     assert "-20260808-$SHORT-v1" not in launch_runbook
     assert launch_runbook.count(
         "$CACHE_PYTHON_BIN tools/physics_flow_stage1.py build-cache"
     ) == 2
     assert "$CACHE_PYTHON_BIN tools/physics_flow_stage1.py audit-cache" not in launch_runbook
+    assert "p._collect_main_python_runtime" in launch_runbook
+    assert "args.python.expanduser().resolve" not in stage_source
+    assert "python = lexical_absolute(args.python)" in stage_source
+    assert '"python_runtime": main_python_runtime' in stage_source
     register_body = stage_source.split("def command_register_cache", 1)[1].split(
         "def validate_cache_registration", 1
     )[0]

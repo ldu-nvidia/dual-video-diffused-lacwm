@@ -267,6 +267,66 @@ CACHE_RUNTIME_CALIBRATION_PREFLIGHT_TRAIN_INDEX = 1
 CACHE_RUNTIME_CALIBRATION_PREFLIGHT_IDENTITY = (
     "abc8d36380d88196e2cde46b24a57c52994fc6b518af028b89f75fffc1ee346c"
 )
+MAIN_PYTHON_RUNTIME_KIND = "raw_physics_flow_main_python_runtime_v1"
+MAIN_PYTHON_RUNTIME_SCHEMA_VERSION = 1
+MAIN_PYTHON_RUNTIME_DISTRIBUTIONS = {
+    "lpips": ("lpips", "0.1.4"),
+    "torch": ("torch", "2.7.1+cu128"),
+    "torchvision": ("torchvision", "0.22.1+cu128"),
+}
+
+_MAIN_PYTHON_RUNTIME_PROBE = r"""
+import importlib.metadata
+import importlib.util
+import json
+import os
+import platform
+import site
+import sys
+from pathlib import Path
+
+
+def distribution_record(name):
+    distribution = importlib.metadata.distribution(name)
+    candidates = [
+        Path(distribution.locate_file(relative))
+        for relative in (distribution.files or ())
+        if relative.name == "RECORD" and ".dist-info" in str(relative.parent)
+    ]
+    if len(candidates) != 1:
+        raise RuntimeError(f"expected one RECORD for {name}")
+    return str(candidates[0])
+
+
+packages = {}
+for distribution, (import_name, expected_version) in {
+    "lpips": ("lpips", "0.1.4"),
+    "torch": ("torch", "2.7.1+cu128"),
+    "torchvision": ("torchvision", "0.22.1+cu128"),
+}.items():
+    spec = importlib.util.find_spec(import_name)
+    if spec is None or not spec.origin:
+        raise RuntimeError(f"main runtime package unavailable: {distribution}")
+    packages[distribution] = {
+        "distribution": distribution,
+        "import_name": import_name,
+        "version": importlib.metadata.version(distribution),
+        "module_path": str(Path(spec.origin).absolute()),
+        "record_path": str(Path(distribution_record(distribution)).absolute()),
+    }
+
+print(json.dumps({
+    "sys_executable": sys.executable,
+    "sys_prefix": sys.prefix,
+    "sys_base_prefix": sys.base_prefix,
+    "python_version": sys.version,
+    "platform": platform.platform(),
+    "site_packages": [path for path in site.getsitepackages() if Path(path).is_dir()],
+    "user_site_enabled": site.ENABLE_USER_SITE,
+    "python_no_user_site": os.environ.get("PYTHONNOUSERSITE"),
+    "packages": packages,
+}, sort_keys=True))
+"""
 
 CACHE_SCHEMA = "raw-physics-flow-cache-v2"
 CACHE_REGISTRATION_KIND = "raw_physics_flow_cache_registration"
@@ -585,6 +645,218 @@ def validate_cache_renderer_runtime_receipt(
         ):
             raise PhysicsFlowStage1Error("cache renderer receipt helper changed")
     return dict(receipt)
+
+
+def validate_main_python_runtime_receipt(receipt: Any) -> dict[str, Any]:
+    """Replay the lexical LACWM venv, base executable, and package binding."""
+
+    if (
+        not isinstance(receipt, Mapping)
+        or not identity_valid(receipt)
+        or receipt.get("schema_version") != MAIN_PYTHON_RUNTIME_SCHEMA_VERSION
+        or receipt.get("kind") != MAIN_PYTHON_RUNTIME_KIND
+        or receipt.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("main Python runtime receipt differs")
+    python_entry = receipt.get("python_entry")
+    if not isinstance(python_entry, Mapping):
+        raise PhysicsFlowStage1Error("main Python entry is invalid")
+    try:
+        entry = lexical_absolute(Path(str(python_entry.get("entry_path", ""))))
+        observed_entry = python_entry_identity(entry)
+    except CacheRuntimeError as exc:
+        raise PhysicsFlowStage1Error("main Python entry changed") from exc
+    if observed_entry != python_entry:
+        raise PhysicsFlowStage1Error("main Python symlink chain changed")
+    prefix = entry.parent.parent
+    python_runtime = receipt.get("python")
+    base_prefix = Path(
+        str(python_runtime.get("sys_base_prefix", ""))
+        if isinstance(python_runtime, Mapping)
+        else ""
+    )
+    if (
+        not isinstance(python_runtime, Mapping)
+        or python_runtime.get("sys_executable") != str(entry)
+        or python_runtime.get("sys_prefix") != str(prefix)
+        or python_runtime.get("sys_base_prefix") == str(prefix)
+        or not base_prefix.is_absolute()
+        or not base_prefix.is_dir()
+        or base_prefix.is_symlink()
+        or not isinstance(python_runtime.get("version"), str)
+        or not python_runtime.get("version")
+        or not isinstance(python_runtime.get("platform"), str)
+        or not python_runtime.get("platform")
+        or python_runtime.get("no_user_site") is not True
+    ):
+        raise PhysicsFlowStage1Error("main Python virtual environment differs")
+    resolved_executable = Path(
+        str(python_entry.get("resolved_executable", {}).get("path", ""))
+    )
+    if resolved_executable.parent.parent != base_prefix.resolve(strict=True):
+        raise PhysicsFlowStage1Error("main Python base executable differs")
+    pyvenv = _absolute_file_record_matches(
+        receipt.get("pyvenv_cfg"), "main Python pyvenv.cfg"
+    )
+    if pyvenv != prefix / "pyvenv.cfg":
+        raise PhysicsFlowStage1Error("main Python pyvenv.cfg is noncanonical")
+    prefix_resolved = prefix.resolve(strict=True)
+    site_packages = receipt.get("site_packages")
+    if not isinstance(site_packages, list) or not site_packages:
+        raise PhysicsFlowStage1Error("main Python site-packages receipt differs")
+    resolved_sites: list[Path] = []
+    for value in site_packages:
+        site_path = Path(str(value))
+        if (
+            not site_path.is_absolute()
+            or not site_path.is_dir()
+            or site_path.is_symlink()
+        ):
+            raise PhysicsFlowStage1Error("main Python site-packages path changed")
+        resolved_site = site_path.resolve(strict=True)
+        if prefix_resolved not in resolved_site.parents:
+            raise PhysicsFlowStage1Error(
+                "main Python site-packages escaped its virtual environment"
+            )
+        resolved_sites.append(resolved_site)
+    packages = receipt.get("packages")
+    if not isinstance(packages, Mapping) or set(packages) != set(
+        MAIN_PYTHON_RUNTIME_DISTRIBUTIONS
+    ):
+        raise PhysicsFlowStage1Error("main Python package inventory differs")
+    for distribution, (import_name, expected_version) in (
+        MAIN_PYTHON_RUNTIME_DISTRIBUTIONS.items()
+    ):
+        package = packages.get(distribution)
+        if (
+            not isinstance(package, Mapping)
+            or package.get("distribution") != distribution
+            or package.get("import_name") != import_name
+            or package.get("version") != expected_version
+        ):
+            raise PhysicsFlowStage1Error(
+                f"main Python {distribution} package differs"
+            )
+        module = _absolute_file_record_matches(
+            package.get("module"), f"main Python {distribution} module"
+        )
+        record = _absolute_file_record_matches(
+            package.get("distribution_record"),
+            f"main Python {distribution} distribution RECORD",
+        )
+        if not any(
+            site == module.parent or site in module.parents
+            for site in resolved_sites
+        ):
+            raise PhysicsFlowStage1Error(
+                f"main Python {distribution} module escaped site-packages"
+            )
+        if not any(site in record.parents for site in resolved_sites):
+            raise PhysicsFlowStage1Error(
+                f"main Python {distribution} RECORD escaped site-packages"
+            )
+    return dict(receipt)
+
+
+def _collect_main_python_runtime(python_entry: Path) -> dict[str, Any]:
+    """Invoke and bind the LACWM venv without resolving away its prefix."""
+
+    try:
+        entry = lexical_absolute(python_entry)
+        entry_identity = python_entry_identity(entry)
+    except CacheRuntimeError as exc:
+        raise PhysicsFlowStage1Error("main Python path is invalid") from exc
+    prefix = entry.parent.parent
+    if not os.access(entry, os.X_OK):
+        raise PhysicsFlowStage1Error("main Python entry is not executable")
+    pyvenv_path = prefix / "pyvenv.cfg"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    completed = subprocess.run(
+        # Preserve ``entry``. Resolving it invokes base CPython and silently
+        # drops this venv's LPIPS/torch/torchvision site-packages.
+        [str(entry), "-c", _MAIN_PYTHON_RUNTIME_PROBE],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if completed.returncode:
+        raise PhysicsFlowStage1Error(
+            "main Python virtual-environment probe failed: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    try:
+        probe = json.loads(
+            [line for line in completed.stdout.splitlines() if line.strip()][-1]
+        )
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise PhysicsFlowStage1Error("main Python probe receipt is invalid") from exc
+    if (
+        not isinstance(probe, Mapping)
+        or probe.get("sys_executable") != str(entry)
+        or probe.get("sys_prefix") != str(prefix)
+        or probe.get("sys_base_prefix") == str(prefix)
+        or probe.get("user_site_enabled") is not False
+        or probe.get("python_no_user_site") != "1"
+    ):
+        raise PhysicsFlowStage1Error(
+            "main Python probe did not retain its lexical virtual environment"
+        )
+    packages = probe.get("packages")
+    if not isinstance(packages, Mapping) or set(packages) != set(
+        MAIN_PYTHON_RUNTIME_DISTRIBUTIONS
+    ):
+        raise PhysicsFlowStage1Error("main Python probe package inventory differs")
+    package_receipts: dict[str, Any] = {}
+    for distribution, (import_name, expected_version) in (
+        MAIN_PYTHON_RUNTIME_DISTRIBUTIONS.items()
+    ):
+        package = packages.get(distribution)
+        if (
+            not isinstance(package, Mapping)
+            or package.get("distribution") != distribution
+            or package.get("import_name") != import_name
+            or package.get("version") != expected_version
+        ):
+            raise PhysicsFlowStage1Error(
+                f"main Python probe {distribution} package differs"
+            )
+        package_receipts[distribution] = {
+            "distribution": distribution,
+            "import_name": import_name,
+            "version": expected_version,
+            "module": file_record(Path(str(package.get("module_path", "")))),
+            "distribution_record": file_record(
+                Path(str(package.get("record_path", "")))
+            ),
+        }
+    receipt = identity_payload(
+        {
+            "schema_version": MAIN_PYTHON_RUNTIME_SCHEMA_VERSION,
+            "kind": MAIN_PYTHON_RUNTIME_KIND,
+            "python_entry": entry_identity,
+            "pyvenv_cfg": file_record(pyvenv_path),
+            "python": {
+                "sys_executable": str(entry),
+                "sys_prefix": str(prefix),
+                "sys_base_prefix": probe.get("sys_base_prefix"),
+                "version": probe.get("python_version"),
+                "platform": probe.get("platform"),
+                "no_user_site": True,
+            },
+            "site_packages": probe.get("site_packages"),
+            "packages": package_receipts,
+            "protected_test_accessed": False,
+        }
+    )
+    return validate_main_python_runtime_receipt(receipt)
 
 
 def _register_cache_renderer_runtime(
@@ -2308,9 +2580,13 @@ def _validated_cache_receipt(metadata_path: Path, split: str) -> dict[str, Any]:
 
 
 def _registered_runtime(args: argparse.Namespace, source_repo: Path) -> dict[str, Any]:
-    python = args.python.expanduser().resolve(strict=True)
-    if not python.is_file() or python.is_symlink():
-        raise PhysicsFlowStage1Error("registered Python runtime is invalid")
+    # Keep the lexical venv entry. ``Path.resolve`` here invokes the shared
+    # base CPython and discards the LACWM site-packages (including LPIPS).
+    try:
+        python = lexical_absolute(args.python)
+    except CacheRuntimeError as exc:
+        raise PhysicsFlowStage1Error("registered Python runtime is invalid") from exc
+    main_python_runtime = _collect_main_python_runtime(python)
     wan = args.wan_dir.expanduser().resolve(strict=True)
     videox = args.videox_home.expanduser().resolve(strict=True)
     if not wan.is_dir() or wan.is_symlink() or not videox.is_dir() or videox.is_symlink():
@@ -2326,6 +2602,7 @@ def _registered_runtime(args: argparse.Namespace, source_repo: Path) -> dict[str
     environment.update(
         {
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
             "WANDB_MODE": "offline",
@@ -2381,6 +2658,7 @@ def _registered_runtime(args: argparse.Namespace, source_repo: Path) -> dict[str
         raise PhysicsFlowStage1Error("offline LPIPS preflight receipt differs")
     return {
         "python": str(python),
+        "python_runtime": main_python_runtime,
         "wan_dir": str(wan),
         "videox_home": str(videox),
         "null_prompt": file_record(null_prompt),
@@ -3172,6 +3450,13 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         Path(source["path"]), source["git_commit"], "study source"
     ) != source:
         raise PhysicsFlowStage1Error("study source changed after registration")
+    main_python_runtime = validate_main_python_runtime_receipt(
+        registration.get("runtime", {}).get("python_runtime")
+    )
+    if registration.get("runtime", {}).get("python") != main_python_runtime.get(
+        "python_entry", {}
+    ).get("entry_path"):
+        raise PhysicsFlowStage1Error("registered main Python entry differs")
     validate_cache_renderer_runtime_receipt(
         registration.get("cache_renderer_runtime"),
         source_repo=Path(source["path"]),

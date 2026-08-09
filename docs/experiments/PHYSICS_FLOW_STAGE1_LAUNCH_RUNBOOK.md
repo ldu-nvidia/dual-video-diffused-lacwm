@@ -62,9 +62,9 @@ LPIPS_PREFLIGHT_LOG=$PREFLIGHT/lpips_pin-507388.log
 CAUSAL_LADDER=$BASE/artifacts/dual_video_diffusion/causal_compressibility_ladder/causal-compressibility-train256-dev64-seed20260820-4d4db76-v1/registration.json
 DIRECT_FRONTIER=$BASE/artifacts/dual_video_diffusion/vpm_direct_residual_frontier/vpm-direct-residual-fit256-outcome31-seed20260832-4f75f9c-v2
 
-CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v2
-STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v2
-LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v2
+CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v3
+STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v3
+LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v3
 REGISTRATION=$STUDY_ROOT/registration.json
 ```
 
@@ -83,6 +83,12 @@ test "$(sha256sum "$PARENT_CONFIG" | awk '{print $1}')" = ae3ffd27146883917472b8
 test "$(sha256sum "$LINEAGE_FAILED_LOG" | awk '{print $1}')" = 18bff874df2ae79bae614520ce80d3dd2d223a86d31bf1c8cc5ad24e05f10714
 test "$(sha256sum "$LINEAGE_COMPARISON_LOG" | awk '{print $1}')" = 048bcddd35ecd2458e5b17f28a48a8a4967111dbb888e8cd2bc9d5ff669c0e2a
 test "$(sha256sum "$LPIPS_PREFLIGHT_LOG" | awk '{print $1}')" = db37a417618afa1156cb7226140993755279191edfef8a0c628d550de20fc6af
+test -L "$PYTHON_BIN"
+test "$(readlink "$PYTHON_BIN")" = "/lustre/fsw/portfolios/coreai/users/ldu/lacwm_train/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+test "$(sha256sum "$BASE/envs/lacwm-b200-py310/pyvenv.cfg" | awk '{print $1}')" = 1462a3436cb7564a778b577ed97d7b8adee292ba7f03ae92d544761a11fcbc2d
+test "$(sha256sum "$BASE/envs/lacwm-b200-py310/lib/python3.10/site-packages/lpips-0.1.4.dist-info/RECORD" | awk '{print $1}')" = 43d3121c0b0c2d34380a1f786dd9501be8f64270bea81f6118bbb98c384df7ae
+test "$(sha256sum "$BASE/envs/lacwm-b200-py310/lib/python3.10/site-packages/torch-2.7.1+cu128.dist-info/RECORD" | awk '{print $1}')" = 277c9bbc200c0507440f5b6da4b681199f7dd72250e52028e308aa81eb285d6b
+test "$(sha256sum "$BASE/envs/lacwm-b200-py310/lib/python3.10/site-packages/torchvision-0.22.1+cu128.dist-info/RECORD" | awk '{print $1}')" = ae8a47757ba5c4a89c8d2f3bdbaefb7f9ca7a0cc4af350fdb58288885fde4cd2
 test -L "$CACHE_PYTHON_BIN"
 test "$(readlink "$CACHE_PYTHON_BIN")" = "$BASE/envs/lacwm-b200-py310/bin/python"
 test "$(sha256sum "$BASE/envs/interaction-event-py310-v1/pyvenv.cfg" | awk '{print $1}')" = a85cf62de5c2c623fdc358933f86f50e58d93f41b580f097d3b1f6f66c5b67ab
@@ -114,6 +120,14 @@ test -z "$(git -C "$SOURCE_REPO" status --porcelain --untracked-files=all)"
 PYTHONPATH="$SOURCE_REPO" "$PYTHON_BIN" -c \
   'from pathlib import Path; from tools import physics_flow_stage1 as p; p.validate_renderer_gate(Path(__import__("sys").argv[1]))' \
   "$RENDERER_GATE"
+PYTHONPATH="$SOURCE_REPO" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+  "$PYTHON_BIN" -c \
+  'from pathlib import Path; from tools import physics_flow_stage1 as p; p._collect_main_python_runtime(Path(__import__("sys").argv[1]))' \
+  "$PYTHON_BIN"
+PYTHONPATH="$SOURCE_REPO" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 WANDB_MODE=offline \
+  "$PYTHON_BIN" "$SOURCE_REPO/tools/physics_flow_lpips.py" \
+  --receipt-only >/dev/null
 mkdir -p "$(dirname "$CACHE_ROOT")" "$(dirname "$STUDY_ROOT")" "$LOG_ROOT"
 test -d "$(dirname "$CACHE_ROOT")"
 test -d "$(dirname "$STUDY_ROOT")"
@@ -134,6 +148,12 @@ MCAP/protobuf/codec stack, performs an EGL render, and decodes the deterministic
 first registered train-D405 calibration from its zstd MCAP, requiring the
 LACWM-registration and cache-runtime calibration identities to match. Only the
 two cache builders execute their main process with that cache-only runtime.
+The LACWM interpreter is also invoked through its absolute lexical venv entry,
+never its resolved base-CPython target. Before output creation, the operator
+preflight and study registration require its full symlink chain, resolved
+executable, `pyvenv.cfg`, isolated site-packages, and LPIPS/torch/torchvision
+module plus distribution-RECORD receipt. Resolving that entry discards those
+site-packages and fails closed before training.
 
 ```bash
 BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME MUJOCO_GL=egl; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO;"
