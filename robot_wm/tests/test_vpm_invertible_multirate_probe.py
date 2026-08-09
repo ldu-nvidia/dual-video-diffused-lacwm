@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -11,6 +14,41 @@ from tools import vpm_invertible_multirate_probe as probe
 
 def _hash(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _record_serving_accesses(
+    ledger: probe.EventLedger, indexes=(416, 417)
+) -> None:
+    ledger.bind_batch(indexes)
+    for row in indexes:
+        for array, stop in (
+            ("rgb", probe.HISTORY_RGB_FRAMES),
+            ("actions", probe.TOTAL_RGB_FRAMES),
+        ):
+            started = ledger.begin_array_read(
+                role="serving",
+                array=array,
+                row=row,
+                frame_start=0,
+                frame_stop=stop,
+                path=f"/{array}.npy",
+            )
+            ledger.finish_array_read(started)
+
+
+def _record_scoring_accesses(
+    ledger: probe.EventLedger, indexes=(416, 417)
+) -> None:
+    for row in indexes:
+        started = ledger.begin_array_read(
+            role="scoring",
+            array="rgb",
+            row=row,
+            frame_start=0,
+            frame_stop=probe.TOTAL_RGB_FRAMES,
+            path="/rgb.npy",
+        )
+        ledger.finish_array_read(started)
 
 
 @pytest.mark.parametrize("band", ("LL", "HH"))
@@ -76,6 +114,7 @@ def test_materialization_shares_first_call_and_locks_declared_subspaces():
         return 0.2 * state.float() + 0.0001 * timestep.float() + 0.01 * sigma
 
     ledger = probe.EventLedger()
+    _record_serving_accesses(ledger)
     result = probe.materialize_split_endpoints(
         initial=initial,
         reference=reference,
@@ -132,6 +171,7 @@ def test_materialization_shares_first_call_and_locks_declared_subspaces():
     for state in result.states.values():
         torch.testing.assert_close(state[:, :, :2], reference[:, :, :2])
 
+    _record_scoring_accesses(ledger)
     ledger.construct_target()
     receipt = ledger.receipt()
     assert receipt["target_after_all_endpoints"] is True
@@ -147,6 +187,192 @@ def test_target_barrier_fails_closed():
         ledger.endpoint(endpoint)
     with pytest.raises(probe.MultirateError):
         ledger.close_endpoint_barrier()
+
+
+def test_event_ledger_forbids_future_rgb_before_endpoint_barrier():
+    ledger = probe.EventLedger()
+    ledger.bind_batch((416, 417))
+    with pytest.raises(probe.MultirateError):
+        ledger.begin_array_read(
+            role="serving",
+            array="rgb",
+            row=416,
+            frame_start=0,
+            frame_stop=13,
+            path="/rgb.npy",
+        )
+    with pytest.raises(probe.MultirateError):
+        ledger.begin_array_read(
+            role="scoring",
+            array="rgb",
+            row=416,
+            frame_start=0,
+            frame_stop=13,
+            path="/rgb.npy",
+        )
+
+
+def test_serving_type_has_no_full_rgb_field_and_rejects_thirteen_frames():
+    batch = probe.ServingBatch(
+        history_rgb=torch.zeros((2, 13, 3, 2, 2)),
+        actions=torch.zeros((2, 13, 5, probe.PADDED_ACTION_DIM)),
+        morphology_index=torch.full((2,), probe.ABC_MORPHOLOGY_INDEX),
+        clip_index=torch.tensor([416, 417]),
+    )
+    assert not hasattr(batch, "rgb")
+    with pytest.raises(probe.MultirateError, match="exactly the five"):
+        probe._prepare_serving_inputs(
+            SimpleNamespace(num_history_frames=5),
+            batch,
+            noise_seed=probe.DEV_NOISE_SEEDS[0],
+            ledger=probe.EventLedger(),
+        )
+
+
+def test_audited_reader_uses_exact_memmap_slice_keys_and_barrier_order():
+    class SliceSpy:
+        def __init__(self):
+            self.keys = []
+
+        def __getitem__(self, key):
+            self.keys.append(key)
+            return np.zeros((1,), dtype=np.float16)
+
+    reader = object.__new__(probe.AuditedABCClipReader)
+    reader.allowed = frozenset(range(*probe.DEV_RANGE))
+    reader.rgb_path = Path("/immutable/rgb.npy")
+    reader.actions_path = Path("/immutable/actions.npy")
+    reader._rgbs = SliceSpy()
+    reader._actions = SliceSpy()
+    ledger = probe.EventLedger()
+    ledger.bind_batch((416, 417))
+    reader._read_slice(
+        ledger=ledger,
+        role="serving",
+        array="rgb",
+        row=416,
+        frame_start=0,
+        frame_stop=5,
+    )
+    assert reader._rgbs.keys == [(416, slice(0, 5), Ellipsis)]
+    for endpoint in probe.ENDPOINTS:
+        ledger.endpoint(endpoint)
+    ledger.close_endpoint_barrier()
+    reader._read_slice(
+        ledger=ledger,
+        role="scoring",
+        array="rgb",
+        row=416,
+        frame_start=0,
+        frame_stop=13,
+    )
+    assert reader._rgbs.keys[-1] == (416, slice(0, 13), Ellipsis)
+
+
+def test_public_deployable_capture_is_target_blind_and_restores_configuration():
+    class Tokenizer:
+        def decode_temporal(self, latent, out_hw=None):
+            del out_hw
+            value = latent.mean(dim=1, keepdim=True).repeat(1, 3, 8, 1, 1)
+            return value
+
+    class FakeModel:
+        def __init__(self, initial, reference):
+            self.initial = initial
+            self.reference = reference
+            self.forward_model = torch.nn.Identity()
+            self.rgb_tokenizer = Tokenizer()
+            self.evaluation_condition_sources = ("autonomous",)
+            self.evaluation_nfe_steps = (4,)
+            self.viz_num_steps = 4
+            self.evaluation_noise_seed = 99
+            self.capture_latent_trajectories = True
+            self.artifact_batch_limit = 1
+            self._last_sampling_counters = {"sentinel": 1}
+            self._visualization_artifacts = {"sentinel": torch.tensor(1)}
+
+        def sample_future_deployable(
+            self,
+            history_rgb,
+            actions,
+            morphology_index,
+            *,
+            collect_artifacts,
+            sample_ids,
+        ):
+            del history_rgb, actions, morphology_index
+            assert collect_artifacts is True
+            nfe = self.viz_num_steps
+            state = self.initial.clone()
+            for _ in range(nfe):
+                state = self.forward_model(state) + 0.125
+            decoded = self.rgb_tokenizer.decode_temporal(state, out_hw=(2, 2))
+            decoded_uint8 = ladder._to_uint8_video(decoded)
+            self._visualization_artifacts = {
+                "video_initial_state": self.initial.cpu().to(torch.float16),
+                "reference_latents": self.reference.cpu().to(torch.float16),
+                "sample_ids": sample_ids.cpu().to(torch.int64),
+                "deployment_mode": torch.tensor([1]),
+                "auxiliary_clean_available": torch.tensor([0]),
+                f"video_final_off_nfe_{nfe}": state.cpu().to(torch.float16),
+                f"decoded_future_off_nfe_{nfe}": decoded_uint8.cpu(),
+            }
+            self._last_sampling_counters = {
+                "wan_calls_by_source_nfe": {f"off:nfe_{nfe}": nfe},
+                "wan_calls_total": nfe,
+                "online_teacher_calls": 0,
+                "auxiliary_clean_available": 0,
+                "artifacts_collected": 1,
+                "deployment_mode": 1,
+            }
+            return decoded
+
+        def pop_visualization_artifacts(self):
+            value = self._visualization_artifacts
+            self._visualization_artifacts = None
+            return value
+
+    initial = torch.zeros((2, 1, 1, 2, 2))
+    reference = torch.ones_like(initial)
+    model = FakeModel(initial, reference)
+    batch = probe.ServingBatch(
+        history_rgb=torch.zeros((2, 5, 3, 2, 2)),
+        actions=torch.zeros((2, 13, 5, 157)),
+        morphology_index=torch.tensor([9, 9]),
+        clip_index=torch.tensor([416, 417]),
+    )
+    ledger = probe.EventLedger()
+    _record_serving_accesses(ledger)
+    saved = (
+        model.evaluation_condition_sources,
+        model.evaluation_nfe_steps,
+        model.viz_num_steps,
+        model.evaluation_noise_seed,
+        model.capture_latent_trajectories,
+        model.artifact_batch_limit,
+    )
+    capture = probe._capture_public_deployable(
+        model,
+        batch,
+        {"initial_video": initial, "reference": reference},
+        nfe=2,
+        noise_seed=probe.DEV_NOISE_SEEDS[0],
+        ledger=ledger,
+    )
+    assert capture.receipt["wan_calls"] == 2
+    assert capture.receipt["official_artifact_final_matches_exact_capture"] is True
+    assert not any(
+        event.get("array") == "rgb" and event.get("frame_stop", 0) > 5
+        for event in ledger.events
+    )
+    assert saved == (
+        model.evaluation_condition_sources,
+        model.evaluation_nfe_steps,
+        model.viz_num_steps,
+        model.evaluation_noise_seed,
+        model.capture_latent_trajectories,
+        model.artifact_batch_limit,
+    )
 
 
 def _analysis_fixture(*, shuffled_equals_primary: bool = False):
@@ -226,6 +452,8 @@ def _analysis_fixture(*, shuffled_equals_primary: bool = False):
                             },
                             "access": {
                                 "prior_inspected_development_opened": True,
+                                "serving_rgb_frame_slice": [0, 5],
+                                "full_rgb_materialized_only_after_endpoint_barrier": True,
                                 "fresh_reserve_480_510_opened": False,
                                 "constructor_probe_511_opened": False,
                                 "validation_opened": False,

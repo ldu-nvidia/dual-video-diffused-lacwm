@@ -36,6 +36,7 @@ ENDPOINT_SCHEMA = "vpm-invertible-multirate-endpoint-v1"
 ANALYSIS_SCHEMA = "vpm-invertible-multirate-analysis-v1"
 AUDIT_SCHEMA = "vpm-invertible-multirate-audit-v1"
 COMPLETE_SCHEMA = "vpm-invertible-multirate-complete-v1"
+PARITY_SCHEMA = "vpm-invertible-multirate-public-parity-preflight-v1"
 
 BASE_COMMIT = "997a9dae79d63627a65773ef19cc41462db85c7d"
 DEV_RANGE = (416, 480)
@@ -47,6 +48,14 @@ BOOTSTRAP_REPLICATES = 10_000
 
 LATENT_SHAPE = (16, 4, 24, 120)
 HISTORY_LATENT_FRAMES = 2
+HISTORY_RGB_FRAMES = 5
+TOTAL_RGB_FRAMES = 13
+FUTURE_RGB_FRAMES = TOTAL_RGB_FRAMES - HISTORY_RGB_FRAMES
+EXPECTED_TRAIN_COUNT = 512
+RGB_SHAPE = (EXPECTED_TRAIN_COUNT, TOTAL_RGB_FRAMES, 3, 180, 960)
+ACTIONS_SHAPE = (EXPECTED_TRAIN_COUNT, TOTAL_RGB_FRAMES, 5, 23)
+PADDED_ACTION_DIM = 157
+ABC_MORPHOLOGY_INDEX = 9
 VIEW_COUNT = 3
 VIEW_WIDTH = 40
 BATCH_SIZE = 2
@@ -284,12 +293,13 @@ def synthetic_projector_contract() -> dict[str, Any]:
 
 @dataclass
 class EventLedger:
-    """Monotone receipt that makes target-before-endpoint use impossible."""
+    """Monotone receipt for serving reads, endpoints, and deferred scoring."""
 
     events: list[dict[str, Any]] = field(default_factory=list)
     endpoints: set[str] = field(default_factory=set)
     target_constructed: bool = False
     barrier_closed: bool = False
+    batch_indices: tuple[int, ...] | None = None
 
     def record(self, kind: str, **payload: Any) -> int:
         sequence = len(self.events)
@@ -299,6 +309,87 @@ class EventLedger:
     def require_pre_target(self) -> None:
         if self.target_constructed or self.barrier_closed:
             raise MultirateError("endpoint operation attempted after target barrier")
+
+    def bind_batch(self, indexes: Sequence[int]) -> None:
+        self.require_pre_target()
+        observed = tuple(int(index) for index in indexes)
+        if (
+            self.batch_indices is not None
+            or len(observed) != BATCH_SIZE
+            or len(set(observed)) != BATCH_SIZE
+            or any(index not in range(*DEV_RANGE) for index in observed)
+        ):
+            raise MultirateError(f"serving batch identity differs: {observed}")
+        self.batch_indices = observed
+        self.record("batch_bound", clip_indices=list(observed))
+
+    def require_post_endpoint_barrier(self) -> None:
+        if not self.barrier_closed or self.target_constructed:
+            raise MultirateError("scoring read attempted outside the post-endpoint window")
+
+    def begin_array_read(
+        self,
+        *,
+        role: str,
+        array: str,
+        row: int,
+        frame_start: int,
+        frame_stop: int,
+        path: str,
+    ) -> int:
+        row = int(row)
+        frame_start = int(frame_start)
+        frame_stop = int(frame_stop)
+        if self.batch_indices is None or row not in self.batch_indices:
+            raise MultirateError(f"array read is not bound to this batch: {row}")
+        expected = {
+            ("serving", "rgb"): (0, HISTORY_RGB_FRAMES),
+            ("serving", "actions"): (0, TOTAL_RGB_FRAMES),
+            ("scoring", "rgb"): (0, TOTAL_RGB_FRAMES),
+        }
+        if (role, array) not in expected or expected[(role, array)] != (
+            frame_start,
+            frame_stop,
+        ):
+            raise MultirateError(
+                "array slice violates the frozen access graph: "
+                f"{role}/{array}/{row}/{frame_start}:{frame_stop}"
+            )
+        if role == "serving":
+            self.require_pre_target()
+        else:
+            self.require_post_endpoint_barrier()
+        return self.record(
+            "array_read_started",
+            role=role,
+            array=array,
+            row=row,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            path=str(path),
+        )
+
+    def finish_array_read(self, started_sequence: int) -> None:
+        try:
+            started = self.events[int(started_sequence)]
+        except (IndexError, TypeError, ValueError) as exc:
+            raise MultirateError("array read completion lacks a valid start") from exc
+        if started.get("kind") != "array_read_started":
+            raise MultirateError("array read completion does not reference a start")
+        if started.get("role") == "serving":
+            self.require_pre_target()
+        else:
+            self.require_post_endpoint_barrier()
+        self.record(
+            "array_read_finished",
+            started_sequence=int(started_sequence),
+            role=started["role"],
+            array=started["array"],
+            row=int(started["row"]),
+            frame_start=int(started["frame_start"]),
+            frame_stop=int(started["frame_stop"]),
+            path=started["path"],
+        )
 
     def endpoint(self, name: str) -> None:
         self.require_pre_target()
@@ -330,18 +421,94 @@ class EventLedger:
             for event in self.events
             if event["kind"] == "target_constructed"
         ]
+        barrier_sequences = [
+            int(event["sequence"])
+            for event in self.events
+            if event["kind"] == "endpoint_barrier_closed"
+        ]
+        starts = [event for event in self.events if event["kind"] == "array_read_started"]
+        finishes = [
+            event for event in self.events if event["kind"] == "array_read_finished"
+        ]
+        if self.batch_indices is None:
+            raise MultirateError("event ledger lacks a bound serving batch")
+        expected_accesses = {
+            (role, array, row, start, stop)
+            for row in self.batch_indices
+            for role, array, start, stop in (
+                ("serving", "rgb", 0, HISTORY_RGB_FRAMES),
+                ("serving", "actions", 0, TOTAL_RGB_FRAMES),
+                ("scoring", "rgb", 0, TOTAL_RGB_FRAMES),
+            )
+        }
+        observed_starts = {
+            (
+                event.get("role"),
+                event.get("array"),
+                int(event.get("row", -1)),
+                int(event.get("frame_start", -1)),
+                int(event.get("frame_stop", -1)),
+            )
+            for event in starts
+        }
+        completed_starts = {int(event.get("started_sequence", -1)) for event in finishes}
+        array_paths = {
+            array: {str(event.get("path", "")) for event in starts if event.get("array") == array}
+            for array in ("rgb", "actions")
+        }
         if (
             len(endpoint_sequences) != len(ENDPOINTS)
             or len(target_sequences) != 1
             or min(target_sequences) <= max(endpoint_sequences)
+            or len(barrier_sequences) != 1
+            or observed_starts != expected_accesses
+            or len(starts) != len(expected_accesses)
+            or len(finishes) != len(starts)
+            or completed_starts != {int(event["sequence"]) for event in starts}
+            or any(len(paths) != 1 or "" in paths for paths in array_paths.values())
         ):
-            raise MultirateError("target did not follow every endpoint")
+            raise MultirateError("event/access ordering inventory differs")
+        barrier_sequence = barrier_sequences[0]
+        serving_finishes = [
+            int(event["sequence"])
+            for event in finishes
+            if event["role"] == "serving"
+        ]
+        scoring_starts = [
+            int(event["sequence"])
+            for event in starts
+            if event["role"] == "scoring"
+        ]
+        scoring_finishes = [
+            int(event["sequence"])
+            for event in finishes
+            if event["role"] == "scoring"
+        ]
+        if (
+            not serving_finishes
+            or not scoring_starts
+            or not scoring_finishes
+            or max(serving_finishes) >= barrier_sequence
+            or min(scoring_starts) <= barrier_sequence
+            or max(scoring_finishes) >= target_sequences[0]
+        ):
+            raise MultirateError("full RGB scoring access crossed the endpoint barrier")
         return {
             "events": self.events,
             "endpoint_count": len(endpoint_sequences),
             "first_target_sequence": target_sequences[0],
             "last_endpoint_sequence": max(endpoint_sequences),
+            "endpoint_barrier_sequence": barrier_sequence,
             "target_after_all_endpoints": True,
+            "serving_rgb_frames": [0, HISTORY_RGB_FRAMES],
+            "prebarrier_max_rgb_frame_exclusive": HISTORY_RGB_FRAMES,
+            "full_rgb_materialized_only_after_barrier": True,
+            "serving_rgb_read_count": BATCH_SIZE,
+            "serving_actions_read_count": BATCH_SIZE,
+            "scoring_rgb_read_count": BATCH_SIZE,
+            "array_paths": {
+                array: next(iter(paths)) for array, paths in array_paths.items()
+            },
             "sha256": hashlib.sha256(
                 json.dumps(
                     self.events,
@@ -791,6 +958,12 @@ def _prepare_registration(
             },
             "access_contract": {
                 "vjepa_target_array_allowed": False,
+                "serving_reader": "experiment-local audited immutable memmap",
+                "serving_rgb_frame_slice": [0, HISTORY_RGB_FRAMES],
+                "scoring_rgb_frame_slice": [0, TOTAL_RGB_FRAMES],
+                "full_rgb_materialization_allowed_before_endpoint_barrier": False,
+                "production_dataset_constructor_allowed_before_endpoint_barrier": False,
+                "public_sampler_parity_required": ["VPM1", "VPM2_ORDINARY"],
                 "teacher_calls": 0,
                 "feature_encoder_calls": 0,
                 "optimizer_updates": 0,
@@ -846,38 +1019,260 @@ def _resolve_input(registration: Mapping[str, Any], key: str) -> Path:
     return Path(_validated_record(registration["inputs"][key], key)["path"])
 
 
-class _IndexAuditedDataset:
-    def __init__(self, dataset: Any, allowed: Sequence[int]) -> None:
-        self.dataset = dataset
+@dataclass(frozen=True)
+class ServingBatch:
+    """The endpoint-facing type has no field capable of naming full RGB."""
+
+    history_rgb: Any
+    actions: Any
+    morphology_index: Any
+    clip_index: Any
+
+
+@dataclass(frozen=True)
+class ScoringBatch:
+    """Full clips exist only in the post-endpoint scoring phase."""
+
+    rgb: Any
+    clip_index: Any
+
+
+class AuditedABCClipReader:
+    """Experiment-local immutable memmap reader with phase-typed methods.
+
+    In particular, this does not instantiate ``ABCVideoResidualAnchorDataset``:
+    that production dataset validates and copies complete 13-frame rows in its
+    constructor.  The serving method below indexes exactly ``0:5``; only the
+    scoring method can index ``0:13``, and the ledger rejects that method until
+    every endpoint has crossed the barrier.
+    """
+
+    def __init__(
+        self,
+        registration: Mapping[str, Any],
+        *,
+        allowed: Sequence[int] = range(*DEV_RANGE),
+    ) -> None:
         self.allowed = frozenset(int(index) for index in allowed)
-        self.access_counts = {index: 0 for index in self.allowed}
+        if self.allowed != frozenset(range(*DEV_RANGE)):
+            raise MultirateError("audited reader row partition differs")
+        self.serving_counts = {index: 0 for index in self.allowed}
+        self.scoring_counts = {index: 0 for index in self.allowed}
 
-    def __len__(self) -> int:
-        return len(self.dataset)
+        manifest_path = _resolve_input(registration, "train_manifest")
+        metadata_path = _resolve_input(registration, "train_cache_metadata")
+        self.manifest = ladder.read_jsonl(manifest_path)
+        self.metadata = ladder.read_json(metadata_path)
+        _validate_manifest(self.manifest)
+        arrays = {
+            key: _validated_cache_record(registration["cache_arrays"][key], key)
+            for key in ("rgb", "actions")
+        }
+        self.rgb_path = Path(arrays["rgb"]["path"])
+        self.actions_path = Path(arrays["actions"]["path"])
+        metadata_dir = metadata_path.parent
 
-    def __getitem__(self, index: int) -> Any:
-        index = int(index)
-        if index not in self.allowed:
-            raise MultirateError(f"dataset attempted forbidden row {index}")
-        self.access_counts[index] += 1
-        return self.dataset[index]
+        def metadata_file(key: str) -> Path:
+            raw = self.metadata.get(key)
+            if not isinstance(raw, str) or not raw:
+                raise MultirateError(f"cache metadata lacks {key}")
+            value = Path(raw)
+            if not value.is_absolute():
+                value = metadata_dir / value
+            return ladder.canonical_file(value, f"cache metadata {key}")
+
+        if (
+            self.metadata.get("complete") is not True
+            or self.metadata.get("split") != "train"
+            or int(self.metadata.get("clip_count", -1)) != EXPECTED_TRAIN_COUNT
+            or self.metadata.get("clip_manifest_sha256")
+            != registration["inputs"]["train_manifest"]["sha256"]
+            or self.metadata.get("rgb_sha256") != arrays["rgb"]["sha256"]
+            or self.metadata.get("actions_sha256") != arrays["actions"]["sha256"]
+            or self.metadata.get("rgb_dtype") != "float16"
+            or self.metadata.get("actions_dtype") != "float32"
+            or self.metadata.get("rgb_shape") != list(RGB_SHAPE)
+            or self.metadata.get("actions_shape") != list(ACTIONS_SHAPE)
+            or int(self.metadata.get("sample_size", -1)) != TOTAL_RGB_FRAMES
+            or int(self.metadata.get("chunk_size", -1)) != HISTORY_RGB_FRAMES
+            or metadata_file("rgb_file") != self.rgb_path
+            or metadata_file("actions_file") != self.actions_path
+        ):
+            raise MultirateError("immutable ABC RGB/action metadata differs")
+        self._rgbs: Any | None = None
+        self._actions: Any | None = None
+
+    @staticmethod
+    def _open_array(path: Path, *, shape: tuple[int, ...], dtype: str) -> Any:
+        import numpy as np
+
+        value = np.load(path, mmap_mode="r", allow_pickle=False)
+        if value.shape != shape or value.dtype != np.dtype(dtype):
+            raise MultirateError(f"immutable memmap header changed: {path}")
+        return value
+
+    def _read_slice(
+        self,
+        *,
+        ledger: EventLedger,
+        role: str,
+        array: str,
+        row: int,
+        frame_start: int,
+        frame_stop: int,
+    ) -> Any:
+        import numpy as np
+
+        row = int(row)
+        if row not in self.allowed:
+            raise MultirateError(f"reader attempted forbidden row {row}")
+        path = self.rgb_path if array == "rgb" else self.actions_path
+        started = ledger.begin_array_read(
+            role=role,
+            array=array,
+            row=row,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            path=str(path),
+        )
+        if array == "rgb":
+            if self._rgbs is None:
+                self._rgbs = self._open_array(
+                    self.rgb_path, shape=RGB_SHAPE, dtype="float16"
+                )
+            source = self._rgbs
+        elif array == "actions":
+            if self._actions is None:
+                self._actions = self._open_array(
+                    self.actions_path, shape=ACTIONS_SHAPE, dtype="float32"
+                )
+            source = self._actions
+        else:
+            raise MultirateError(f"unsupported immutable array: {array}")
+        # This tuple is the only row index operation in the audited reader.
+        value = np.array(
+            source[(row, slice(frame_start, frame_stop), Ellipsis)], copy=True
+        )
+        ledger.finish_array_read(started)
+        return value
+
+    def serving_batch(
+        self,
+        indexes: Sequence[int],
+        *,
+        device: Any,
+        ledger: EventLedger,
+    ) -> ServingBatch:
+        import numpy as np
+        import torch
+
+        requested = tuple(int(index) for index in indexes)
+        ledger.bind_batch(requested)
+        history_rows = []
+        action_rows = []
+        for index in requested:
+            history = self._read_slice(
+                ledger=ledger,
+                role="serving",
+                array="rgb",
+                row=index,
+                frame_start=0,
+                frame_stop=HISTORY_RGB_FRAMES,
+            )
+            actions = self._read_slice(
+                ledger=ledger,
+                role="serving",
+                array="actions",
+                row=index,
+                frame_start=0,
+                frame_stop=TOTAL_RGB_FRAMES,
+            )
+            if history.shape != (HISTORY_RGB_FRAMES, 3, 180, 960):
+                raise MultirateError("serving RGB contains more than five frames")
+            if actions.shape != ACTIONS_SHAPE[1:]:
+                raise MultirateError("serving action row shape differs")
+            if (
+                not np.isfinite(history).all()
+                or float(history.min()) < -1.0
+                or float(history.max()) > 1.0
+                or not np.isfinite(actions).all()
+            ):
+                raise MultirateError(f"invalid immutable serving row {index}")
+            history_rows.append(torch.from_numpy(history).float())
+            action_rows.append(torch.from_numpy(actions))
+            self.serving_counts[index] += 1
+        history_rgb = torch.stack(history_rows).to(device=device, non_blocking=False)
+        actions = torch.stack(action_rows)
+        if actions.shape[-1] > PADDED_ACTION_DIM:
+            raise MultirateError("action width exceeds the pinned padding width")
+        actions = torch.nn.functional.pad(
+            actions, (0, PADDED_ACTION_DIM - int(actions.shape[-1]))
+        ).to(device=device, non_blocking=False)
+        morphology = torch.full(
+            (len(requested),), ABC_MORPHOLOGY_INDEX, dtype=torch.long, device=device
+        )
+        clip_index = torch.tensor(requested, dtype=torch.long, device=device)
+        ledger.record(
+            "serving_batch_ready",
+            clip_indices=list(requested),
+            history_shape=list(history_rgb.shape),
+            actions_shape=list(actions.shape),
+        )
+        return ServingBatch(
+            history_rgb=history_rgb,
+            actions=actions,
+            morphology_index=morphology,
+            clip_index=clip_index,
+        )
+
+    def scoring_batch(
+        self,
+        indexes: Sequence[int],
+        *,
+        device: Any,
+        ledger: EventLedger,
+    ) -> ScoringBatch:
+        import numpy as np
+        import torch
+
+        requested = tuple(int(index) for index in indexes)
+        ledger.require_post_endpoint_barrier()
+        if requested != ledger.batch_indices:
+            raise MultirateError("scoring batch does not match the serving batch")
+        rows = []
+        for index in requested:
+            rgb = self._read_slice(
+                ledger=ledger,
+                role="scoring",
+                array="rgb",
+                row=index,
+                frame_start=0,
+                frame_stop=TOTAL_RGB_FRAMES,
+            )
+            if rgb.shape != RGB_SHAPE[1:] or not np.isfinite(rgb).all():
+                raise MultirateError(f"invalid immutable scoring row {index}")
+            rows.append(torch.from_numpy(rgb).float())
+            self.scoring_counts[index] += 1
+        full_rgb = torch.stack(rows).to(device=device, non_blocking=False)
+        ledger.record(
+            "scoring_batch_ready",
+            clip_indices=list(requested),
+            rgb_shape=list(full_rgb.shape),
+        )
+        return ScoringBatch(
+            rgb=full_rgb,
+            clip_index=torch.tensor(requested, dtype=torch.long, device=device),
+        )
 
     def assert_exact_accesses(self, expected_per_row: int) -> None:
-        if any(value != expected_per_row for value in self.access_counts.values()):
+        if any(value != expected_per_row for value in self.serving_counts.values()):
             raise MultirateError(
-                f"dataset row-access inventory differs: {self.access_counts}"
+                f"serving row-access inventory differs: {self.serving_counts}"
             )
-
-
-def _phase_dataset(
-    config: Any, registration: Mapping[str, Any]
-) -> _IndexAuditedDataset:
-    dataset = ladder._no_auxiliary_dataset(
-        config,
-        registration,
-        validation_sample_indices=(DEV_RANGE[0], DEV_RANGE[1] - 1),
-    )
-    return _IndexAuditedDataset(dataset, range(*DEV_RANGE))
+        if any(value != expected_per_row for value in self.scoring_counts.values()):
+            raise MultirateError(
+                f"scoring row-access inventory differs: {self.scoring_counts}"
+            )
 
 
 def _parameter_schema(model: Any) -> dict[str, Any]:
@@ -903,7 +1298,7 @@ def _parameter_schema(model: Any) -> dict[str, Any]:
 
 def _prepare_serving_inputs(
     model: Any,
-    batch: Mapping[str, Any],
+    batch: ServingBatch,
     *,
     noise_seed: int,
     ledger: EventLedger,
@@ -912,12 +1307,27 @@ def _prepare_serving_inputs(
     import torch
 
     ledger.require_pre_target()
-    rgb = batch["rgb"]
-    if rgb.shape[0] != BATCH_SIZE:
-        raise MultirateError("episode-shuffled control requires batch size two")
-    history_rgb = rgb[:, : model.num_history_frames]
+    if not isinstance(batch, ServingBatch):
+        raise MultirateError("endpoint preparation requires a ServingBatch")
+    history_rgb = batch.history_rgb
+    if (
+        history_rgb.ndim != 5
+        or history_rgb.shape[0] != BATCH_SIZE
+        or history_rgb.shape[1] != HISTORY_RGB_FRAMES
+        or history_rgb.shape[1] != int(model.num_history_frames)
+        or tuple(history_rgb.shape[2:]) != (3, 180, 960)
+    ):
+        raise MultirateError(
+            "serving RGB must contain exactly the five observed frames"
+        )
+    if batch.actions.shape != (BATCH_SIZE, TOTAL_RGB_FRAMES, 5, PADDED_ACTION_DIM):
+        raise MultirateError("serving action tensor shape differs")
+    if batch.morphology_index.shape != (BATCH_SIZE,):
+        raise MultirateError("serving morphology tensor shape differs")
+    if batch.clip_index.shape != (BATCH_SIZE,):
+        raise MultirateError("serving clip identity tensor shape differs")
     ledger.record("history_encode_started")
-    history_latents = model._encode_clip(history_rgb).to(rgb.dtype)
+    history_latents = model._encode_clip(history_rgb).to(history_rgb.dtype)
     ledger.record("history_encode_finished")
     if history_latents.shape[2] != model.num_history_latent:
         raise MultirateError("deployable history latent length differs")
@@ -925,7 +1335,7 @@ def _prepare_serving_inputs(
         model.num_history_frames + model.num_future_frames
     )
     video_shape = (
-        rgb.shape[0],
+        history_rgb.shape[0],
         history_latents.shape[1],
         latent_frames,
         history_latents.shape[3],
@@ -942,52 +1352,58 @@ def _prepare_serving_inputs(
         raise MultirateError("deployable VPM must diffuse all auxiliary slots")
     _, z_control, _ = model._latent_actions(
         history_rgb,
-        batch["actions"],
-        batch["morphology_index"],
+        batch.actions,
+        batch.morphology_index,
         latent_frames,
         history_frames,
     )
-    z_control = z_control.to(rgb.dtype)
-    context = model._build_context(rgb.shape[0], rgb.device, rgb.dtype)
-    clip_fea = model._build_clip(rgb.shape[0], rgb.device, rgb.dtype)
+    z_control = z_control.to(history_rgb.dtype)
+    context = model._build_context(
+        history_rgb.shape[0], history_rgb.device, history_rgb.dtype
+    )
+    clip_fea = model._build_clip(
+        history_rgb.shape[0], history_rgb.device, history_rgb.dtype
+    )
     initial_video = model._evaluation_noise(
         video_shape,
-        device=rgb.device,
-        dtype=rgb.dtype,
+        device=history_rgb.device,
+        dtype=history_rgb.dtype,
         base_seed=int(noise_seed),
-        sample_ids=batch["clip_index"],
+        sample_ids=batch.clip_index,
         stream=0,
         rank=0,
     )
     auxiliary_shape = (
-        rgb.shape[0],
+        history_rgb.shape[0],
         int(model.forward_model.tf_token_adapter.tf_channels),
         *video_shape[2:],
     )
     initial_auxiliary = model._evaluation_noise(
         auxiliary_shape,
-        device=rgb.device,
-        dtype=rgb.dtype,
+        device=history_rgb.device,
+        dtype=history_rgb.dtype,
         base_seed=int(noise_seed),
-        sample_ids=batch["clip_index"],
+        sample_ids=batch.clip_index,
         stream=1,
         rank=0,
     )
 
     schedule, timesteps, tf_only_steps = model._sampling_schedule(
-        2, device=rgb.device
+        2, device=history_rgb.device
     )
     if int(tf_only_steps) != 0 or len(timesteps) != 2:
         raise MultirateError("VPM NFE-2 is not the aligned native schedule")
-    sigmas = schedule.video.detach().clone().to(device=rgb.device, dtype=torch.float32)
+    sigmas = schedule.video.detach().clone().to(
+        device=history_rgb.device, dtype=torch.float32
+    )
     if sigmas.numel() != 3:
         raise MultirateError("VPM NFE-2 sigma inventory differs")
 
     # The first NFE-2 call must be the actual VPM@1 frontier call.
     one_step_scheduler = copy.deepcopy(model.sample_scheduler)
-    one_step_scheduler.set_timesteps(1, device=rgb.device)
+    one_step_scheduler.set_timesteps(1, device=history_rgb.device)
     one_sigma = one_step_scheduler.sigmas.to(
-        device=rgb.device, dtype=torch.float32
+        device=history_rgb.device, dtype=torch.float32
     )[:2]
     if (
         one_sigma.numel() != 2
@@ -1078,19 +1494,254 @@ def _off_velocity_call(
     return prediction.video_velocity
 
 
+@dataclass
+class PublicDeployableCapture:
+    nfe: int
+    final_latent: Any
+    decoded_uint8: Any
+    receipt: dict[str, Any]
+
+
+def _capture_public_deployable(
+    model: Any,
+    batch: ServingBatch,
+    prepared: Mapping[str, Any],
+    *,
+    nfe: int,
+    noise_seed: int,
+    ledger: EventLedger,
+) -> PublicDeployableCapture:
+    """Capture an exact target-blind public-sampler endpoint for parity."""
+    import torch
+
+    ledger.require_pre_target()
+    if nfe not in (1, 2):
+        raise MultirateError("public parity supports only NFE one and two")
+    if batch.history_rgb.shape[1] != HISTORY_RGB_FRAMES:
+        raise MultirateError("public parity received future RGB")
+    saved = {
+        "evaluation_condition_sources": model.evaluation_condition_sources,
+        "evaluation_nfe_steps": model.evaluation_nfe_steps,
+        "viz_num_steps": model.viz_num_steps,
+        "evaluation_noise_seed": model.evaluation_noise_seed,
+        "capture_latent_trajectories": model.capture_latent_trajectories,
+        "artifact_batch_limit": getattr(model, "artifact_batch_limit", None),
+        "_last_sampling_counters": getattr(model, "_last_sampling_counters", None),
+        "_visualization_artifacts": getattr(model, "_visualization_artifacts", None),
+    }
+    model.evaluation_condition_sources = ("off",)
+    model.evaluation_nfe_steps = (int(nfe),)
+    model.viz_num_steps = int(nfe)
+    model.evaluation_noise_seed = int(noise_seed)
+    model.capture_latent_trajectories = False
+    model.artifact_batch_limit = BATCH_SIZE
+    model._visualization_artifacts = None
+
+    captured_latents: list[Any] = []
+    hook_calls = 0
+    decode_was_instance_attribute = "decode_temporal" in vars(model.rgb_tokenizer)
+    saved_instance_decode = vars(model.rgb_tokenizer).get("decode_temporal")
+    original_decode = model.rgb_tokenizer.decode_temporal
+
+    def capture_decode(latent: Any, *args: Any, **kwargs: Any) -> Any:
+        captured_latents.append(latent.detach().clone())
+        return original_decode(latent, *args, **kwargs)
+
+    def count_forward(_module: Any, _inputs: Any, _output: Any) -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+
+    ledger.record(
+        "public_parity_sampler_started",
+        nfe=int(nfe),
+        clip_indices=[int(value) for value in batch.clip_index.detach().cpu()],
+        target_blind=True,
+    )
+    model.rgb_tokenizer.decode_temporal = capture_decode
+    handle = model.forward_model.register_forward_hook(count_forward)
+    artifacts = None
+    counters = None
+    try:
+        prediction = model.sample_future_deployable(
+            batch.history_rgb,
+            batch.actions,
+            batch.morphology_index,
+            collect_artifacts=True,
+            sample_ids=batch.clip_index,
+        )
+        counters = copy.deepcopy(model._last_sampling_counters)
+        artifacts = model.pop_visualization_artifacts()
+    finally:
+        handle.remove()
+        if decode_was_instance_attribute:
+            model.rgb_tokenizer.decode_temporal = saved_instance_decode
+        else:
+            delattr(model.rgb_tokenizer, "decode_temporal")
+        for name, value in saved.items():
+            setattr(model, name, value)
+    if not isinstance(artifacts, Mapping) or not isinstance(counters, Mapping):
+        raise MultirateError("public parity sampler did not expose audit artifacts")
+    if len(captured_latents) != 1:
+        raise MultirateError("public parity did not capture exactly one decoder input")
+    key = f"off:nfe_{nfe}"
+    final_key = f"video_final_off_nfe_{nfe}"
+    decoded_key = f"decoded_future_off_nfe_{nfe}"
+    forbidden = {"video_clean", "ground_truth_future_uint8", "tf_clean"}
+    if forbidden.intersection(artifacts):
+        raise MultirateError("public parity exposed a clean target artifact")
+    if (
+        counters.get("wan_calls_by_source_nfe") != {key: nfe}
+        or int(counters.get("wan_calls_total", -1)) != nfe
+        or int(counters.get("online_teacher_calls", -1)) != 0
+        or int(counters.get("auxiliary_clean_available", -1)) != 0
+        or int(counters.get("artifacts_collected", -1)) != 1
+        or int(counters.get("deployment_mode", -1)) != 1
+        or hook_calls != nfe
+        or final_key not in artifacts
+        or decoded_key not in artifacts
+    ):
+        raise MultirateError(f"public parity call inventory differs: {counters}")
+    final_latent = captured_latents[0]
+    decoded_uint8 = ladder._to_uint8_video(prediction)
+    official_final = artifacts[final_key]
+    official_decoded = artifacts[decoded_key]
+    if (
+        final_latent.shape != prepared["initial_video"].shape
+        or not torch.equal(official_final, final_latent.detach().cpu().to(torch.float16))
+        or not torch.equal(official_decoded, decoded_uint8.detach().cpu())
+        or not torch.equal(
+            artifacts["video_initial_state"],
+            prepared["initial_video"].detach().cpu().to(torch.float16),
+        )
+        or not torch.equal(
+            artifacts["reference_latents"],
+            prepared["reference"].detach().cpu().to(torch.float16),
+        )
+        or not torch.equal(
+            artifacts["sample_ids"], batch.clip_index.detach().cpu().to(torch.int64)
+        )
+        or int(artifacts["deployment_mode"].reshape(-1)[0]) != 1
+        or int(artifacts["auxiliary_clean_available"].reshape(-1)[0]) != 0
+    ):
+        raise MultirateError("public parity artifact binding differs")
+    ledger.record(
+        "public_parity_sampler_finished",
+        nfe=int(nfe),
+        wan_calls=int(hook_calls),
+        target_blind=True,
+    )
+    return PublicDeployableCapture(
+        nfe=int(nfe),
+        final_latent=final_latent,
+        decoded_uint8=decoded_uint8,
+        receipt={
+            "nfe": int(nfe),
+            "wan_calls": int(hook_calls),
+            "official_artifact_final_matches_exact_capture": True,
+            "official_artifact_decoded_matches_public_return": True,
+            "public_final_latent_sha256": ladder._safe_tensor_sha256(final_latent),
+            "public_decoded_uint8_sha256": ladder._safe_tensor_sha256(decoded_uint8),
+            "initial_video_fp16_sha256": ladder._safe_tensor_sha256(
+                artifacts["video_initial_state"]
+            ),
+            "reference_fp16_sha256": ladder._safe_tensor_sha256(
+                artifacts["reference_latents"]
+            ),
+            "counters": dict(counters),
+        },
+    )
+
+
+def _validate_public_manual_parity(
+    model: Any,
+    captures: Mapping[int, PublicDeployableCapture],
+    materialized: EndpointMaterialization,
+    *,
+    noise_seed: int,
+    clip_indices: Sequence[int],
+    ledger: EventLedger,
+) -> dict[str, Any]:
+    """Require bit-exact public/manual VPM1 and ordinary VPM2 endpoints."""
+    import torch
+
+    ledger.require_post_endpoint_barrier()
+    endpoint_by_nfe = {1: "VPM1", 2: "VPM2_ORDINARY"}
+    if set(captures) != set(endpoint_by_nfe):
+        raise MultirateError("public parity capture inventory differs")
+    comparisons: dict[str, Any] = {}
+    for nfe, endpoint in endpoint_by_nfe.items():
+        public = captures[nfe]
+        manual_latent = materialized.states[endpoint]
+        latent_equal = bool(torch.equal(public.final_latent, manual_latent))
+        manual_pixels = model.rgb_tokenizer.decode_temporal(
+            manual_latent,
+            out_hw=(180, 960),
+        )
+        manual_uint8 = ladder._to_uint8_video(
+            manual_pixels[:, :, -FUTURE_RGB_FRAMES:]
+        )
+        decoded_equal = bool(torch.equal(public.decoded_uint8, manual_uint8))
+        if not latent_equal or not decoded_equal:
+            latent_error = float(
+                (public.final_latent.float() - manual_latent.float())
+                .abs()
+                .max()
+                .detach()
+                .cpu()
+            )
+            raise MultirateError(
+                f"manual {endpoint} differs from public deployable sampler: "
+                f"latent_equal={latent_equal}, decoded_equal={decoded_equal}, "
+                f"latent_max_abs={latent_error}"
+            )
+        comparisons[endpoint] = {
+            **public.receipt,
+            "manual_final_latent_sha256": ladder._safe_tensor_sha256(manual_latent),
+            "manual_decoded_uint8_sha256": ladder._safe_tensor_sha256(manual_uint8),
+            "final_latent_bit_exact": True,
+            "decoded_uint8_bit_exact": True,
+        }
+    receipt = {
+        "public_entrypoint": (
+            "DualExplicitActionDiTModel.sample_future_deployable"
+        ),
+        "condition_source": "off",
+        "clip_indices": [int(value) for value in clip_indices],
+        "noise_seed": int(noise_seed),
+        "target_blind": True,
+        "future_rgb_entered_parity_sampler": False,
+        "auxiliary_target_entered_parity_sampler": False,
+        "comparisons": comparisons,
+        "all_final_latents_bit_exact": True,
+        "all_decoded_uint8_bit_exact": True,
+        "public_wan_calls_excluded_from_endpoint_accounting": 3,
+        "parity_decoder_calls_excluded_from_endpoint_accounting": 4,
+    }
+    ledger.record(
+        "public_manual_parity_validated",
+        public_wan_calls_excluded=3,
+        parity_decoder_calls_excluded=4,
+    )
+    return receipt
+
+
 def _construct_targets_after_barrier(
     model: Any,
-    batch: Mapping[str, Any],
+    batch: ScoringBatch,
     *,
     prepared: Mapping[str, Any],
     ledger: EventLedger,
 ) -> dict[str, Any]:
     """This is the only function allowed to encode the full clean clip."""
+    if not isinstance(batch, ScoringBatch):
+        raise MultirateError("target construction requires a ScoringBatch")
+    if batch.rgb.shape != (BATCH_SIZE, *RGB_SHAPE[1:]):
+        raise MultirateError("scoring batch must contain exactly 13 RGB frames")
     ledger.construct_target()
-    video_clean = model._encode_clip(batch["rgb"]).to(batch["rgb"].dtype)
+    video_clean = model._encode_clip(batch.rgb).to(batch.rgb.dtype)
     if video_clean.shape != prepared["initial_video"].shape:
         raise MultirateError("clean target latent grid differs")
-    raw_video = batch["rgb"].permute(0, 2, 1, 3, 4)
+    raw_video = batch.rgb.permute(0, 2, 1, 3, 4)
     raw_target_exact = raw_video[:, :, -model.num_future_frames :]
     raw_history_exact = raw_video[
         :, :, -(model.num_future_frames + 1) : -model.num_future_frames
@@ -1099,12 +1750,12 @@ def _construct_targets_after_barrier(
     raw_history = ladder._to_uint8_video(raw_history_exact)
     decoded_clean = model.rgb_tokenizer.decode_temporal(
         video_clean,
-        out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
+        out_hw=(batch.rgb.shape[-2], batch.rgb.shape[-1]),
     )
     ladder._validate_decoded_horizon(
         model_future_frames=model.num_future_frames,
         decoded_frames=decoded_clean.shape[2],
-        raw_frames=batch["rgb"].shape[1],
+        raw_frames=batch.rgb.shape[1],
         endpoint="TARGET",
     )
     return {
@@ -1253,6 +1904,201 @@ def _aggregate_projector_receipts(
     }
 
 
+def _parity_preflight_phase(args: argparse.Namespace) -> int:
+    """Run only target-blind public/manual parity on rows 416--417."""
+    import torch
+
+    if not torch.cuda.is_available():
+        raise MultirateError("CUDA is required")
+    properties = torch.cuda.get_device_properties(0)
+    if "B200" not in properties.name.upper() or (
+        int(properties.major), int(properties.minor)
+    ) != (10, 0):
+        raise MultirateError("public parity preflight requires exactly one B200")
+    repo = ladder.canonical_directory(args.repo_root, "repository")
+    source_commit = ladder.git_output(repo, "rev-parse", "HEAD")
+    if (
+        source_commit != args.expected_source_commit
+        or ladder.git_output(repo, "status", "--porcelain", "--untracked-files=all")
+    ):
+        raise MultirateError("parity preflight source state differs")
+    output = Path(args.receipt_out).expanduser()
+    if output.exists() or output.is_symlink():
+        raise MultirateError("parity receipt path must be fresh")
+    parent_path = ladder.canonical_file(args.parent_registration, "parent registration")
+    parent = ladder.read_json(parent_path)
+    if (
+        parent.get("schema") != ladder.SCHEMA
+        or not ladder.identity_valid(parent)
+        or "VPM" not in parent.get("lineage", {})
+        or parent.get("inputs", {}).get("vpm_snapshot", {}).get("sha256")
+        != args.vpm_snapshot_sha256
+    ):
+        raise MultirateError("parity parent registration differs")
+    transient_registration = {
+        "inputs": {
+            key: _validated_record(parent["inputs"][key], key)
+            for key in (
+                "train_manifest",
+                "train_cache_metadata",
+                "vpm_resolved_config",
+                "vpm_snapshot",
+            )
+        },
+        "cache_arrays": {
+            key: _validated_cache_record(parent["cache_arrays"][key], key)
+            for key in ("target", "rgb", "actions")
+        },
+    }
+    device = torch.device("cuda", 0)
+    torch.cuda.set_device(device)
+    torch.set_float32_matmul_precision("highest")
+    model, _config = ladder._load_model(
+        Path(transient_registration["inputs"]["vpm_resolved_config"]["path"]),
+        Path(transient_registration["inputs"]["vpm_snapshot"]["path"]),
+        device,
+    )
+    if (
+        not getattr(model, "parameter_matched_control", False)
+        or getattr(model, "condition_on_tf", True)
+        or getattr(model, "condition_on_tf_clock", True)
+        or getattr(model, "tf_schedule_mode", None) != "aligned"
+    ):
+        raise MultirateError("parity checkpoint is not the frozen VPM-off endpoint")
+    parameter_before = _parameter_schema(model)
+    target_path = Path(transient_registration["cache_arrays"]["target"]["path"])
+    expected_arrays = {
+        Path(transient_registration["cache_arrays"]["rgb"]["path"]).resolve(
+            strict=True
+        ),
+        Path(transient_registration["cache_arrays"]["actions"]["path"]).resolve(
+            strict=True
+        ),
+    }
+    indexes = (DEV_RANGE[0], DEV_RANGE[0] + 1)
+    ledger = EventLedger()
+    with ladder.NumpyTargetOpenGuard(target_path) as guard:
+        reader = AuditedABCClipReader(transient_registration)
+        if (
+            reader.manifest[indexes[0]]["episode_dir"]
+            == reader.manifest[indexes[1]]["episode_dir"]
+        ):
+            raise MultirateError("parity pair is not episode-disjoint")
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda", dtype=torch.bfloat16
+        ):
+            serving = reader.serving_batch(indexes, device=device, ledger=ledger)
+            prepared = _prepare_serving_inputs(
+                model,
+                serving,
+                noise_seed=DEV_NOISE_SEEDS[0],
+                ledger=ledger,
+            )
+            captures = {
+                nfe: _capture_public_deployable(
+                    model,
+                    serving,
+                    prepared,
+                    nfe=nfe,
+                    noise_seed=DEV_NOISE_SEEDS[0],
+                    ledger=ledger,
+                )
+                for nfe in (1, 2)
+            }
+            calls: list[str] = []
+
+            def velocity_call(state: Any, timestep: Any, label: str, sigma: Any) -> Any:
+                ledger.require_pre_target()
+                calls.append(label)
+                return _off_velocity_call(
+                    model,
+                    prepared,
+                    state=state,
+                    timestep=timestep,
+                    sigma=sigma,
+                )
+
+            materialized = materialize_split_endpoints(
+                initial=prepared["initial_video"],
+                reference=prepared["reference"],
+                history_frames=prepared["history_frames"],
+                sigmas=prepared["sigmas"],
+                timesteps=prepared["timesteps"],
+                velocity_call=velocity_call,
+                ledger=ledger,
+            )
+            parity = _validate_public_manual_parity(
+                model,
+                captures,
+                materialized,
+                noise_seed=DEV_NOISE_SEEDS[0],
+                clip_indices=indexes,
+                ledger=ledger,
+            )
+        opened = {path.resolve(strict=True) for path in guard.opened}
+    if (
+        opened != expected_arrays
+        or calls != ["SHARED_FIRST", *TWO_CALL_ENDPOINTS]
+        or materialized.actual_wan_calls != 6
+        or ledger.target_constructed
+        or any(event.get("role") == "scoring" for event in ledger.events)
+        or any(event.get("kind") == "target_constructed" for event in ledger.events)
+        or any(
+            event.get("kind") == "array_read_started"
+            and event.get("array") == "rgb"
+            and int(event.get("frame_stop", -1)) > HISTORY_RGB_FRAMES
+            for event in ledger.events
+        )
+        or reader.serving_counts[indexes[0]] != 1
+        or reader.serving_counts[indexes[1]] != 1
+        or any(
+            count != 0
+            for index, count in reader.serving_counts.items()
+            if index not in indexes
+        )
+        or any(count != 0 for count in reader.scoring_counts.values())
+    ):
+        raise MultirateError("target-blind parity preflight access inventory differs")
+    parameter_after = _parameter_schema(model)
+    if parameter_before != parameter_after:
+        raise MultirateError("parity preflight changed model parameters")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    receipt = ladder.identity_payload(
+        {
+            "schema": PARITY_SCHEMA,
+            "created_at_utc": ladder._now(),
+            "source_commit": source_commit,
+            "parent_registration": ladder.file_record(parent_path),
+            "parent_registration_identity_sha256": parent["identity_sha256"],
+            "clip_indices": list(indexes),
+            "noise_seed": DEV_NOISE_SEEDS[0],
+            "parity": parity,
+            "manual_endpoint_wan_calls": 6,
+            "manual_endpoint_call_order": calls,
+            "public_parity_wan_calls": 3,
+            "all_public_parity_calls_excluded_from_endpoint_accounting": True,
+            "opened_numpy_arrays": [str(path) for path in sorted(opened)],
+            "serving_rgb_frame_slice": [0, HISTORY_RGB_FRAMES],
+            "scoring_rgb_rows_materialized": 0,
+            "clean_targets_constructed": 0,
+            "future_rgb_entered_endpoint_or_parity_sampler": False,
+            "vjepa_target_array_opened": False,
+            "event_ledger": ledger.events,
+            "event_ledger_sha256": hashlib.sha256(
+                json.dumps(
+                    ledger.events, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest(),
+            "parameter_schema_before": parameter_before,
+            "parameter_schema_after": parameter_after,
+            "status": "PASS",
+        }
+    )
+    ladder.exclusive_json(output, receipt)
+    print(json.dumps(receipt, sort_keys=True))
+    return 0
+
+
 def _endpoint_phase(args: argparse.Namespace) -> int:
     import torch
 
@@ -1266,7 +2112,7 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)
     torch.set_float32_matmul_precision("highest")
-    model, config = ladder._load_model(
+    model, _config = ladder._load_model(
         _resolve_input(registration, "vpm_resolved_config"),
         _resolve_input(registration, "vpm_snapshot"),
         device,
@@ -1292,9 +2138,10 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
     native_euler_errors: list[float] = []
     actual_wan_calls = 0
     teacher_calls = feature_calls = auxiliary_target_calls = optimizer_updates = 0
+    public_parity_receipt: dict[str, Any] | None = None
 
     with ladder.NumpyTargetOpenGuard(target_path) as guard:
-        dataset = _phase_dataset(config, registration)
+        reader = AuditedABCClipReader(registration)
         with torch.inference_mode(), torch.autocast(
             device_type="cuda", dtype=torch.bfloat16
         ):
@@ -1306,14 +2153,29 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
                         raise MultirateError("development batch is incomplete")
                     if manifest[indexes[0]]["episode_dir"] == manifest[indexes[1]]["episode_dir"]:
                         raise MultirateError("shuffle batch is not episode-disjoint")
-                    batch = ladder._batch_samples(dataset, indexes, device)
                     ledger = EventLedger()
+                    serving = reader.serving_batch(
+                        indexes, device=device, ledger=ledger
+                    )
                     prepared = _prepare_serving_inputs(
-                        model, batch, noise_seed=noise_seed, ledger=ledger
+                        model, serving, noise_seed=noise_seed, ledger=ledger
                     )
                     native_euler_errors.append(
                         float(prepared["native_euler_equivalence_max_abs"])
                     )
+                    parity_captures = {}
+                    if batch_ordinal == 0:
+                        parity_captures = {
+                            nfe: _capture_public_deployable(
+                                model,
+                                serving,
+                                prepared,
+                                nfe=nfe,
+                                noise_seed=noise_seed,
+                                ledger=ledger,
+                            )
+                            for nfe in (1, 2)
+                        }
                     calls: list[str] = []
 
                     def velocity_call(state: Any, timestep: Any, label: str, sigma: Any) -> Any:
@@ -1342,11 +2204,25 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
                     actual_wan_calls += len(calls)
                     projector_receipts.append(materialized.projector_receipts)
                     synchronous_errors.append(materialized.synchronous_identity_max_abs)
+                    if parity_captures:
+                        if public_parity_receipt is not None:
+                            raise MultirateError("public parity ran more than once")
+                        public_parity_receipt = _validate_public_manual_parity(
+                            model,
+                            parity_captures,
+                            materialized,
+                            noise_seed=noise_seed,
+                            clip_indices=indexes,
+                            ledger=ledger,
+                        )
 
                     # No target operation occurs above this line.
+                    scoring = reader.scoring_batch(
+                        indexes, device=device, ledger=ledger
+                    )
                     target = _construct_targets_after_barrier(
                         model,
-                        batch,
+                        scoring,
                         prepared=prepared,
                         ledger=ledger,
                     )
@@ -1356,13 +2232,13 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
                     for endpoint in ENDPOINTS:
                         def decode(endpoint: str = endpoint) -> Any:
                             decoded_full = model.rgb_tokenizer.decode_temporal(
-                                materialized.states[endpoint].to(batch["rgb"].dtype),
-                                out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
+                                materialized.states[endpoint].to(scoring.rgb.dtype),
+                                out_hw=(scoring.rgb.shape[-2], scoring.rgb.shape[-1]),
                             )
                             ladder._validate_decoded_horizon(
                                 model_future_frames=model.num_future_frames,
                                 decoded_frames=decoded_full.shape[2],
-                                raw_frames=batch["rgb"].shape[1],
+                                raw_frames=scoring.rgb.shape[1],
                                 endpoint=endpoint,
                             )
                             return ladder._to_uint8_video(
@@ -1384,8 +2260,8 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
                     }
                     common_hashes = {
                         "initial_video": prepared["initial_video"],
-                        "actions": batch["actions"],
-                        "morphology_index": batch["morphology_index"],
+                        "actions": serving.actions,
+                        "morphology_index": serving.morphology_index,
                         "action_control": prepared["z_control"],
                         "auxiliary_noise": prepared["initial_auxiliary"],
                         "raw_history_input": prepared["history_rgb"],
@@ -1454,6 +2330,11 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
                                         },
                                         "access": {
                                             "prior_inspected_development_opened": True,
+                                            "serving_rgb_frame_slice": [
+                                                0,
+                                                HISTORY_RGB_FRAMES,
+                                            ],
+                                            "full_rgb_materialized_only_after_endpoint_barrier": True,
                                             "fresh_reserve_480_510_opened": False,
                                             "constructor_probe_511_opened": False,
                                             "validation_opened": False,
@@ -1510,7 +2391,7 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
                     )
                     batch_ordinal += 1
         opened = {path.resolve(strict=True) for path in guard.opened}
-    dataset.assert_exact_accesses(len(DEV_NOISE_SEEDS))
+    reader.assert_exact_accesses(len(DEV_NOISE_SEEDS))
     if opened != expected_arrays:
         raise MultirateError(f"endpoint input graph differs: {sorted(opened)}")
     parameter_after = _parameter_schema(model)
@@ -1526,6 +2407,7 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
         or feature_calls != 0
         or auxiliary_target_calls != 0
         or optimizer_updates != 0
+        or public_parity_receipt is None
     ):
         raise MultirateError("endpoint count/call inventory differs")
 
@@ -1547,6 +2429,9 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
             "batch_size": BATCH_SIZE,
             "actual_wan_calls": actual_wan_calls,
             "actual_decoder_calls": expected_batches * len(ENDPOINTS),
+            "public_deployable_parity": public_parity_receipt,
+            "excluded_parity_wan_calls": 3,
+            "excluded_parity_decoder_calls": 4,
             "conceptual_calls": {
                 endpoint: 1 if endpoint == "VPM1" else 2 for endpoint in ENDPOINTS
             },
@@ -1564,7 +2449,11 @@ def _endpoint_phase(args: argparse.Namespace) -> int:
             "auxiliary_target_calls": 0,
             "optimizer_updates": 0,
             "target_after_all_endpoints": True,
-            "exact_dataset_accesses_per_row": len(DEV_NOISE_SEEDS),
+            "exact_serving_accesses_per_row": len(DEV_NOISE_SEEDS),
+            "exact_scoring_accesses_per_row": len(DEV_NOISE_SEEDS),
+            "prebarrier_rgb_frame_slice": [0, HISTORY_RGB_FRAMES],
+            "postbarrier_scoring_rgb_frame_slice": [0, TOTAL_RGB_FRAMES],
+            "full_rgb_materialized_only_after_endpoint_barrier": True,
             "opened_numpy_arrays": [str(path) for path in sorted(opened)],
             "vjepa_target_array_opened": False,
             "post_selection_exploratory_dev_opened": True,
@@ -1594,6 +2483,12 @@ def _validated_endpoint(
     endpoint = ladder.read_json(output / "endpoint_complete.json")
     expected_batches = (DEV_RANGE[1] - DEV_RANGE[0]) // BATCH_SIZE * len(DEV_NOISE_SEEDS)
     expected_rows = (DEV_RANGE[1] - DEV_RANGE[0]) * len(DEV_NOISE_SEEDS) * len(ENDPOINTS)
+    parity = endpoint.get("public_deployable_parity", {})
+    parity_comparisons = parity.get("comparisons", {})
+    expected_array_paths = {
+        key: str(Path(registration["cache_arrays"][key]["path"]).resolve(strict=True))
+        for key in ("rgb", "actions")
+    }
     if (
         endpoint.get("schema") != ENDPOINT_SCHEMA
         or not ladder.identity_valid(endpoint)
@@ -1608,6 +2503,44 @@ def _validated_endpoint(
         != {endpoint: 1 if endpoint == "VPM1" else 2 for endpoint in ENDPOINTS}
         or endpoint.get("first_wan_call_shared") is not True
         or endpoint.get("target_after_all_endpoints") is not True
+        or int(endpoint.get("excluded_parity_wan_calls", -1)) != 3
+        or int(endpoint.get("excluded_parity_decoder_calls", -1)) != 4
+        or int(endpoint.get("exact_serving_accesses_per_row", -1))
+        != len(DEV_NOISE_SEEDS)
+        or int(endpoint.get("exact_scoring_accesses_per_row", -1))
+        != len(DEV_NOISE_SEEDS)
+        or endpoint.get("prebarrier_rgb_frame_slice") != [0, HISTORY_RGB_FRAMES]
+        or endpoint.get("postbarrier_scoring_rgb_frame_slice")
+        != [0, TOTAL_RGB_FRAMES]
+        or endpoint.get("full_rgb_materialized_only_after_endpoint_barrier")
+        is not True
+        or endpoint.get("opened_numpy_arrays")
+        != sorted(expected_array_paths.values())
+        or parity.get("public_entrypoint")
+        != "DualExplicitActionDiTModel.sample_future_deployable"
+        or parity.get("condition_source") != "off"
+        or parity.get("clip_indices") != [DEV_RANGE[0], DEV_RANGE[0] + 1]
+        or int(parity.get("noise_seed", -1)) != DEV_NOISE_SEEDS[0]
+        or parity.get("target_blind") is not True
+        or parity.get("future_rgb_entered_parity_sampler") is not False
+        or parity.get("auxiliary_target_entered_parity_sampler") is not False
+        or parity.get("all_final_latents_bit_exact") is not True
+        or parity.get("all_decoded_uint8_bit_exact") is not True
+        or int(parity.get("public_wan_calls_excluded_from_endpoint_accounting", -1))
+        != 3
+        or int(parity.get("parity_decoder_calls_excluded_from_endpoint_accounting", -1))
+        != 4
+        or set(parity_comparisons) != {"VPM1", "VPM2_ORDINARY"}
+        or any(
+            comparison.get("final_latent_bit_exact") is not True
+            or comparison.get("decoded_uint8_bit_exact") is not True
+            or int(comparison.get("wan_calls", -1)) != expected_nfe
+            for endpoint_name, expected_nfe in (
+                ("VPM1", 1),
+                ("VPM2_ORDINARY", 2),
+            )
+            for comparison in (parity_comparisons.get(endpoint_name, {}),)
+        )
         or endpoint.get("teacher_calls") != 0
         or endpoint.get("feature_encoder_calls") != 0
         or endpoint.get("auxiliary_target_calls") != 0
@@ -1694,6 +2627,14 @@ def _validated_endpoint(
             or row.get("wan_call_order") != ["SHARED_FIRST", *TWO_CALL_ENDPOINTS]
             or int(row.get("actual_wan_calls", -1)) != 6
             or ledger.get("target_after_all_endpoints") is not True
+            or ledger.get("serving_rgb_frames") != [0, HISTORY_RGB_FRAMES]
+            or int(ledger.get("prebarrier_max_rgb_frame_exclusive", -1))
+            != HISTORY_RGB_FRAMES
+            or ledger.get("full_rgb_materialized_only_after_barrier") is not True
+            or int(ledger.get("serving_rgb_read_count", -1)) != BATCH_SIZE
+            or int(ledger.get("serving_actions_read_count", -1)) != BATCH_SIZE
+            or int(ledger.get("scoring_rgb_read_count", -1)) != BATCH_SIZE
+            or ledger.get("array_paths") != expected_array_paths
             or int(ledger.get("endpoint_count", -1)) != len(ENDPOINTS)
             or int(ledger.get("first_target_sequence", -1))
             <= int(ledger.get("last_endpoint_sequence", math.inf))
@@ -1830,6 +2771,10 @@ def _analysis_payload(
                 for value in hashes.values()
             )
             or access.get("prior_inspected_development_opened") is not True
+            or access.get("serving_rgb_frame_slice")
+            != [0, HISTORY_RGB_FRAMES]
+            or access.get("full_rgb_materialized_only_after_endpoint_barrier")
+            is not True
             or access.get("fresh_reserve_480_510_opened") is not False
             or access.get("constructor_probe_511_opened") is not False
             or access.get("validation_opened") is not False
@@ -2153,6 +3098,8 @@ def _audit_phase(args: argparse.Namespace) -> int:
             "row_inventory_recomputed": True,
             "paired_first_call_and_input_hashes_recomputed": True,
             "target_order_and_event_ledgers_recomputed": True,
+            "serving_only_memmap_slices_and_postbarrier_full_reads_recomputed": True,
+            "public_deployable_vpm1_vpm2_bit_exact_parity_revalidated": True,
             "call_and_capacity_inventory_recomputed": True,
             "projector_and_synchronous_identity_receipts_revalidated": True,
             "timing_summary_recomputed": True,
@@ -2240,6 +3187,12 @@ def parser() -> argparse.ArgumentParser:
     register.add_argument("--vpm-snapshot-sha256", required=True)
     register.add_argument("--runtime-record", required=True)
     register.add_argument("--output-dir", required=True)
+    parity = commands.add_parser("parity-preflight")
+    parity.add_argument("--repo-root", required=True)
+    parity.add_argument("--expected-source-commit", required=True)
+    parity.add_argument("--parent-registration", required=True)
+    parity.add_argument("--vpm-snapshot-sha256", required=True)
+    parity.add_argument("--receipt-out", required=True)
     for command in ("endpoint", "analyze", "audit", "complete"):
         commands.add_parser(command).add_argument("--output-dir", required=True)
     return root
@@ -2261,6 +3214,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "endpoint":
         return _endpoint_phase(args)
+    if args.command == "parity-preflight":
+        return _parity_preflight_phase(args)
     if args.command == "analyze":
         return _analyze_phase(args)
     if args.command == "audit":
