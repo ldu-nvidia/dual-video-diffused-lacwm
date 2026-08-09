@@ -198,6 +198,14 @@ identities are respectively
 `2426a1546a43403fc09f7d8bb60475526e4d342586727c880dd005aad99010f8`,
 and `a94afb1e39ccee4b80298182f287431409fbce47ae260c94d4324fa23081e5ff`.
 
+Recurrent-flow cache handoff canonical root:
+
+```text
+/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/
+  lacwm_train/artifacts/dual_video_diffusion/recurrent_physics_flow_cache/
+  recurrent-flow-wan-103e2d0-v1
+```
+
 Standalone strict-audit job `508106` completed `0:0` and reproduced the GO
 after 731 record checks over 356 unique files / 9,069,194,268 referenced bytes,
 25 reconstructed causal arrays with maximum error zero, all 2,200 transition
@@ -209,6 +217,73 @@ external receipt identity is
 The first audit job `508100` failed closed on an auditor-only fixed-width
 assumption; the repair independently binds each bundle to its variable native
 raw-MCAP camera geometry. No canonical evidence was mutated.
+
+## Recurrent-flow generator bridge
+
+The renderer GO has been advanced only across the causal cache/evidence seam,
+not yet into a Wan efficacy claim. Source commit
+`103e2d019b12ee2a88519a96afaf91de4157305e` implements a distinct
+`recurrent-physics-flow-cache-v1` family, an inference-only recurrent predictor,
+five frozen condition sources, a family-bound dataset/model adapter, and an
+NFE-1 seven-endpoint protocol. The exact source bundle SHA-256 is
+`8a34d80377461b474d563624f7fb6cc0bf401652f7887484756595e53563316e`.
+Cluster validation passed `49/49` tests in the main Torch/HDF5 environment and
+`13/13` applicable tests in the MuJoCo cache environment, with only the
+HDF5-dependent dataset test skipped there. A NumPy-2.0-specific fixture failure
+was repaired and then reproduced green rather than waived.
+
+Registration froze all 576 train/validation causal prefixes before any field
+rendering. Each row binds 280 observed-state bytes and one logical 3,640-byte
+candidate-action slice; it records zero returned future-state bytes, no future
+RGB opening, no protected-test access, and no generator outcome. The privileged
+confirmation NPZ is whole-file hashed but never copied into runtime; only its
+explicit predictor whitelist is deserialized into a 283,672-byte inference-only
+archive. Registration identity is
+`c1c9793df19caa3ce32c662eef3aaef39403afbf8dfdaf26ba065fd3e89e5a44`;
+its file SHA-256 is
+`f1e542193a31e764e063bf6ab8ebfa5c4d7fe49cc267ae65893f044acbb18c14`.
+The rebound cache-runtime receipt is
+`f0c831c9db48bec33c215fbff34281f9bdfc0f976c11acabecedbf6656a8100d`;
+it preserves the raw-v7 runtime identity
+`8cb5b92d5fde78e2379a72e33f2d9cd6bc76afc43b0c7b16ab200f7a1330e99`
+while changing only the byte-identical helper's canonical checkout path.
+
+An independent source audit found and blocked an alternate-checkout provenance
+gap before materialization. The repaired bridge requires registration, build,
+and replay to execute from the same physical, clean checkout with exact commit,
+Git tree, source-file inventory, and non-symlinked evidence paths. The audit's
+current decision is GO for cache-only build/full replay and strict NO-GO for Wan
+training: frozen arm registration, recurrent-specific matched training,
+rank-wise pairing receipts, a control-capable target-opening-safe evaluator,
+parent parity, and preregistered analysis are not implemented. The planner has
+no submission path and must remain `launch_ready: false`.
+
+The immutable `19490c5` v1 registration and jobs `508144`, `508145`, `508148`,
+`508149`, `508160`, and `508161` are retained as failed operational attempts.
+The first pair used a non-portable shell option, the second omitted the sealed
+no-user-site flag, and the third exposed that the inherited raw-v7 receipt
+encoded its old source path. All failed before split creation. The last issue
+was repaired by byte-checking, resealing, and independently reviewing the
+runtime receipt rather than weakening runtime equality.
+
+Canonical jobs `508171` (train) and `508172` (validation) then completed
+`0:0`. Train rendered in 100.885 seconds and replayed all 512 causal rows,
+including 415 eligible rows / 830 aligned-and-hold arrays; validation rendered
+in 12.255 seconds and replayed all 64 rows, including 48 eligible rows / 96
+arrays. Both full replays were byte-exact with maximum absolute error zero.
+Train metadata/audit identities are
+`3f965ee76dc4722565de6609e683fc394deaf1f04f54900a9af83d122af72c85` /
+`a61a4f53a0560b8d85cbb5ca4cd8629d745c3539621a89cd28c7431ab9413cca`;
+validation identities are
+`01f41160c91519e473faaf3fd26dc381f24c9feaa42f83fe915c14112f84fc50` /
+`bdb7c53b3caf8c0eb7b3a85aa53ffbc34b733406c8e8c83b7769becf4334c892`.
+The complete cache occupies 147,081,947 bytes. Its dry-run plan identity is
+`742abe01a53e621e6910670a2559283c7e9a72dc3895ef22f7316bb617a5eabd`;
+the externally stored plan file SHA-256 is
+`92a9ad57756d7c6b1693254bc633bb9ca4490a000ca33e13dfc71993207300af`.
+The plan reports `launch_ready: false`, `submission_performed: false`, and a null
+submission command. Thus no generated-video endpoint, quality gain, or Wan
+training result has been produced by this handoff.
 
 ## Claim boundary
 
