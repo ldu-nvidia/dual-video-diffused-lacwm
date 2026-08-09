@@ -209,7 +209,10 @@ def _identity_document(root: Path, name: str, expected: str, kind: str) -> dict[
 def validate_strict_external_audit(path: Path, confirmation_root: Path) -> dict[str, Any]:
     """Require the independent post-run reconstruction before handoff."""
 
-    path = path.resolve(strict=True)
+    supplied_path = path.expanduser()
+    if supplied_path.is_symlink():
+        raise RecurrentFlowBridgeError("strict external audit may not be a symlink")
+    path = supplied_path.resolve(strict=True)
     root = confirmation_root.resolve(strict=True)
     if path.is_symlink() or raw_stage.sha256_file(path) != STRICT_AUDIT_FILE_SHA256:
         raise RecurrentFlowBridgeError("strict external audit file hash differs")
@@ -795,10 +798,24 @@ def command_verify_confirmation(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_executing_source_repo(supplied: Path) -> Path:
+    """Bind registration to the physical checkout executing this tool."""
+
+    supplied = supplied.expanduser()
+    if supplied.is_symlink() or supplied.resolve(strict=True) != REPO_ROOT.resolve(
+        strict=True
+    ):
+        raise RecurrentFlowBridgeError(
+            "registered source checkout must equal the executing bridge checkout"
+        )
+    return supplied
+
+
 def command_register_cache(args: argparse.Namespace) -> int:
     output = raw_stage.fresh_lustre_root(args.output)
+    supplied_source = _validate_executing_source_repo(args.source_repo)
     source = raw_stage.clean_repository(
-        args.source_repo, args.expected_commit, "recurrent-flow bridge source"
+        supplied_source, args.expected_commit, "recurrent-flow bridge source"
     )
     canonical_raw_path = args.raw_cache_registration.resolve(strict=True)
     if (
