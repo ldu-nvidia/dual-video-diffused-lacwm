@@ -153,6 +153,29 @@ class StrictPostrunAuditTest(unittest.TestCase):
         with self.assertRaisesRegex(strict.StrictAuditError, "mean/sum/count"):
             strict._validate_metrics(metrics, "metric")
 
+    def test_bundle_camera_accepts_native_width_and_rejects_geometry_mutation(self):
+        calibration = {
+            "camera_width": 848,
+            "camera_height": 480,
+            "K": [432.0, 0.0, 425.0, 0.0, 431.0, 240.0, 0.0, 0.0, 1.0],
+            "D": [0.1, -0.2, 0.0, 0.0, 0.01],
+        }
+        arrays = {
+            "rgb": np.zeros((9, 480, 848, 3), dtype=np.uint8),
+            "K": np.asarray(calibration["K"], dtype=np.float64).reshape(3, 3),
+            "D": np.asarray(calibration["D"], dtype=np.float64),
+        }
+        strict.validate_bundle_camera(arrays, calibration, "wide-native")
+        corrupted = dict(arrays)
+        corrupted["rgb"] = np.zeros((9, 480, 640, 3), dtype=np.uint8)
+        with self.assertRaisesRegex(strict.StrictAuditError, "RGB/calibration geometry"):
+            strict.validate_bundle_camera(corrupted, calibration, "wide-native")
+        corrupted = dict(arrays)
+        corrupted["K"] = arrays["K"].copy()
+        corrupted["K"][0, 0] += 1.0
+        with self.assertRaisesRegex(strict.StrictAuditError, "raw MCAP"):
+            strict.validate_bundle_camera(corrupted, calibration, "wide-native")
+
     def test_bootstrap_rejects_nonfrozen_seed_before_replay(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "bootstrap.npz"
