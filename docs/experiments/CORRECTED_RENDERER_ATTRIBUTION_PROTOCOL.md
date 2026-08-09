@@ -2,7 +2,8 @@
 
 Date frozen: 2026-08-08
 
-Status: **prospective train-only protocol; outcomes have not been inspected**
+Status: **frozen prospectively, now completed; see
+`CORRECTED_RENDERER_ATTRIBUTION_RESULT.md`**
 
 ## Question and claim boundary
 

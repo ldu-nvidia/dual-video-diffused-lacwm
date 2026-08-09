@@ -148,6 +148,28 @@ improves silhouette/flow alignment over raw and shuffled controls with positive
 paired lower bounds. Full evidence is in
 `NOMINAL_TRACKING_RESIDUAL_STAGE0_RESULT.md`.
 
+### Gate 0c: corrected-renderer attribution (2026-08-08)
+
+The prospective fit384/score24 D405 study returned
+`STOP_RENDERER_ATTRIBUTION`. Predicted correction improved rendered-silhouette
+boundary Chamfer by 34.40% and fixed-region RGB robot-band Chamfer by 5.19%
+versus raw command, with positive paired intervals. It also strongly beat the
+within-motion-stratum shuffled-action predictor. However, robot-only rendered
+flow EPE improved only 3.16% versus raw command, its paired interval crossed
+zero `[-0.305,+0.575]` px, and only 13/24 clips favored correction. The
+registered all-metric gate therefore failed and no Wan integration is
+authorized.
+
+The horizon audit showed a large first-transition flow gain but worse flow at
+horizons 3, 5, 7 and especially 8. The evidence supports a causal absolute-pose
+correction but not a reliable motion field. Gate 0d should train an integrated
+increment-response predictor with explicit pose and projected-flow losses, then
+score it on a fresh, previously unevaluated train-only D405 set. Require at
+least 5% robot-flow improvement with a positive paired lower bound against both
+raw command and the current ridge while retaining silhouette/RGB gains. Full
+metrics, artifacts, audit identities, timing and limitations are in
+`CORRECTED_RENDERER_ATTRIBUTION_RESULT.md`.
+
 ## Gate 1: fixed causal flow conditioning
 
 Use one parent snapshot, identical data order/noise/optimizer, equal trainable
