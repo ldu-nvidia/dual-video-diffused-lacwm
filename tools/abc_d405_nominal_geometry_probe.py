@@ -243,16 +243,48 @@ def _read_video_frames(video: Path, frame_indices: Sequence[int]) -> np.ndarray:
     if not capture.isOpened():
         raise RuntimeError(f"Could not open video: {video}")
     frames = []
+    random_access_failed = False
     try:
         for index in requested:
             capture.set(cv2.CAP_PROP_POS_FRAMES, int(index))
             ok, bgr = capture.read()
-            if not ok:
-                raise RuntimeError(f"Could not decode frame {index} from {video}")
+            decoded_index = int(round(capture.get(cv2.CAP_PROP_POS_FRAMES))) - 1
+            if not ok or decoded_index != index:
+                random_access_failed = True
+                break
             frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     finally:
         capture.release()
-    return np.stack(frames, axis=0)
+    if not random_access_failed:
+        return np.stack(frames, axis=0)
+
+    # Some valid MP4s expose an inaccurate keyframe index to OpenCV/FFmpeg:
+    # seeking to a late frame can fail or land hundreds of frames early even
+    # though a complete sequential decode succeeds.  Discard every frame from
+    # the failed random-access attempt and deterministically restart at frame
+    # zero.  This changes only transport, never the requested frame identities.
+    capture = cv2.VideoCapture(str(video))
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not reopen video for sequential decode: {video}")
+    targets = set(requested)
+    decoded: dict[int, np.ndarray] = {}
+    try:
+        for index in range(requested[-1] + 1):
+            ok, bgr = capture.read()
+            if not ok:
+                break
+            if index in targets:
+                decoded[index] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                if len(decoded) == len(targets):
+                    break
+    finally:
+        capture.release()
+    missing = [index for index in requested if index not in decoded]
+    if missing:
+        raise RuntimeError(
+            f"Could not decode frames {missing} from {video} with sequential fallback"
+        )
+    return np.stack([decoded[index] for index in requested], axis=0)
 
 
 def _bundle_name(clip_id: str) -> str:
