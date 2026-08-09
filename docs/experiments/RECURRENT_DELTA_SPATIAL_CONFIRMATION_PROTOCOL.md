@@ -119,11 +119,13 @@ absolute ridge:
 - silhouette-IoU effect is `recurrent - reference`, with non-inferiority margin
   `-0.005` absolute IoU.
 
-The margins were frozen before opening the 55 outcomes.  A quarter native pixel
-matches the pre-existing minimum motion retained by the renderer and is a
-deliberately subpixel average tolerance; 0.005 IoU is a half-percentage-point
-mask-overlap tolerance.  They are practical study tolerances, not claims that
-all downstream generation differences below them are imperceptible.
+The margins were frozen before opening the 55 outcomes.  They are
+**pilot-informed operational tolerances**, not camera/renderer resolution
+constants and not a reinterpretation of fresh24's failed zero-margin test.
+A quarter native pixel is a deliberately stringent subpixel *mean* tolerance;
+0.005 IoU is a half-percentage-point mask-overlap tolerance.  They are practical
+study tolerances, not claims that all downstream generation differences below
+them are imperceptible.
 
 For each family, bootstrap p-values test its stated null and Holm-adjusted lower
 bounds use the corresponding step-down quantile.  Every member of both families
