@@ -118,8 +118,11 @@ def test_endpoint_factorial_and_resource_arithmetic_are_frozen() -> None:
     assert sum(endpoint.primary for endpoint in pilot.ENDPOINTS) == 5
     assert sum(endpoint.action_source == "episode_shuffled" for endpoint in pilot.ENDPOINTS) == 3
     plan = pilot.resource_plan()
-    expected = 1 + 2 * 8 * 6 + 8 * 2
-    assert plan["maximum_reserved_b200_hours"] == expected == 113
+    expected = 1 + 2 * 8 * 2 + 8 * 2
+    assert plan["maximum_reserved_b200_hours"] == expected == 49
+    assert plan["training_time_limit_hours_each"] == 2
+    assert plan["expected_parallel_wall_hours"] == "4-6"
+    assert plan["expected_serial_wall_hours"] == "6-8"
     assert plan["wandb"] is False
     assert plan["requeue"] is False
 

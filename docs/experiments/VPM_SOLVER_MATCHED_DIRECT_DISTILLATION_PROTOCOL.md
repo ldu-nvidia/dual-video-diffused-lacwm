@@ -384,9 +384,15 @@ No job is authorized by this document. The maximum proposed allocation is:
 | Phase | Allocations | B200/allocation | Time limit | Maximum B200-hours |
 |---|---:|---:|---:|---:|
 | full-geometry three-copy memory smoke | 1 | 1 | 1 h | 1 |
-| matched 400-update training | 2 | 8 | 6 h | 96 |
+| matched 400-update training | 2 | 8 | 2 h | 32 |
 | paired NFE 1/2/4 evaluation/timing | 1 | 8 | 2 h | 16 |
-| **total** | 4 |  |  | **113** |
+| **total** | 4 |  |  | **49** |
+
+The source-bound execution estimate, excluding queue delay, is 4--6
+wall-hours when the matched arms run in parallel and 6--8 wall-hours when they
+run serially. All three allocation types use the `short` QoS and their requests
+are at or below its two-hour maximum; the `batch` partition maximum is four
+hours.
 
 Three model copies per rank make peak-memory preflight mandatory before any
 full run. The synthetic clip retains the production all-true Boolean temporal
