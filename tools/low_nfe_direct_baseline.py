@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -666,9 +667,11 @@ def _validate_memory_receipt(path: Path, commit: str) -> dict[str, Any]:
     receipt = read_json(path, "ACD memory smoke receipt")
     parent_state = receipt.get("parent_model_state_hash_receipt")
     loaded_states = receipt.get("strict_loaded_runtime_tensor_state_sha256")
+    synthetic_support = receipt.get("synthetic_support")
     if (
         not identity_valid(receipt)
         or receipt.get("kind") != "acd_p0_memory_smoke_receipt"
+        or receipt.get("schema_version") != 2
         or receipt.get("source_commit") != commit
         or receipt.get("parent_snapshot_sha256") != PARENT_SNAPSHOT_SHA256
         or not isinstance(parent_state, Mapping)
@@ -689,6 +692,39 @@ def _validate_memory_receipt(path: Path, commit: str) -> dict[str, Any]:
         or receipt.get("status") != "PASS"
         or receipt.get("model_copies") != 3
         or receipt.get("synthetic_full_geometry") != [1, 13, 3, 180, 960]
+        or not isinstance(synthetic_support, Mapping)
+        or synthetic_support.get("fixture_version") != "acd-p0-full-support-v2"
+        or synthetic_support.get("rgb_shape") != [1, 13, 3, 180, 960]
+        or synthetic_support.get("rgb_dtype") != "torch.float32"
+        or not isinstance(synthetic_support.get("rgb_min"), (int, float))
+        or not isinstance(synthetic_support.get("rgb_max"), (int, float))
+        or not math.isfinite(float(synthetic_support.get("rgb_min", float("nan"))))
+        or not math.isfinite(float(synthetic_support.get("rgb_max", float("nan"))))
+        or float(synthetic_support.get("rgb_min", -2.0)) < -1.0
+        or float(synthetic_support.get("rgb_max", 2.0)) > 1.0
+        or float(synthetic_support.get("rgb_min", 1.0))
+        > float(synthetic_support.get("rgb_max", -1.0))
+        or not isinstance(
+            synthetic_support.get("minimum_view_std"), (int, float)
+        )
+        or not math.isfinite(
+            float(synthetic_support.get("minimum_view_std", float("nan")))
+        )
+        or float(synthetic_support.get("minimum_view_std", 0.0)) <= 1e-3
+        or synthetic_support.get("valid_views") != 3
+        or synthetic_support.get("temporal_mask_shape") != [1, 13]
+        or synthetic_support.get("temporal_mask_dtype") != "torch.bool"
+        or synthetic_support.get("temporal_valid_frames") != 13
+        or synthetic_support.get("history_valid_frames") != 5
+        or synthetic_support.get("future_valid_frames") != 8
+        or synthetic_support.get("latent_loss_mask_shape") != [1, 1, 4, 1, 120]
+        or synthetic_support.get("history_latent_tokens") != 2
+        or synthetic_support.get("future_latent_tokens") != 2
+        or synthetic_support.get("expanded_future_support_per_sample")
+        != [92160]
+        or synthetic_support.get("production_build_loss_mask_exercised") is not True
+        or synthetic_support.get("expanded_mask_exercised") is not True
+        or synthetic_support.get("dataset_accessed") is not False
         or receipt.get("teacher_calls") != 1
         or receipt.get("online_calls") != 1
         or receipt.get("ema_target_calls") != 1

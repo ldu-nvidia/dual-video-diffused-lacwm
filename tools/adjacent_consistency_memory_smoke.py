@@ -22,6 +22,45 @@ for value in (str(ROOT), str(PROJECT)):
 from tools import low_nfe_direct_baseline as pilot  # noqa: E402
 
 
+SYNTHETIC_FIXTURE_VERSION = "acd-p0-full-support-v2"
+
+
+def _synthetic_full_geometry_fixture(torch, *, device):
+    """Return a bounded, dataset-free 13-frame clip with three valid views."""
+
+    y = torch.linspace(-1.0, 1.0, 180, device=device, dtype=torch.float32)[
+        :, None
+    ]
+    x = torch.linspace(-1.0, 1.0, 320, device=device, dtype=torch.float32)[
+        None, :
+    ]
+    views = torch.cat(
+        (
+            0.25 * (x + y),
+            0.25 * (x - y),
+            0.30 * x + 0.10 * y,
+        ),
+        dim=-1,
+    ).reshape(1, 1, 1, 180, 960)
+    frame_offsets = torch.linspace(
+        -0.10, 0.10, 13, device=device, dtype=torch.float32
+    ).reshape(1, 13, 1, 1, 1)
+    channel_offsets = torch.tensor(
+        (-0.05, 0.0, 0.05), device=device, dtype=torch.float32
+    ).reshape(1, 1, 3, 1, 1)
+    rgb = views + frame_offsets + channel_offsets
+    temporal_mask = torch.ones((1, 13), device=device, dtype=torch.bool)
+    if (
+        tuple(rgb.shape) != (1, 13, 3, 180, 960)
+        or not bool(torch.isfinite(rgb).all())
+        or float(rgb.min()) < -1.0
+        or float(rgb.max()) > 1.0
+        or not bool(temporal_mask.all())
+    ):
+        raise pilot.ACDPilotError("synthetic full-support fixture construction failed")
+    return rgb, temporal_mask
+
+
 def command_smoke(args: argparse.Namespace) -> int:
     import numpy as np
     import torch
@@ -31,6 +70,7 @@ def command_smoke(args: argparse.Namespace) -> int:
     from robot_wm.modeling.low_nfe.adjacent_consistency import (
         CANONICAL_MODEL_STATE_HASH_ALGORITHM,
         RUNTIME_TENSOR_STATE_HASH_ALGORITHM,
+        _expanded_mask,
         ema_update_module_,
         require_model_state_hashes,
         tensor_state_sha256,
@@ -140,11 +180,48 @@ def command_smoke(args: argparse.Namespace) -> int:
     )
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
-    rgb = torch.zeros((1, 13, 3, 180, 960), device=device, dtype=torch.float32)
+    rgb, mask = _synthetic_full_geometry_fixture(torch, device=device)
     actions = torch.zeros((1, 13, 5, 157), device=device, dtype=torch.float32)
-    mask = torch.ones((1, 13), device=device, dtype=torch.float32)
     morphology = torch.tensor([9], device=device, dtype=torch.long)
     clip_index = torch.tensor([0], device=device, dtype=torch.long)
+    latent_geometry = (1, 16, 4, 24, 120)
+    loss_mask = model._build_loss_mask(rgb, mask, latent_geometry)
+    future_mask = loss_mask[:, :, 2:]
+    future_target = torch.zeros(
+        (1, 16, 2, 24, 120), device=device, dtype=torch.float32
+    )
+    expanded_future_mask = _expanded_mask(future_mask, future_target)
+    per_view_std = (
+        rgb.reshape(1, 13, 3, 180, 3, 320)
+        .permute(0, 4, 1, 2, 3, 5)
+        .reshape(1, 3, -1)
+        .std(dim=-1)
+    )
+    synthetic_support = {
+        "fixture_version": SYNTHETIC_FIXTURE_VERSION,
+        "rgb_shape": list(rgb.shape),
+        "rgb_dtype": str(rgb.dtype),
+        "rgb_min": float(rgb.min()),
+        "rgb_max": float(rgb.max()),
+        "minimum_view_std": float(per_view_std.min()),
+        "valid_views": int((per_view_std > 1e-3).sum()),
+        "temporal_mask_shape": list(mask.shape),
+        "temporal_mask_dtype": str(mask.dtype),
+        "temporal_valid_frames": int(mask.sum()),
+        "history_valid_frames": int(mask[:, :5].sum()),
+        "future_valid_frames": int(mask[:, 5:].sum()),
+        "latent_loss_mask_shape": list(loss_mask.shape),
+        "history_latent_tokens": 2,
+        "future_latent_tokens": int(future_mask.shape[2]),
+        "expanded_future_support_per_sample": [
+            int(value)
+            for value in expanded_future_mask.sum(dim=(1, 2, 3, 4)).tolist()
+        ],
+        "production_build_loss_mask_exercised": True,
+        "expanded_mask_exercised": True,
+        "dataset_accessed": False,
+    }
+    del loss_mask, future_mask, future_target, expanded_future_mask, per_view_std
     optimizer.zero_grad(set_to_none=True)
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
         loss = model(
@@ -178,6 +255,7 @@ def command_smoke(args: argparse.Namespace) -> int:
     payload = pilot.identity_payload(
         {
             "kind": "acd_p0_memory_smoke_receipt",
+            "schema_version": 2,
             "status": "PASS" if passed else "FAIL",
             "source_commit": source["git_commit"],
             "source_tree_sha": source["git_tree_sha"],
@@ -195,6 +273,7 @@ def command_smoke(args: argparse.Namespace) -> int:
             "headroom_bytes": headroom,
             "model_copies": 3,
             "synthetic_full_geometry": [1, 13, 3, 180, 960],
+            "synthetic_support": synthetic_support,
             "teacher_calls": call_counts.get("teacher", 0),
             "online_calls": call_counts.get("online_student", 0),
             "ema_target_calls": call_counts.get("ema_target", 0),

@@ -3,18 +3,56 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
+import sys
+import types
 from pathlib import Path
 
 import pytest
+import torch
+from torch import nn
 
-from tools import low_nfe_direct_baseline as pilot
 from tools import adjacent_consistency_evaluate as evaluator
+from tools import adjacent_consistency_memory_smoke as memory_smoke
+from tools import low_nfe_direct_baseline as pilot
+from robot_wm.modeling.low_nfe.adjacent_consistency import (
+    AdjacentConsistencyError,
+    _expanded_mask,
+)
 
 
 LUSTRE_ROOT = Path(
     "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/"
     "users/ldu/lacwm_train"
 )
+
+
+def _production_loss_mask_model(monkeypatch):
+    """Load the real mask method while stubbing only unavailable VideoX types."""
+
+    for module_name, attribute in (
+        ("robot_wm.modeling.networks.wan_forward_model", "WanForwardModel"),
+        ("robot_wm.modeling.tokenizers.rgb.wan_vae", "WanVAETokenizer"),
+    ):
+        module = types.ModuleType(module_name)
+        setattr(module, attribute, nn.Module)
+        monkeypatch.setitem(sys.modules, module_name, module)
+    path = (
+        Path(pilot.__file__).resolve().parents[1]
+        / "projects/latent_action_models/lam/latent_action_dit_model.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "acd_production_loss_mask_test", path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    model = object.__new__(module.LatentActionDiTModel)
+    nn.Module.__init__(model)
+    model.num_views = 3
+    model.rgb_tokenizer = types.SimpleNamespace(temporal_ratio=4)
+    return model
 
 
 def _registration(tmp_path: Path) -> dict:
@@ -102,6 +140,54 @@ def test_parent_dual_hash_lineage_names_noninterchangeable_algorithms() -> None:
         lineage["canonical_model_state_sha256"]
         != lineage["runtime_tensor_state_sha256"]
     )
+
+
+def test_synthetic_memory_fixture_has_production_history_and_future_support(
+    monkeypatch,
+) -> None:
+    def forbidden_dataset_load(*_args, **_kwargs):
+        raise AssertionError("synthetic fixture attempted dataset/checkpoint access")
+
+    monkeypatch.setattr(torch, "load", forbidden_dataset_load)
+    rgb, temporal_mask = memory_smoke._synthetic_full_geometry_fixture(
+        torch, device=torch.device("cpu")
+    )
+    assert tuple(rgb.shape) == (1, 13, 3, 180, 960)
+    assert rgb.dtype == torch.float32
+    assert bool(torch.isfinite(rgb).all())
+    assert -1.0 <= float(rgb.min()) < float(rgb.max()) <= 1.0
+    assert temporal_mask.dtype == torch.bool
+    assert temporal_mask.tolist() == [[True] * 13]
+    assert int(temporal_mask[:, :5].sum()) == 5
+    assert int(temporal_mask[:, 5:].sum()) == 8
+
+    views = (
+        rgb.reshape(1, 13, 3, 180, 3, 320)
+        .permute(0, 4, 1, 2, 3, 5)
+        .reshape(1, 3, -1)
+    )
+    assert bool((views.std(dim=-1) > 1e-3).all())
+
+    model = _production_loss_mask_model(monkeypatch)
+    loss_mask = model._build_loss_mask(
+        rgb, temporal_mask, (1, 16, 4, 24, 120)
+    )
+    assert tuple(loss_mask.shape) == (1, 1, 4, 1, 120)
+    assert torch.equal(loss_mask[:, 0, :, 0, 0], torch.ones(1, 4))
+    expanded = _expanded_mask(
+        loss_mask[:, :, 2:], torch.zeros(1, 16, 2, 24, 120)
+    )
+    assert expanded.sum(dim=(1, 2, 3, 4)).tolist() == [92160.0]
+
+    # The failed v1 fixture was constant black, so the same production method
+    # excluded every view even though its temporal mask was correctly all true.
+    black_loss_mask = model._build_loss_mask(
+        torch.zeros_like(rgb), temporal_mask, (1, 16, 4, 24, 120)
+    )
+    with pytest.raises(AdjacentConsistencyError, match="nonempty future support"):
+        _expanded_mask(
+            black_loss_mask[:, :, 2:], torch.zeros(1, 16, 2, 24, 120)
+        )
 
 
 def test_smoke_trainer_and_evaluator_use_runtime_hash_for_loaded_state() -> None:

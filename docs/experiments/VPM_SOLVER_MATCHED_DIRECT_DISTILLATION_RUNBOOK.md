@@ -71,6 +71,17 @@ the transaction it independently recomputes the parent's canonical
 student, teacher, and EMA target to match `82ff…`. Comparing a runtime hash to
 the canonical value is a contract failure, not a checkpoint mismatch.
 
+Preflight job `507903` on source `9348814…` passed those dual-hash checks and
+reached the synthetic forward, then failed before backward. It produced no
+passing memory receipt and opened no training or endpoint data. The cause was
+the old constant-zero synthetic RGB tensor: production `_build_loss_mask`
+correctly classified all three constant views as absent, so the future loss
+mask was empty. The all-true 13-frame temporal mask was already correct and is
+preserved. Receipt schema 2 instead requires the dataset-free deterministic
+bounded fixture to prove three nonconstant views, five valid history frames,
+eight valid future frames, two valid future latent tokens, and positive support
+through the production mask builder and `_expanded_mask` before forward.
+
 After it passes, create the registration-ready seal:
 
 ```bash

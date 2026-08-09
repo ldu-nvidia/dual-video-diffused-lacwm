@@ -389,7 +389,15 @@ No job is authorized by this document. The maximum proposed allocation is:
 | **total** | 4 |  |  | **113** |
 
 Three model copies per rank make peak-memory preflight mandatory before any
-full run. The output ceiling is 100 GiB under `/mnt/data1`, `/mnt/data2`, or
+full run. The synthetic clip retains the production all-true Boolean temporal
+mask for five history plus eight future RGB frames. Each of its three
+width-stacked views contains a deterministic bounded spatial pattern; a
+constant-black clip is forbidden because production `_build_loss_mask` treats
+constant views (`pixel std <= 1e-3`) as missing and therefore leaves no future
+supervision. Receipt schema 2 seals all 13 valid pixel frames, four valid latent
+tokens (two history plus two future), three valid views, and positive expanded
+future support before the measured forward transaction. The output ceiling is
+100 GiB under `/mnt/data1`, `/mnt/data2`, or
 the exact user Lustre root
 `/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train`;
 other Lustre prefixes fail closed. Jobs are non-requeueable. The present readiness seal
