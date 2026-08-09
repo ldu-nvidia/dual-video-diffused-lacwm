@@ -22,6 +22,11 @@ The faithful-cascade causal-compressibility frontier instead used:
 - canonical model-state SHA-256: `d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0`
 - resolved update-1,000 configuration SHA-256:
   `ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38`
+- training source commit:
+  `656086686dae723c942a4209a9d71cdb17ed6ccc`; and
+- native sampler source SHA-256 / git blob:
+  `a10fe3730f7bb3bacd20bd14ebbcfab2b3cf8c63a2db27783f1e8a9787b87ee6` /
+  `abc6d4df165f684c2c93920d079585c600562dbb`.
 
 Both checkpoints contain 1,686 tensors and have the same canonical schema
 SHA-256, `9626c924be5ead5fdf5dc7d5887e7435a621845b1b3f739cd72344d94404b97a`,
@@ -46,7 +51,25 @@ The untouched de65 state is also a mandatory evaluation-only reference at NFE
 is instantiated, all 1,686 tensors are loaded strictly, and the evaluation
 adapter must match the public target-blind `sample_future_deployable` endpoint
 bit-for-bit on a fixed immutable train history. This prevents a favorable
-contrast caused by both 200-update continuations regressing together.
+contrast caused by both 200-update continuations regressing together. The
+current `dual_explicit_action_dit_model.py` is checked byte-for-byte against
+the exact git blob at the parent training commit, so “native” does not rely on
+a later top-level sampler implementation. Two transitive files do differ:
+`dual_diffusion/adapters.py` and `networks/wan_forward_model.py` add only the
+later `preserve_zero_support` option. Registration binds the complete
+two-file delta inventory and both historical/current file hashes and git
+blobs. The historical resolved config must omit the key; the current default
+and instantiated adapter value must both be false.
+
+That unreachable-path argument is necessary but not sufficient evidence. A
+separate Python process imports and runs the repository-owned model code from
+an independently registered clean worktree at exact commit 6560866 on the
+fixed target-blind train history at NFE 1/2/4. Historical and current source
+paths share the same separately registered Python, Wan, and VideoX external
+runtime. Its initial noise, final latent, and decoded uint8
+output must match the current registered evaluation adapter bit-for-bit before
+the validation mmap may open. The preserved historical tensor artifact and
+parity JSON are replayed by the final auditor.
 
 ## Immutable evidence
 

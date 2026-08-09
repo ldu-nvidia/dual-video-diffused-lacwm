@@ -70,6 +70,8 @@ def _validate_parent_config(config: Any, registration: Mapping[str, Any]) -> Any
         or bool(dual.condition_on_tf_clock)
         or str(dual.schedule_mode) != "aligned"
         or int(dual.evaluation_noise_seed) != 20260729
+        or "preserve_zero_support" in dual
+        or "preserve_zero_support" in forward_dual
         or dict(dual) != dict(forward_dual)
         or Path(str(model.rgb_tokenizer.model_path)).resolve(strict=True)
         != Path(registration["runtime"]["wan_dir"]).resolve(strict=True)
@@ -93,6 +95,23 @@ def load_exact_parent_model(
 
     _install_registered_imports(registration)
     parent = registration["parent"]
+    delta = parent.get("transitive_runtime_source_delta", {})
+    if (
+        parent.get("native_sampler_training_source_commit")
+        != stage.PARENT_TRAINING_SOURCE_COMMIT
+        or parent.get("native_sampler_source", {}).get("sha256")
+        != stage.PARENT_NATIVE_SAMPLER_SOURCE_SHA256
+        or parent.get("native_sampler_git_blob")
+        != stage.PARENT_NATIVE_SAMPLER_GIT_BLOB
+        or parent.get("native_sampler_source_bit_identical_to_training_commit")
+        is not True
+        or delta.get("changed_files")
+        != sorted(stage.PARENT_TRANSITIVE_SOURCE_FILES)
+        or delta.get("historical_config_key_present") is not False
+        or delta.get("current_default_when_key_absent") is not False
+        or delta.get("current_runtime_false_required") is not True
+    ):
+        raise NativeParentVPMError("native parent sampler source lineage differs")
     config_record = parent.get("resolved_config")
     if (
         not isinstance(config_record, Mapping)
@@ -140,6 +159,12 @@ def load_exact_parent_model(
         or bool(model.condition_on_tf_clock)
         or not bool(model.parameter_matched_control)
         or int(model.forward_model.tf_token_adapter.tf_channels) != 64
+        or getattr(
+            model.forward_model.tf_token_adapter,
+            "preserve_zero_support",
+            None,
+        )
+        is not False
         or model.evaluation_noise_seed != 20260729
         or getattr(model, "time_frequency_transform", None) is not None
     ):
@@ -163,6 +188,18 @@ def load_exact_parent_model(
         "model_schema_sha256": stage.PARENT_MODEL_SCHEMA_SHA256,
         "strict_state_load": True,
         "native_public_sampler": "sample_future_deployable",
+        "native_sampler_training_source_commit": (
+            stage.PARENT_TRAINING_SOURCE_COMMIT
+        ),
+        "native_sampler_source": dict(parent["native_sampler_source"]),
+        "native_sampler_git_blob": stage.PARENT_NATIVE_SAMPLER_GIT_BLOB,
+        "native_sampler_source_bit_identical_to_training_commit": True,
+        "transitive_runtime_source_delta": dict(
+            parent["transitive_runtime_source_delta"]
+        ),
+        "historical_config_preserve_zero_support_key_present": False,
+        "current_runtime_preserve_zero_support": False,
+        "isolated_historical_output_parity_required": True,
         "condition_source": "off",
         "continued_training_updates": 0,
         "protected_test_accessed": False,

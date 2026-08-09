@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import torch
 
 
@@ -69,6 +70,27 @@ def test_endpoint_grid_is_equal_call_raw_only() -> None:
     assert stage.PARENT_RUN_IDENTITY_SHA256.startswith("d79c3699")
     assert stage.PARENT_CANONICAL_MODEL_STATE_SHA256.startswith("d1231b8b")
     assert stage.PARENT_RESOLVED_CONFIG_SHA256.startswith("ae3ffd27")
+    assert stage.PARENT_TRAINING_SOURCE_COMMIT.startswith("6560866")
+    assert stage.PARENT_NATIVE_SAMPLER_SOURCE_SHA256.startswith("a10fe373")
+    assert stage.PARENT_NATIVE_SAMPLER_GIT_BLOB.startswith("abc6d4df")
+    assert stage.sha256_file(
+        ROOT / stage.PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE
+    ) == stage.PARENT_NATIVE_SAMPLER_SOURCE_SHA256
+    changed_parent_runtime = set(
+        filter(
+            None,
+            stage.git(
+                ROOT,
+                "diff",
+                "--name-only",
+                stage.PARENT_TRAINING_SOURCE_COMMIT,
+                "--",
+                stage.PARENT_NATIVE_SAMPLER_SOURCE_RELATIVE,
+                *stage.PARENT_TRANSITIVE_SOURCE_FILES,
+            ).splitlines(),
+        )
+    )
+    assert changed_parent_runtime == set(stage.PARENT_TRANSITIVE_SOURCE_FILES)
     assert stage.LEGACY_REJECTED_SNAPSHOT_SHA256.startswith("f67c7bae")
 
 
@@ -206,6 +228,29 @@ def test_cluster_bootstrap_keeps_noise_seeds_inside_episode() -> None:
     assert effect["paired_episode_cluster_bootstrap_95_ci_percent"][0] > 0
 
 
+def test_target_blind_evaluation_flags_fail_closed() -> None:
+    valid = {
+        "all_endpoints_materialized_before_future_rgb_open": True,
+        "future_rgb_sampler_input": False,
+        "future_measured_state_sampler_input": False,
+        "clean_video_latent_sampler_input": False,
+        "protected_test_accessed": False,
+    }
+    stage.validate_evaluation_causal_flags(valid, label="test")
+    for field, invalid in (
+        ("clean_video_latent_sampler_input", True),
+        ("all_endpoints_materialized_before_future_rgb_open", False),
+    ):
+        changed = dict(valid)
+        changed[field] = invalid
+        with pytest.raises(stage.PhysicsFlowStage1Error):
+            stage.validate_evaluation_causal_flags(changed, label="test")
+    missing = dict(valid)
+    missing.pop("clean_video_latent_sampler_input")
+    with pytest.raises(stage.PhysicsFlowStage1Error):
+        stage.validate_evaluation_causal_flags(missing, label="test")
+
+
 def test_protocol_and_launcher_have_causal_guards() -> None:
     protocol = (
         ROOT / "docs/experiments/PHYSICS_FLOW_WAN_SCREEN_PROTOCOL.md"
@@ -220,6 +265,9 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
         "ADVANCE_RAW_FLOW_SCAFFOLD",
         "04f5013b7161fbf91ed6116d25f7e6ec66afc661024236ad27564b1899cb94be",
         "MEASURED_GEOMETRY_ORACLE",
+        "no claim that val64 is globally",
+        "separate Python process",
+        "preserve_zero_support",
     ):
         assert token in protocol
     assert "--no-requeue" in launcher
@@ -229,6 +277,7 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
         '"$PYTHON_BIN" -m torch.distributed.run'
     )
     assert "every endpoint for every registered" in evaluator
+    assert '"clean_video_latent_sampler_input": False' in evaluator
     assert evaluator.index("materialized_by_seed.append") < evaluator.index(
         "dataset.scoring_batch"
     )
@@ -238,8 +287,21 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "loaded_state_dict_sha256" in lpips_helper
     parent_adapter = (ROOT / "tools/physics_flow_parent_vpm.py").read_text()
     parent_parity = (ROOT / "tools/physics_flow_parent_parity.py").read_text()
+    parent_reference = (
+        ROOT / "tools/physics_flow_parent_reference.py"
+    ).read_text()
+    launch_runbook = (
+        ROOT / "docs/experiments/PHYSICS_FLOW_STAGE1_LAUNCH_RUNBOOK.md"
+    ).read_text()
     assert "model.sample_future_deployable(" in parent_adapter
     assert "model.sample_future_deployable(" in parent_parity
     assert "rgb[index, 0:5]" in parent_parity
     assert "rgb[index, 5" not in parent_parity
     assert "bitwise_parity_required" in parent_parity
+    assert "physics_flow_stage1" not in parent_reference
+    assert "implementation_repo" in parent_reference
+    assert "historical_preserve_zero_support_attribute_absent" in parent_reference
+    assert "prepared only; do not execute" in launch_runbook
+    assert "REPLACE_WITH_AUDITOR_ACKNOWLEDGED_40_CHARACTER_COMMIT" in launch_runbook
+    assert "--parent-source-repo $PARENT_SOURCE_REPO" in launch_runbook
+    assert "--dependency=afterok:$FLOW_OFF_JOB:$RAW_FLOW_JOB" in launch_runbook
