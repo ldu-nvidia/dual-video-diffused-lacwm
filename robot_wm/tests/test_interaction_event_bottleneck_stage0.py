@@ -6,6 +6,7 @@ import pytest
 pytest.importorskip("cv2")
 
 from tools import interaction_event_bottleneck_stage0 as screen
+from tools import interaction_event_token_stage0 as token_screen
 
 
 def test_motion_stratified_selection_is_deterministic_and_donor_safe() -> None:
@@ -104,3 +105,39 @@ def test_full_gate_requires_every_causal_and_reconstruction_contrast() -> None:
     _, failed = screen.analyze_error_arrays(arrays)
     assert failed["field:aligned_vs_episode_shuffled"]["passed"] is False
     assert failed["all_passed"] is False
+
+
+def test_explicit_token_state_is_exact_spatial_channel_mean() -> None:
+    field = np.arange(8 * 4 * 45 * 80, dtype=np.float32).reshape(8, 4, 45, 80)
+    tokens = token_screen.token_state(field)
+    assert tokens.shape == (8, 4)
+    np.testing.assert_allclose(tokens, field.mean(axis=(-2, -1)), rtol=1e-6)
+
+
+def test_explicit_token_gate_requires_all_three_references_and_salience() -> None:
+    base = np.linspace(1.0, 2.0, screen.SCORE_CLIPS)
+    errors: dict[str, np.ndarray] = {}
+    for subset in ("all_token", "change", "transport"):
+        errors[f"{subset}_error_aligned"] = base * 0.70
+        errors[f"{subset}_error_history_only"] = base
+        errors[f"{subset}_error_episode_shuffled"] = base * 1.05
+        errors[f"{subset}_error_train_mean"] = base * 1.02
+        errors[f"{subset}_error_raw_zero"] = base * 1.20
+        errors[f"{subset}_error_shift_minus1"] = base * 0.95
+        errors[f"{subset}_error_shift_plus1"] = base * 0.98
+    effects, gates = token_screen.analyze_errors(
+        errors,
+        active_token_dims=32,
+        active_score_fraction=1.0,
+    )
+    assert len(effects["mandatory"]) == 3
+    assert len(effects["diagnostic"]) == 15
+    assert gates["all_passed"] is True
+
+    _, inactive = token_screen.analyze_errors(
+        errors,
+        active_token_dims=23,
+        active_score_fraction=1.0,
+    )
+    assert inactive["target_salience"]["passed"] is False
+    assert inactive["all_passed"] is False
