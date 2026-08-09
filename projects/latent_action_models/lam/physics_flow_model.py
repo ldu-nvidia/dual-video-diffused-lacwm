@@ -35,6 +35,27 @@ FLOW_CONDITION_SOURCES = (
     "episode_shuffled",
     "timeshift_plus_one",
     "hold_current",
+    # Recurrent-delta bridge labels.  These use the identical packed tensor
+    # path; keeping the semantic source in the sample receipt prevents a
+    # recurrent field from being silently reported as a raw-command field.
+    "recurrent_aligned",
+    "recurrent_shuffled",
+    "recurrent_wrong_time",
+    "recurrent_hold",
+)
+RAW_FLOW_CONDITION_SOURCES = (
+    "raw",
+    "off",
+    "episode_shuffled",
+    "timeshift_plus_one",
+    "hold_current",
+)
+RECURRENT_FLOW_CONDITION_SOURCES = (
+    "recurrent_aligned",
+    "off",
+    "recurrent_shuffled",
+    "recurrent_wrong_time",
+    "recurrent_hold",
 )
 FlowConditionSource = Literal[
     "raw",
@@ -42,6 +63,10 @@ FlowConditionSource = Literal[
     "episode_shuffled",
     "timeshift_plus_one",
     "hold_current",
+    "recurrent_aligned",
+    "recurrent_shuffled",
+    "recurrent_wrong_time",
+    "recurrent_hold",
 ]
 
 
@@ -72,6 +97,15 @@ class PhysicsFlowVPM(DualExplicitActionDiTModel):
     ) -> None:
         config = dict(physics_flow)
         self.fuse_flow = bool(config.get("fuse_flow", False))
+        self.condition_family = str(
+            config.get("condition_family", "raw_geometry_scaffold")
+        )
+        if self.condition_family == "raw_geometry_scaffold":
+            self.flow_condition_sources = RAW_FLOW_CONDITION_SOURCES
+        elif self.condition_family == "sealed_recurrent_delta_geometry":
+            self.flow_condition_sources = RECURRENT_FLOW_CONDITION_SOURCES
+        else:
+            raise PhysicsFlowError("unsupported fixed-flow condition family")
         super().__init__(**kwargs)
         if self.num_history_latent != HISTORY_LATENT_FRAMES:
             raise PhysicsFlowError("physics-flow screen requires two Wan history tokens")
@@ -248,7 +282,7 @@ class PhysicsFlowVPM(DualExplicitActionDiTModel):
         optical-flow target, or future measured-state argument.
         """
 
-        if condition_source not in FLOW_CONDITION_SOURCES:
+        if condition_source not in self.flow_condition_sources:
             raise ValueError(f"unsupported flow source: {condition_source}")
         if history_rgb.ndim != 5 or tuple(history_rgb.shape[1:3]) != (5, 3):
             raise ValueError("sampler requires exactly five observed RGB frames")
@@ -275,6 +309,8 @@ class PhysicsFlowVPM(DualExplicitActionDiTModel):
             batch_size=int(history_rgb.shape[0]),
             device=history_rgb.device,
         ).to(dtype=history_rgb.dtype)
+        if condition_source == "off" and bool(condition.ne(0).any()):
+            raise PhysicsFlowError("off condition source requires an exact-zero tensor")
         if not bool(torch.isfinite(video_noise).all()):
             raise PhysicsFlowError("video noise must be finite")
         self._synchronize(history_latents)

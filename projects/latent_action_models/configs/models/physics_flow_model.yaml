@@ -6,6 +6,7 @@ _target_: lam.physics_flow_model.PhysicsFlowVPM
 time_frequency_transform: null
 physics_flow:
   fuse_flow: false
+  condition_family: raw_geometry_scaffold
 dual_diffusion:
   enabled: true
   auxiliary_history_mode: diffuse_all
