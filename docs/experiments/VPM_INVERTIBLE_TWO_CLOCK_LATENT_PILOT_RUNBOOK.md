@@ -45,6 +45,7 @@ python tools/invertible_two_clock_pilot.py readiness \
   --expected-commit <exact-40-character-commit> \
   --remote origin \
   --test-report /absolute/path/to/exact-source-test-report.json \
+  --output /absolute/path/to/fresh-readiness-seal.json \
   --ilsf-handoff-decision NO_GO_GENERIC_EARLY_SUBSPACE \
   --ilsf-audit-status PASS
 ```
