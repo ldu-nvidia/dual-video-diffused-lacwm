@@ -152,11 +152,16 @@ endpoints:
 2. fixed-region RGB robot-band Chamfer;
 3. rendered robot-only flow EPE.
 
-For every one of the six contrasts, the paired point difference must favor the
-candidate, the 95% lower bound must be strictly positive, and at least 60% of
-clips must be favorable. Predicted silhouette IoU must have a positive point
-difference against raw and shuffled and may not have a negative 95% lower
-bound. Every condition is mandatory. Otherwise the decision is
+Rendered-silhouette boundary Chamfer is the registered **primary alignment
+metric**. Against both raw and shuffled references it must improve by at least
+5% at the aggregate paired point estimate. For every one of the six metric
+contrasts, the paired point difference must favor the candidate, the 95% lower
+bound must be strictly positive, and at least 60% of clips must be favorable.
+Thus RGB-band and robot-flow metrics are stricter no-secondary-regression
+conditions rather than substitutes for the primary endpoint. Predicted
+silhouette IoU must have a positive point difference against raw and shuffled
+and may not have a negative 95% lower bound. Every condition is mandatory.
+Otherwise the decision is
 `STOP_RENDERER_ATTRIBUTION` and no Wan integration is authorized from this
 study.
 
