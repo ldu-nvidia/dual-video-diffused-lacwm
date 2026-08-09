@@ -361,6 +361,7 @@ def test_protocol_freezes_primary_source_scope_and_claim_boundary():
         "416--479",
         "480--510",
         "post-selection exploratory",
-        "not** a Frequency-Forcing reproduction",
+        "It is **not** a",
+        "Frequency-Forcing reproduction.",
     ):
         assert value in protocol
