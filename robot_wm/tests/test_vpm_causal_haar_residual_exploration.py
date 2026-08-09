@@ -88,6 +88,34 @@ def test_index_audit_fails_before_reserve_or_constructor_probe_access():
         wrapped[511]
 
 
+def test_zero_head_audit_uses_the_sealed_ridge_intercept_schema():
+    stats = {
+        "count": 4,
+        "sum_x": torch.zeros(2),
+        "sum_xx": torch.eye(2) * 4,
+        "sum_y": {"ZERO": torch.zeros(3)},
+        "sum_xy": {"ZERO": torch.zeros(2, 3)},
+        "sum_y2": {"ZERO": torch.zeros((), dtype=torch.float64)},
+    }
+    old_arms = haar.ladder.ARMS
+    old_rungs = haar.ladder.CAPACITY_RUNGS
+    old_lambdas = haar.ladder.RIDGE_LAMBDAS
+    try:
+        haar.ladder.ARMS = ("ZERO",)
+        haar.ladder.CAPACITY_RUNGS = (2,)
+        haar.ladder.RIDGE_LAMBDAS = (1.0,)
+        head = haar.ladder.fit_ridge_head(
+            stats, arm="ZERO", capacity=2, ridge_lambda=1.0
+        )
+    finally:
+        haar.ladder.ARMS = old_arms
+        haar.ladder.CAPACITY_RUNGS = old_rungs
+        haar.ladder.RIDGE_LAMBDAS = old_lambdas
+    assert set(("weight", "mean_y")).issubset(head)
+    assert "bias" not in head
+    assert all(int(torch.count_nonzero(head[name])) == 0 for name in ("weight", "mean_y"))
+
+
 def _registered_samples():
     return [
         {

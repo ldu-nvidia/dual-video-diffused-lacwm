@@ -57,7 +57,7 @@ done
 [[ -f "$PARENT_REGISTRATION" && ! -L "$PARENT_REGISTRATION" ]] || \
   die "parent registration is invalid"
 [[ ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || die "output must be fresh"
-EXPECTED_BASENAME="vpm-causal-haar-fit256-dev64-seed20260910-${EXPECTED_COMMIT:0:7}-v1"
+EXPECTED_BASENAME="vpm-causal-haar-fit256-dev64-seed20260910-${EXPECTED_COMMIT:0:7}-v2"
 [[ "$(basename "$OUTPUT_DIR")" == "$EXPECTED_BASENAME" ]] || \
   die "output basename must be $EXPECTED_BASENAME"
 
