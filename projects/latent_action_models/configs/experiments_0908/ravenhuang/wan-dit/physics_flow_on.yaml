@@ -3,9 +3,9 @@ defaults:
   - /experiments_0908/physics_flow_common
   - _self_
 
-name: physics-flow-raw-strict-v6-seed1234-u000200
+name: physics-flow-raw-strict-v7-seed1234-u000200
 model:
   physics_flow:
     fuse_flow: true
 wandb:
-  tags: [abc, vpm, physics-flow, strict-v6, raw-flow, seed-1234]
+  tags: [abc, vpm, physics-flow, strict-v7, raw-flow, seed-1234]

@@ -580,13 +580,13 @@ ARMS = (
     Arm(
         "FLOW-OFF",
         "ravenhuang/wan-dit/physics_flow_off",
-        "physics-flow-off-strict-v6-seed1234-u000200",
+        "physics-flow-off-strict-v7-seed1234-u000200",
         False,
     ),
     Arm(
         "RAW-FLOW",
         "ravenhuang/wan-dit/physics_flow_on",
-        "physics-flow-raw-strict-v6-seed1234-u000200",
+        "physics-flow-raw-strict-v7-seed1234-u000200",
         True,
     ),
 )
@@ -1186,6 +1186,8 @@ class _StoredZipMember:
     payload_bytes: int
     crc32: int
     extract_version: int
+    local_size_encoding: str
+    local_extra_bytes: int
     modified_time: int
     modified_date: int
 
@@ -1366,13 +1368,40 @@ def _scan_stored_npz_layout(
             payload_bytes, compressed_bytes = _parse_zip64_local_sizes(
                 extra, expected_name
             )
+            local_size_encoding = "zip64_sentinel"
         else:
-            if extra or extract_version not in (10, 20):
+            if extract_version not in (10, 20):
                 raise PhysicsFlowStage1Error(
                     f"{expected_name} has unsupported local ZIP metadata"
                 )
             payload_bytes = int(payload_32)
             compressed_bytes = int(compressed_32)
+            # NumPy archives produced by older ``numpy.savez`` releases use
+            # ``force_zip64=True`` while streaming each NPY member.  Their
+            # local header keeps valid 32-bit sizes/version 20 *and* carries a
+            # redundant ZIP64 size field; the central directory correctly has
+            # no ZIP64 extra.  This is still directly addressable.  Admit only
+            # that exact 20-byte field and require both redundant sizes to
+            # equal the local-header sizes.  Arbitrary extra fields remain
+            # rejected before any NPY payload byte is read.
+            if extra:
+                if extract_version != 20:
+                    raise PhysicsFlowStage1Error(
+                        f"{expected_name} has unsupported redundant ZIP64 version"
+                    )
+                extra_payload_bytes, extra_compressed_bytes = (
+                    _parse_zip64_local_sizes(extra, expected_name)
+                )
+                if (
+                    extra_payload_bytes != payload_bytes
+                    or extra_compressed_bytes != compressed_bytes
+                ):
+                    raise PhysicsFlowStage1Error(
+                        f"{expected_name} has inconsistent redundant ZIP64 sizes"
+                    )
+                local_size_encoding = "zip64_redundant_sizes"
+            else:
+                local_size_encoding = "plain_32bit_sizes"
         if payload_bytes <= 0 or compressed_bytes != payload_bytes:
             raise PhysicsFlowStage1Error(
                 f"{expected_name} is not an addressable stored member"
@@ -1390,6 +1419,8 @@ def _scan_stored_npz_layout(
             payload_bytes=payload_bytes,
             crc32=int(local_crc32),
             extract_version=int(extract_version),
+            local_size_encoding=local_size_encoding,
+            local_extra_bytes=len(extra),
             modified_time=int(_modified_time),
             modified_date=int(_modified_date),
         )
@@ -1755,6 +1786,9 @@ def _read_selected_state_action_bytes(
         member_receipts[name[:-4]] = {
             **dict(header),
             "compression": "ZIP_STORED",
+            "zip_extract_version": layouts[name].extract_version,
+            "zip_local_size_encoding": layouts[name].local_size_encoding,
+            "zip_local_extra_bytes": layouts[name].local_extra_bytes,
             "selected_row_start_inclusive": row_start,
             "selected_row_stop_exclusive": row_stop,
             "selected_data_archive_byte_start": byte_start,
