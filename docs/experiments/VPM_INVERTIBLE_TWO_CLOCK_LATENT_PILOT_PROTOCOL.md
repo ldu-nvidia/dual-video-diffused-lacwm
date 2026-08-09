@@ -4,12 +4,20 @@ Date frozen: 2026-08-09
 
 Status: **prospective protocol only**. This document is committed before model
 implementation, registration, training, endpoint materialization, or outcome
-access. Implementation may proceed additively, but registration and launch are
-forbidden until the parent ILSF-2 evidence is complete and the user authorizes
-one exact implementation commit.
+access. The user has authorized additive implementation and evidence-driven
+research execution. Registration and launch nevertheless remain contingent on
+the parent ILSF-2 frozen handoff rule saying to advance and an independent
+auditor acknowledging one exact clean implementation commit.
 
 Protocol source base: clean integration commit
 `ee4855b3314e0864dece9e832158928570dc93fc`.
+
+Parent-lineage amendment, 2026-08-09: protocol-only commit `c32c54b`
+incorrectly named the legacy `f67…` checkpoint. An independent read-only audit
+caught the error before implementation or any outcome access. This prospective
+amendment replaces it with the faithful `de65…/d79c…/d123…` frontier and adds
+the historical-source parity gate below. No arm, schedule, metric, threshold,
+dataset, or outcome was changed.
 
 ## Question and claim boundary
 
@@ -177,19 +185,54 @@ clock, RNG state before Wan, optimizer LR, and observation count. The only
 permitted tensor differences are the effective Q clock, the resulting Q
 corruption, model outputs, gradients, and later learned parameters.
 
-Both arms start core weights from the immutable update-1,000 VPM snapshot:
+Both arms start core weights from the immutable **faithful-cascade** update-1,000
+VPM frontier:
 
 ```text
 snapshot SHA-256
-f67c7bae50c4c279bf6372e098833be32699aca24232d7d489a1f7a45b5a8e21
+de65e832c56f82be1472edb1fd789e16d3a6c8a7adc9b1f31306779951cb463a
+
+run identity SHA-256
+d79c3699f0c68dcd17321fcb0ea2846fca4d96f8c815f91dff02a19d3140787f
+
+canonical 1,686-tensor model-state SHA-256
+d1231b8bc13a2391a94f2ade8ff216de3fbe5e91e7242b35c39c60197fd897a0
+
+resolved update-1,000 config SHA-256
+ae3ffd27146883917472b828c18568b72cfc7c6f2888fbca3eaa2e980a8ffd38
+
+training source commit
+656086686dae723c942a4209a9d71cdb17ed6ccc
 ```
+
+The older `f67c7bae50c4c279bf6372e098833be32699aca24232d7d489a1f7a45b5a8e21`
+snapshot is explicitly forbidden. A completed parent-lineage audit found that
+its canonical state is `2b298196…`, not `d1231b8b…`: 495/1,686 tensors differ,
+including 480 Wan LoRA tensors and 15 action encoder/pool/control/morphology
+tensors. It is a distinct older model, not a container variant of the current
+frontier. Registration must bind the full
+`PHYSICS_FLOW_PARENT_LINEAGE.md` evidence, including the corrected comparison
+log SHA-256 `048bcddd35ecd2458e5b17f28a48a8a4967111dbb888e8cd2bc9d5ff669c0e2a`.
 
 The historical unused 64-channel auxiliary adapter/head keys are excluded and
 replaced by the same deterministic 16-channel P/Q modules in both arms. Every
-other key must load strictly. Registration records core-load coverage, exact
-excluded keys, initial state hashes, total/trainable parameter counts, and
-per-parameter shapes; the two arms must match bit-for-bit before update zero.
-This is a matched continuation, not training-efficiency evidence from scratch.
+other key must load strictly from `de65…`. Registration records the parent
+resolved-config bytes, core-load coverage, exact excluded keys, initial state
+hashes, total/trainable parameter counts, and per-parameter shapes; the two
+arms must match bit-for-bit before update zero. It also binds parent training
+source `6560866`, the native sampler source SHA-256/git blob
+`a10fe3730f7bb3bacd20bd14ebbcfab2b3cf8c63a2db27783f1e8a9787b87ee6` /
+`abc6d4df165f684c2c93920d079585c600562dbb`, and the complete audited delta
+between that source and the current model path. This is a matched continuation,
+not training-efficiency evidence from scratch.
+
+Before any endpoint manifest row is opened, the untouched `de65…` parent must
+also be instantiated from its exact resolved configuration and all 1,686
+tensors strict-loaded in a separate clean source worktree at commit `6560866`.
+On a fixed target-blind train history at NFE 1/2/4, its public deployable sampler
+must match the current repository's parent adapter bit-for-bit in initial noise,
+final latent, and decoded uint8 video. This historical/current parity receipt
+guards against attributing a shared continuation regression to the candidate.
 
 Each arm trains exactly 400 optimizer updates, seed `1234`, on the immutable
 512-clip ABC training manifest using eight B200 ranks, local batch one, global
@@ -346,12 +389,12 @@ must live under the registered Lustre dual-video artifact root, never the repo
 or root filesystem. Each job must preflight quota and fail before training if
 the registered output root is not fresh or has less than 1 TiB free.
 
-W&B is disabled in the prepared source. If the user later authorizes online
-telemetry, registration must first verify that
+W&B is disabled in the prepared source. An independently audited contingent
+launch may enable online telemetry only after verifying that
 `zijiandu/dual-video-diffusion-private` reports private access, bind each run ID
 to its arm identity, set `group=null`, `resume=never`, and unset inherited group,
-job-type, and notes variables. A launch may not infer telemetry authorization
-from existing credentials.
+job-type, and notes variables. Existing credentials alone cannot bypass the
+ILSF handoff and exact-SHA audit gate.
 
 ## Implementation and launch seal
 
@@ -370,7 +413,10 @@ read-only readiness command must seal:
 - `registration_created=false`, `jobs_submitted=0`, `wandb_writes=0`, and
   `outcomes_opened=0`.
 
-No registration, W&B write, `sbatch`, local training, validation-row read, or
-endpoint evaluation is authorized by this protocol or its implementation.
-After ILSF-2 completes, the user must name the exact sealed source SHA to
-authorize any launch.
+This protocol authorizes additive implementation and local synthetic/unit
+validation only. It does not itself authorize registration, W&B writes,
+`sbatch`, model training, validation-row reads, or endpoint evaluation. After
+ILSF-2 completes, an independent auditor must verify that its frozen handoff
+rule advances this contingency and explicitly acknowledge the exact sealed
+source SHA. That acknowledgment—not a further requirement that the user recite
+an internal hash—unlocks the already user-authorized execution chain.
