@@ -101,25 +101,26 @@ mkdir -p "$LOG_ROOT"
 
 ## 3. Submit the complete dependency chain
 
-The following common prefix is expanded into the registration, cache, and
-sealing jobs. Large artifacts remain on Lustre. No protected test split is
-named anywhere in the chain.
+The following prefix explicitly enters Bash inside every Slurm `--wrap`
+script before using `pipefail` or sourcing the B200 activation helper. Large
+artifacts remain on Lustre. No protected test split is named anywhere in the
+chain.
 
 ```bash
-COMMON="set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME MUJOCO_GL=egl; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO"
+BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME MUJOCO_GL=egl; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO;"
 
 REGISTER_JOB=$(sbatch --parsable \
   --job-name=pf-register-$SHORT \
   --output="$LOG_ROOT/register-%j.out" \
   --nodes=1 --ntasks=1 --cpus-per-task=32 --mem=256G --time=02:00:00 \
   --partition=batch --account=coreai_chef_posttrain --qos=short --no-requeue \
-  --wrap="$COMMON; $PYTHON_BIN tools/physics_flow_stage1.py register-cache \
+  --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py register-cache \
     --output $CACHE_ROOT --source-repo $SOURCE_REPO \
     --expected-commit $EXPECTED_COMMIT --official-abc-root $OFFICIAL_ABC \
     --renderer-gate $RENDERER_GATE --train-manifest $TRAIN_MANIFEST \
     --val-manifest $VAL_MANIFEST --train-cache-metadata $TRAIN_RGB_METADATA \
     --val-cache-metadata $VAL_RGB_METADATA \
-    --preprocessed-root $PREPROCESSED_ROOT --raw-root $RAW_ROOT")
+    --preprocessed-root $PREPROCESSED_ROOT --raw-root $RAW_ROOT'")
 
 CACHE_TRAIN_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
   --job-name=pf-cache-train-$SHORT \
@@ -128,8 +129,8 @@ CACHE_TRAIN_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
   --mem=256G --time=04:00:00 --partition=batch \
   --account=coreai_chef_posttrain --qos=short --no-requeue \
   --exclude=pool0-0081,pool0-0089 \
-  --wrap="$COMMON; $PYTHON_BIN tools/physics_flow_stage1.py build-cache \
-    --registration $CACHE_ROOT/cache_registration.json --split train")
+  --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py build-cache \
+    --registration $CACHE_ROOT/cache_registration.json --split train'")
 
 CACHE_VAL_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
   --job-name=pf-cache-val-$SHORT \
@@ -138,15 +139,15 @@ CACHE_VAL_JOB=$(sbatch --parsable --dependency=afterok:$REGISTER_JOB \
   --mem=256G --time=04:00:00 --partition=batch \
   --account=coreai_chef_posttrain --qos=short --no-requeue \
   --exclude=pool0-0081,pool0-0089 \
-  --wrap="$COMMON; $PYTHON_BIN tools/physics_flow_stage1.py build-cache \
-    --registration $CACHE_ROOT/cache_registration.json --split val")
+  --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py build-cache \
+    --registration $CACHE_ROOT/cache_registration.json --split val'")
 
 SEAL_JOB=$(sbatch --parsable \
   --dependency=afterok:$CACHE_TRAIN_JOB:$CACHE_VAL_JOB \
   --job-name=pf-seal-$SHORT --output="$LOG_ROOT/seal-%j.out" \
   --nodes=1 --ntasks=1 --cpus-per-task=32 --mem=256G --time=02:00:00 \
   --partition=batch --account=coreai_chef_posttrain --qos=short --no-requeue \
-  --wrap="$COMMON; \
+  --wrap="$BASH_PREFIX \
     $PYTHON_BIN tools/physics_flow_stage1.py audit-cache --metadata $CACHE_ROOT/train/metadata.json; \
     $PYTHON_BIN tools/physics_flow_stage1.py audit-cache --metadata $CACHE_ROOT/val/metadata.json; \
     $PYTHON_BIN tools/physics_flow_stage1.py register-study \
@@ -165,7 +166,7 @@ SEAL_JOB=$(sbatch --parsable \
       --lpips-preflight-log $LPIPS_PREFLIGHT_LOG \
       --python $PYTHON_BIN --wan-dir $WAN_DIR --videox-home $VIDEOX_HOME; \
     $PYTHON_BIN tools/physics_flow_stage1_workflow.py plan \
-      --registration $REGISTRATION")
+      --registration $REGISTRATION'")
 
 FLOW_OFF_JOB=$(sbatch --parsable --dependency=afterok:$SEAL_JOB \
   --job-name=pf-off-$SHORT --output="$LOG_ROOT/train-off-%j.out" \

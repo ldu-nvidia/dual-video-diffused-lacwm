@@ -303,5 +303,6 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "historical_preserve_zero_support_attribute_absent" in parent_reference
     assert "prepared only; do not execute" in launch_runbook
     assert "REPLACE_WITH_AUDITOR_ACKNOWLEDGED_40_CHARACTER_COMMIT" in launch_runbook
+    assert 'BASH_PREFIX="/bin/bash -lc' in launch_runbook
     assert "--parent-source-repo $PARENT_SOURCE_REPO" in launch_runbook
     assert "--dependency=afterok:$FLOW_OFF_JOB:$RAW_FLOW_JOB" in launch_runbook
