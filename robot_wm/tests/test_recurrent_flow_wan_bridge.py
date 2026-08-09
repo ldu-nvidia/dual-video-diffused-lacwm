@@ -167,6 +167,43 @@ def test_registration_source_must_be_executing_physical_checkout(tmp_path: Path)
         bridge._validate_executing_source_repo(alias)
 
 
+def test_registered_source_revalidates_full_executing_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = Path("/sealed/source")
+    record = {
+        "path": str(repository),
+        "git_commit": "a" * 40,
+        "git_tree_sha": "b" * 40,
+        "clean": True,
+    }
+    files = {"bridge": {"sha256": "c" * 64}}
+    monkeypatch.setattr(
+        bridge, "_validate_executing_source_repo", lambda supplied: repository
+    )
+    monkeypatch.setattr(
+        bridge.raw_stage, "clean_repository", lambda *args, **kwargs: record
+    )
+    monkeypatch.setattr(bridge, "_source_records", lambda: files)
+    registration = {
+        "source": {
+            "repository": str(repository),
+            "git_commit": record["git_commit"],
+            "git_tree_sha": record["git_tree_sha"],
+            "clean": True,
+            "files": files,
+        }
+    }
+    bridge._validate_source(registration)
+    registration["source"]["git_tree_sha"] = "d" * 40
+    with pytest.raises(bridge.RecurrentFlowBridgeError, match="source record"):
+        bridge._validate_source(registration)
+    registration["source"]["git_tree_sha"] = record["git_tree_sha"]
+    registration["source"]["files"] = {}
+    with pytest.raises(bridge.RecurrentFlowBridgeError, match="source file"):
+        bridge._validate_source(registration)
+
+
 def test_history_reader_reads_state_prefix_and_action_slice_once(tmp_path: Path) -> None:
     rows = 100
     archive = tmp_path / "states.npz"
