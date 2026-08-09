@@ -73,6 +73,7 @@ The official recipe is reproduced as follows:
 | AC sampling rate | 4 FPS (`ceil(15/4)=4` frame stride) |
 | Sampled source offsets | `[0,4,8,12,16,20,24,28]` |
 | Decoded geometry | exactly `8 x 180 x 320 x 3` |
+| Byte decoder | PyAV, sequential display-order indices, `rgb24` output |
 | Spatial augmentation | scale `(1.777,1.777)`, aspect `(0.75,1.35)`, no flip |
 | 180x320 fallback crop | `(top,left,height,width)=(0,38,180,243)` |
 | Model input | eight independent RGB frames, each duplicated into a two-frame tubelet |
@@ -80,6 +81,16 @@ The official recipe is reproduced as follows:
 | State/action | `[xyz,euler_xyz,gripper]`, seven dimensions each |
 | Predictor | 24 blocks, width 1024, 16 heads; ViT-g encoder |
 | Primary rollout horizons | one and two AC steps; the checkpoint trained `auto_steps=2` |
+
+The immutable LeRobot conversion stores these MP4s as AV1.  The installed
+Decord 0.6 build used elsewhere in the original source cannot open that codec,
+so this evaluator uses the installed PyAV/FFmpeg decoder.  It decodes the full
+single video stream in display order, extracts the registered integer indices,
+converts each selected frame to `rgb24`, and requires both declared and decoded
+frame counts to match the parquet/manifest trajectory length.  Decoder version,
+codec, counts, indices, and output format are written into the artifacts.  This
+is a byte-decoding adapter only; it does not change temporal sampling, spatial
+augmentation, state/action math, or causal inputs.
 
 Direct parquet inspection resolves an ambiguity in the LeRobot metadata.  The
 payload uses `state[:3]` for Cartesian position, `state[3:6]` for Euler XYZ,

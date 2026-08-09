@@ -565,10 +565,22 @@ def build_registration(args: argparse.Namespace) -> tuple[dict[str, Any], list[N
     )
     info_path = args.data_root.expanduser().resolve() / "meta/info.json"
     info = read_json(info_path)
-    state_names = info.get("features", {}).get("observation.state", {}).get("names")
+    features = info.get("features", {})
+    state_names = features.get("observation.state", {}).get("names")
     if info.get("fps") != DROID_NATIVE_FPS or state_names is None:
         raise QualificationError("DROID metadata FPS/state schema changed")
+    camera_metadata = features.get(f"observation.images.{DROID_CAMERA}", {})
+    camera_video_metadata = camera_metadata.get("info", {})
+    if (
+        camera_metadata.get("shape") != [180, 320, 3]
+        or camera_video_metadata.get("video.codec") != "av1"
+        or camera_video_metadata.get("video.fps") != float(DROID_NATIVE_FPS)
+    ):
+        raise QualificationError("DROID camera geometry/codec metadata changed")
     implementation = Path(__file__).resolve()
+    implementation_repo = implementation.parents[1]
+    if git_status(implementation_repo):
+        raise QualificationError("qualification implementation repository is dirty")
     payload = {
         "schema_version": SCHEMA_VERSION,
         "kind": f"{KIND_PREFIX}_registration",
@@ -579,13 +591,24 @@ def build_registration(args: argparse.Namespace) -> tuple[dict[str, Any], list[N
         "checkpoint": checkpoint,
         "implementation": {
             **file_record(implementation),
-            "repo_commit": git_commit(implementation.parents[1]),
+            "repo_commit": git_commit(implementation_repo),
+            "repo_clean": True,
         },
         "data": {
             "root": str(args.data_root.expanduser().resolve()),
             "train_manifest": manifest_record,
             "metadata": file_record(info_path),
             "metadata_state_names": state_names,
+            "camera_metadata": camera_metadata,
+            "decoder": {
+                "backend": "PyAV",
+                "output_pixel_format": "rgb24",
+                "selection": "sequential display-order frame index",
+                "reason": (
+                    "the immutable LeRobot payload is AV1 and the installed "
+                    "Decord 0.6 build cannot open its video stream"
+                ),
+            },
             "observed_payload_adapter": (
                 "state[:3]=xyz,state[3:6]=Euler,state[6]=zero padding,"
                 "state[7]=gripper; metadata quaternion-style names are rejected as literal"
@@ -689,12 +712,69 @@ def validate_registration(registration: Mapping[str, Any]) -> None:
             raise QualificationError(f"registered {key} payload changed")
 
 
-def _load_native_arrays(clip: NativeClip) -> dict[str, np.ndarray | float]:
+def _decode_rgb_frames_pyav(
+    path: Path,
+    indices: Sequence[int],
+    *,
+    expected_frame_count: int,
+) -> tuple[np.ndarray, float, dict[str, Any]]:
+    try:
+        import av
+    except ImportError as exc:
+        raise QualificationError("PyAV is required to decode immutable AV1 RGB") from exc
+    requested = tuple(int(index) for index in indices)
+    if (
+        len(requested) == 0
+        or len(set(requested)) != len(requested)
+        or tuple(sorted(requested)) != requested
+        or requested[0] < 0
+        or requested[-1] >= expected_frame_count
+    ):
+        raise QualificationError("requested RGB frame indices are invalid")
+    positions = {frame_index: offset for offset, frame_index in enumerate(requested)}
+    selected: list[np.ndarray | None] = [None] * len(requested)
+    try:
+        with av.open(str(path), mode="r") as container:
+            if len(container.streams.video) != 1:
+                raise QualificationError("native DROID MP4 must have exactly one video stream")
+            stream = container.streams.video[0]
+            if stream.average_rate is None:
+                raise QualificationError("native DROID MP4 has no average frame rate")
+            fps = float(stream.average_rate)
+            codec_name = str(stream.codec_context.name)
+            declared_frames = int(stream.frames or 0)
+            decoded_count = 0
+            for frame in container.decode(stream):
+                if decoded_count in positions:
+                    selected[positions[decoded_count]] = frame.to_ndarray(format="rgb24")
+                decoded_count += 1
+    except QualificationError:
+        raise
+    except Exception as exc:
+        raise QualificationError(f"cannot decode native DROID AV1 video {path}: {exc}") from exc
+    if decoded_count != expected_frame_count:
+        raise QualificationError(
+            f"decoded video length {decoded_count} != {expected_frame_count}"
+        )
+    if any(frame is None for frame in selected):
+        raise QualificationError("one or more requested RGB frames were not decoded")
+    frames = np.stack(selected)
+    return frames, fps, {
+        "backend": "PyAV",
+        "backend_version": str(av.__version__),
+        "codec": codec_name,
+        "output_pixel_format": "rgb24",
+        "declared_frame_count": declared_frames,
+        "decoded_frame_count": decoded_count,
+        "selected_frame_indices": list(requested),
+    }
+
+
+def _load_native_arrays(clip: NativeClip) -> dict[str, Any]:
     try:
         import pandas as pd
-        from decord import VideoReader, cpu
     except ImportError as exc:
-        raise QualificationError("pandas, pyarrow, and decord are required") from exc
+        raise QualificationError("pandas and pyarrow are required") from exc
     dataframe = pd.read_parquet(
         clip.parquet, columns=["observation.state", "action"]
     )
@@ -706,11 +786,13 @@ def _load_native_arrays(clip: NativeClip) -> dict[str, np.ndarray | float]:
     pose7 = lerobot_state8_to_vjepa_pose7(state8[indices])
     aligned = poses_to_diffs(pose7)
     logged_selected = logged[indices[:-1]]
-    reader = VideoReader(str(clip.video), num_threads=-1, ctx=cpu(0))
-    video_fps = float(reader.get_avg_fps())
-    if len(reader) != clip.trajectory_length or abs(video_fps - DROID_NATIVE_FPS) > 1e-6:
-        raise QualificationError("video length/FPS differs from the frozen contract")
-    frames = reader.get_batch(indices).asnumpy()
+    frames, video_fps, decoder_audit = _decode_rgb_frames_pyav(
+        clip.video,
+        clip.frame_indices,
+        expected_frame_count=clip.trajectory_length,
+    )
+    if abs(video_fps - DROID_NATIVE_FPS) > 1e-6:
+        raise QualificationError("video FPS differs from the frozen contract")
     expected_rgb_shape = (FRAMES_PER_CLIP, 180, 320, 3)
     if frames.shape != expected_rgb_shape:
         raise QualificationError(
@@ -724,6 +806,7 @@ def _load_native_arrays(clip: NativeClip) -> dict[str, np.ndarray | float]:
         "aligned_actions": aligned,
         "logged_actions": logged_selected,
         "video_fps": video_fps,
+        "decoder_audit": decoder_audit,
         "state_schema_audit": {
             "trajectory_rows": int(len(state8)),
             "padding_col6_abs_max": float(np.max(np.abs(state8[:, 6]))),
@@ -993,8 +1076,8 @@ def _tensor_numpy(value: Any) -> np.ndarray:
 def _evaluate_clip(
     clip_index: int,
     clip: NativeClip,
-    payload: Mapping[str, np.ndarray | float],
-    donor: Mapping[str, np.ndarray | float],
+    payload: Mapping[str, Any],
+    donor: Mapping[str, Any],
     *,
     encoder: Any,
     predictor: Any,
@@ -1082,6 +1165,7 @@ def _evaluate_clip(
         "control_batch_size": len(CONTROL_NAMES),
         "aligned_pose_reintegration_max_abs": integration_error,
         "state_schema_audit": payload["state_schema_audit"],
+        "decoder_audit": payload["decoder_audit"],
     }
     return rows, timing
 
@@ -1157,6 +1241,21 @@ def _summarize(
         ),
         "metadata_quaternion_interpretation_valid": False,
     }
+    decoder_audits = [row["decoder_audit"] for row in timings]
+    decoder_audit = {
+        "backend": "PyAV",
+        "backend_versions": sorted(
+            {str(row["backend_version"]) for row in decoder_audits}
+        ),
+        "codecs": sorted({str(row["codec"]) for row in decoder_audits}),
+        "output_pixel_formats": sorted(
+            {str(row["output_pixel_format"]) for row in decoder_audits}
+        ),
+        "all_declared_counts_match_decoded": all(
+            int(row["declared_frame_count"]) == int(row["decoded_frame_count"])
+            for row in decoder_audits
+        ),
+    }
     return {
         "aggregates": aggregates,
         "aligned_comparisons": comparisons,
@@ -1169,6 +1268,7 @@ def _summarize(
         "latency": latency,
         "aligned_pose_reintegration_max_abs": max_reintegration_error,
         "sampled_parquet_state_schema_audit": schema_audit,
+        "sampled_video_decoder_audit": decoder_audit,
         "claim_boundary": (
             "a native DROID pass is necessary but does not qualify ABC, improve video, "
             "or authorize Wan integration; raw/scratch and ABC causal gates remain"
