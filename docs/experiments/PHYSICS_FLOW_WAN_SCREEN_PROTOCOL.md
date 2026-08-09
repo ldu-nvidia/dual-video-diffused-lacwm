@@ -64,7 +64,7 @@ The exact fresh 24-episode trajectory-consistent renderer gate must remain
 complete and independently auditable with:
 
 - registration identity
-  `9cc556aba53d1defb69f0049dab67d12a3991decb917015bba5153c16cb8c2b1`;
+  `9cc556aba53d1defb69b0049dab67d12a3991decb917015bba5153c16cb8c2b1`;
 - preparation identity
   `11444ee94ae6707869f44f00409386701c93b886d650ebc928bc4edec4f41a3a`;
 - analysis identity

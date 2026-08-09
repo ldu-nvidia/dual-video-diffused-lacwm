@@ -96,6 +96,9 @@ test "$(git -C "$SOURCE_MIRROR" rev-parse FETCH_HEAD)" = "$EXPECTED_COMMIT"
 git -C "$SOURCE_MIRROR" worktree add --detach "$SOURCE_REPO" "$EXPECTED_COMMIT"
 test "$(git -C "$SOURCE_REPO" rev-parse HEAD)" = "$EXPECTED_COMMIT"
 test -z "$(git -C "$SOURCE_REPO" status --porcelain --untracked-files=all)"
+PYTHONPATH="$SOURCE_REPO" "$PYTHON_BIN" -c \
+  'from pathlib import Path; from tools import physics_flow_stage1 as p; p.validate_renderer_gate(Path(__import__("sys").argv[1]))' \
+  "$RENDERER_GATE"
 mkdir -p "$(dirname "$CACHE_ROOT")" "$(dirname "$STUDY_ROOT")" "$LOG_ROOT"
 test -d "$(dirname "$CACHE_ROOT")"
 test -d "$(dirname "$STUDY_ROOT")"
