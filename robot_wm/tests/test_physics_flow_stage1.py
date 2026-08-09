@@ -261,6 +261,24 @@ def test_legacy_numpy_redundant_zip64_local_extra_is_strictly_addressable(
         member["zip_local_extra_bytes"]
         for member in observed[2]["members"].values()
     } == {20}
+    preflight = stage._preflight_state_archive_access(
+        state_path,
+        frame4=20,
+        action_start=0,
+        action_stop=65,
+    )
+    assert {
+        member["zip_extract_version"]
+        for member in preflight["members"].values()
+    } == {20}
+    assert {
+        member["zip_local_size_encoding"]
+        for member in preflight["members"].values()
+    } == {"zip64_redundant_sizes"}
+    assert {
+        member["zip_local_extra_bytes"]
+        for member in preflight["members"].values()
+    } == {20}
     assert sum(
         int(record["returned_bytes"])
         for record in physical_reads
@@ -295,6 +313,47 @@ def test_redundant_zip64_local_extra_size_mismatch_fails_before_payload(
             action_stop=65,
             read_observer=physical_reads.append,
         )
+
+    assert physical_reads
+    assert {record["label"] for record in physical_reads} == {
+        "zip_local_header"
+    }
+
+
+def test_redundant_zip64_local_extra_requires_extract_version_20(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "states.npz"
+    _write_state_archive(state_path, _state_archive_arrays())
+    _rewrite_numpy_force_zip64_as_legacy_redundant_extra(state_path)
+    content = bytearray(state_path.read_bytes())
+    # Version 10 plus a redundant ZIP64 local extra is not the exact legacy
+    # NumPy layout admitted by the reader.  Reject it before any NPY payload.
+    struct.pack_into("<H", content, 4, 10)
+    state_path.write_bytes(content)
+    physical_reads: list[dict[str, object]] = []
+
+    with pytest.raises(
+        stage.PhysicsFlowStage1Error,
+        match="unsupported redundant ZIP64 version",
+    ):
+        stage._read_selected_state_action_bytes(
+            state_path,
+            frame4=20,
+            action_start=0,
+            action_stop=65,
+            read_observer=physical_reads.append,
+        )
+
+    first_member_payload_offset = (
+        stage._ZIP_LOCAL_HEADER.size
+        + stage._ZIP_LOCAL_HEADER.unpack_from(content, 0)[9]
+        + stage._ZIP_LOCAL_HEADER.unpack_from(content, 0)[10]
+    )
+    assert all(
+        int(record["archive_byte_stop"]) <= first_member_payload_offset
+        for record in physical_reads
+    )
 
     assert physical_reads
     assert {record["label"] for record in physical_reads} == {

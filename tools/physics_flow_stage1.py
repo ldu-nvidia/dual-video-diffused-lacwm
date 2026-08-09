@@ -1986,6 +1986,9 @@ def _preflight_state_archive_access(
                 "shape": header["shape"],
                 "fortran_order": header["fortran_order"],
                 "npy_version": header["npy_version"],
+                "zip_extract_version": layouts[name].extract_version,
+                "zip_local_size_encoding": layouts[name].local_size_encoding,
+                "zip_local_extra_bytes": layouts[name].local_extra_bytes,
                 "npy_header_archive_byte_start": header[
                     "npy_header_archive_byte_start"
                 ],
