@@ -14,6 +14,16 @@ comparison, the isolated historical 6560866 parity gate, all 21 target-blind
 endpoint materializations, scoring, analysis, and final replay audit in that
 order.
 
+This v6 chain is a full rerun, not a seed-only replay. The sealed v5 artifacts
+are admitted only as a numeric repair reference: v5 has zero endpoint rows and
+supports no quality conclusion. Before v6 evaluation can create its output
+directory, the chain requires all eight cache arrays, every row-level numeric
+and tensor hash, all 400 same-arm deterministic update records, and every model
+tensor to match v5 exactly. Strict-access provenance and run identities must
+differ. Snapshot pickle bytes, provenance paths/identities, wall-clock timing,
+and GPU-memory telemetry are explicitly excluded; the final audit recomputes
+the same cache/training/model-state equivalence without opening v5 endpoints.
+
 ## 1. Exact immutable inputs
 
 Run on `gcp-nrt-login-002` only after audit acknowledgment. Replace the single
@@ -62,9 +72,11 @@ LPIPS_PREFLIGHT_LOG=$PREFLIGHT/lpips_pin-507388.log
 CAUSAL_LADDER=$BASE/artifacts/dual_video_diffusion/causal_compressibility_ladder/causal-compressibility-train256-dev64-seed20260820-4d4db76-v1/registration.json
 DIRECT_FRONTIER=$BASE/artifacts/dual_video_diffusion/vpm_direct_residual_frontier/vpm-direct-residual-fit256-outcome31-seed20260832-4f75f9c-v2
 
-CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v5
-STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v5
-LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v5
+V5_CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-e632344-v5
+V5_STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-e632344-v5
+CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v6
+STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v6
+LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v6
 REGISTRATION=$STUDY_ROOT/registration.json
 ```
 
@@ -83,6 +95,8 @@ test "$(sha256sum "$PARENT_CONFIG" | awk '{print $1}')" = ae3ffd27146883917472b8
 test "$(sha256sum "$LINEAGE_FAILED_LOG" | awk '{print $1}')" = 18bff874df2ae79bae614520ce80d3dd2d223a86d31bf1c8cc5ad24e05f10714
 test "$(sha256sum "$LINEAGE_COMPARISON_LOG" | awk '{print $1}')" = 048bcddd35ecd2458e5b17f28a48a8a4967111dbb888e8cd2bc9d5ff669c0e2a
 test "$(sha256sum "$LPIPS_PREFLIGHT_LOG" | awk '{print $1}')" = db37a417618afa1156cb7226140993755279191edfef8a0c628d550de20fc6af
+test -d "$V5_CACHE_ROOT"
+test -d "$V5_STUDY_ROOT"
 test -L "$PYTHON_BIN"
 test "$(readlink "$PYTHON_BIN")" = "/lustre/fsw/portfolios/coreai/users/ldu/lacwm_train/python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
 test "$(sha256sum "$BASE/envs/lacwm-b200-py310/pyvenv.cfg" | awk '{print $1}')" = 1462a3436cb7564a778b577ed97d7b8adee292ba7f03ae92d544761a11fcbc2d
@@ -171,6 +185,7 @@ REGISTER_JOB=$(sbatch --parsable \
     $PYTHON_BIN tools/physics_flow_stage1.py register-cache \
     --output $CACHE_ROOT --source-repo $SOURCE_REPO \
     --cache-python $CACHE_PYTHON_BIN \
+    --v5-reference-cache-root $V5_CACHE_ROOT \
     --expected-commit $EXPECTED_COMMIT --official-abc-root $OFFICIAL_ABC \
     --renderer-gate $RENDERER_GATE --train-manifest $TRAIN_MANIFEST \
     --val-manifest $VAL_MANIFEST --train-cache-metadata $TRAIN_RGB_METADATA \
@@ -209,6 +224,7 @@ SEAL_JOB=$(sbatch --parsable \
     $PYTHON_BIN tools/physics_flow_stage1.py audit-cache --metadata $CACHE_ROOT/val/metadata.json; \
     $PYTHON_BIN tools/physics_flow_stage1.py register-study \
       --output $STUDY_ROOT --source-repo $SOURCE_REPO \
+      --v5-reference-study-root $V5_STUDY_ROOT \
       --parent-source-repo $PARENT_SOURCE_REPO \
       --expected-commit $EXPECTED_COMMIT \
       --train-flow-metadata $CACHE_ROOT/train/metadata.json \

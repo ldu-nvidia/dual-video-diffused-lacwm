@@ -38,6 +38,7 @@ from tools.physics_flow_lpips import load_offline_lpips  # noqa: E402
 
 EXPECTED_WORLD_SIZE = 8
 EXPECTED_BATCH_SIZE = 2
+EXPECTED_EVALUATION_NOISE_SEED = 20_260_729
 VALIDATION_SAMPLE_ID_OFFSET = 8_000_000
 
 
@@ -196,7 +197,10 @@ class RegisteredCausalInputs:
 
 
 def _load_model(
-    registration: Mapping[str, Any], arm: stage.Arm, device: Any
+    registration: Mapping[str, Any],
+    arm: stage.Arm,
+    device: Any,
+    pairing_artifact: Mapping[str, Any],
 ) -> tuple[Any, dict[str, Any]]:
     import torch
     from hydra.utils import instantiate
@@ -216,10 +220,15 @@ def _load_model(
     config_path = run_dir / ".hydra" / "config.yaml"
     config_record = stage.file_record(config_path)
     config = OmegaConf.load(config_path)
+    model_seed = int(config.model.dual_diffusion.evaluation_noise_seed)
+    forward_seed = int(
+        config.model.forward_model.dual_diffusion.evaluation_noise_seed
+    )
     if (
         str(config.name) != arm.run_name
         or not str(config.model.get("_target_", "")).endswith(".PhysicsFlowVPM")
         or bool(config.model.physics_flow.fuse_flow) is not arm.fuse_flow
+        or {model_seed, forward_seed} != {EXPECTED_EVALUATION_NOISE_SEED}
         or int(config.seed) != 1234
         or int(config.data_loader.batch_size) != 1
         or int(config.trainer.config.max_iter) != 200
@@ -250,6 +259,14 @@ def _load_model(
     model = instantiate(config.model)
     snapshot_path = run_dir / "snapshot.pt"
     snapshot_record = _distributed_file_record(snapshot_path)
+    if (
+        config_record != pairing_artifact.get("resolved_config")
+        or snapshot_record != pairing_artifact.get("snapshot")
+        or str(run_dir.resolve(strict=True)) != pairing_artifact.get("run_dir")
+    ):
+        raise PhysicsFlowEvaluationError(
+            f"{arm.code} endpoint artifacts differ from repair gate"
+        )
     snapshot = torch.load(
         snapshot_path, map_location="cpu", weights_only=True, mmap=True
     )
@@ -276,6 +293,7 @@ def _load_model(
         or bool(model.condition_on_tf_clock)
         or model.tf_condition_mode != "off"
         or bool(model.condition_on_tf)
+        or model.evaluation_noise_seed != EXPECTED_EVALUATION_NOISE_SEED
         or getattr(model, "time_frequency_transform", None) is not None
     ):
         raise PhysicsFlowEvaluationError(f"{arm.code} runtime contract differs")
@@ -678,6 +696,11 @@ def command_evaluate(args: argparse.Namespace) -> int:
     if "B200" not in torch.cuda.get_device_properties(device).name.upper():
         raise PhysicsFlowEvaluationError("evaluation requires B200 GPUs")
     registration = stage.validate_study_registration(args.registration)
+    # The source-pinned single-rank gate compared all 400 deterministic
+    # same-arm updates and every current/v5 model tensor before this output
+    # directory could exist.  Each rank validates its immutable receipt before
+    # constructing the validation mmap or loading an endpoint model.
+    pairing, _pairing_record = stage.load_training_pairing(registration)
     # This receipt is validated before the validation mmap is constructed.  It
     # proves that the third endpoint delegates bit-for-bit to the untouched
     # parent's public target-blind sampler on a registered train history.
@@ -697,14 +720,14 @@ def command_evaluate(args: argparse.Namespace) -> int:
     artifacts = {}
     for arm in stage.ARMS:
         models[arm.code], artifacts[arm.code] = _load_model(
-            registration, arm, device
+            registration, arm, device, pairing["artifacts"][arm.code]
         )
     models[stage.PARENT_EVALUATION_MODEL_CODE], artifacts[
         stage.PARENT_EVALUATION_MODEL_CODE
     ] = load_exact_parent_model(registration, device)
     if {
         model.evaluation_noise_seed for model in models.values()
-    } != {20260729}:
+    } != {EXPECTED_EVALUATION_NOISE_SEED}:
         raise PhysicsFlowEvaluationError(
             "training arms and native parent evaluation noise base seeds differ"
         )
