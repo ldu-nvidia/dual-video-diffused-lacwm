@@ -376,8 +376,10 @@ No job is authorized by this document. The maximum proposed allocation is:
 | **total** | 4 |  |  | **113** |
 
 Three model copies per rank make peak-memory preflight mandatory before any
-full run. The output ceiling is 100 GiB on approved Lustre or
-`/mnt/data1`/`/mnt/data2`. Jobs are non-requeueable. The present readiness seal
+full run. The output ceiling is 100 GiB under `/mnt/data1`, `/mnt/data2`, or
+the exact user Lustre root
+`/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train`;
+other Lustre prefixes fail closed. Jobs are non-requeueable. The present readiness seal
 must report registration, jobs, W&B writes, data rows, outcome rows, and
 protected-test accesses all equal zero.
 

@@ -11,6 +11,12 @@ from tools import low_nfe_direct_baseline as pilot
 from tools import adjacent_consistency_evaluate as evaluator
 
 
+LUSTRE_ROOT = Path(
+    "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/"
+    "users/ldu/lacwm_train"
+)
+
+
 def _registration(tmp_path: Path) -> dict:
     resolved = {}
     for arm in pilot.ARMS:
@@ -70,6 +76,27 @@ def test_endpoint_factorial_and_resource_arithmetic_are_frozen() -> None:
     assert plan["maximum_reserved_b200_hours"] == expected == 113
     assert plan["wandb"] is False
     assert plan["requeue"] is False
+
+
+def test_registration_artifact_allowlist_is_exact() -> None:
+    assert pilot.APPROVED_ARTIFACT_ROOTS == (
+        Path("/mnt/data1"),
+        Path("/mnt/data2"),
+        LUSTRE_ROOT,
+    )
+    for path in (
+        Path("/mnt/data1/acd"),
+        Path("/mnt/data2/acd"),
+        LUSTRE_ROOT / "artifacts/acd",
+    ):
+        assert pilot.approved_artifact_path(path, "output") == path
+    for path in (
+        Path("/lustre/acd"),
+        LUSTRE_ROOT.parent / "other/acd",
+        Path("/mnt/data1/../tmp/acd"),
+    ):
+        with pytest.raises(pilot.ACDPilotError, match="approved artifact root"):
+            pilot.approved_artifact_path(path, "output")
 
 
 @pytest.mark.parametrize(

@@ -38,7 +38,7 @@ ARM_PLAN_KIND = "acd_p0_arm_execution_plan"
 PHASES = ("memory_smoke", "train", "evaluate")
 MAX_AUTHORIZATION_WINDOW = timedelta(hours=24)
 FUTURE_CLOCK_SKEW = timedelta(minutes=5)
-APPROVED_OUTPUT_ROOT = Path("/mnt/data1")
+APPROVED_ARTIFACT_ROOTS = pilot.APPROVED_ARTIFACT_ROOTS
 JOB_ID_RE = re.compile(r"^[1-9][0-9]*$")
 
 
@@ -78,13 +78,14 @@ def _parse_utc(value: Any, label: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _under_mnt_data1(path: Path, label: str) -> Path:
-    if not path.is_absolute():
-        raise ACDWorkflowError(f"{label} must be absolute")
-    try:
-        path.relative_to(APPROVED_OUTPUT_ROOT)
-    except ValueError as exc:
-        raise ACDWorkflowError(f"{label} must be under /mnt/data1") from exc
+def _approved_artifact_path(path: Path, label: str) -> Path:
+    if ".." in path.parts or not path.is_absolute() or not any(
+        path == root or root in path.parents for root in APPROVED_ARTIFACT_ROOTS
+    ):
+        roots = ", ".join(str(root) for root in APPROVED_ARTIFACT_ROOTS)
+        raise ACDWorkflowError(
+            f"{label} must be under an approved artifact root: {roots}"
+        )
     return path
 
 
@@ -121,7 +122,7 @@ def _existing_directory(path: Path, label: str) -> Path:
 
 
 def _fresh_path(path: Path, label: str, *, expected_parent: Path | None = None) -> Path:
-    path = _under_mnt_data1(path.expanduser(), label)
+    path = _approved_artifact_path(path.expanduser(), label)
     if path.exists() or path.is_symlink():
         raise ACDWorkflowError(f"fresh {label} already exists: {path}")
     if expected_parent is None:
@@ -145,7 +146,7 @@ def _fresh_path(path: Path, label: str, *, expected_parent: Path | None = None) 
 
 
 def _log_target(path: Path) -> Path:
-    path = _under_mnt_data1(path.expanduser(), "Slurm log directory")
+    path = _approved_artifact_path(path.expanduser(), "Slurm log directory")
     if path.is_symlink():
         raise ACDWorkflowError("Slurm log directory cannot be a symlink")
     if path.exists():
@@ -158,12 +159,14 @@ def _log_target(path: Path) -> Path:
 
 
 def _registration(path: Path) -> dict[str, Any]:
-    path = _existing_file(path, "registration")
+    path = _approved_artifact_path(
+        _existing_file(path, "registration"), "registration receipt"
+    )
     registration = pilot.validate_registration(path)
     output_root = _existing_directory(
         Path(registration["output_root"]), "registered output root"
     )
-    _under_mnt_data1(output_root, "registered output root")
+    _approved_artifact_path(output_root, "registered output root")
     repo = _existing_directory(
         Path(registration["tool_repository"]["path"]),
         "registered source repository",
@@ -438,7 +441,7 @@ def validate_user_authorization(
     submission_receipt: Path,
     at_time: datetime | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    path = _under_mnt_data1(
+    path = _approved_artifact_path(
         _existing_file(path, "user authorization"), "user authorization"
     )
     if path.stat().st_mode & 0o222:
@@ -838,7 +841,7 @@ def command_validate_submission(args: argparse.Namespace) -> int:
         arm,
         expected_script,
     ) = _expected_submission_context(args)
-    receipt_path = _under_mnt_data1(
+    receipt_path = _approved_artifact_path(
         _existing_file(args.submission_receipt, "submission receipt"),
         "submission receipt",
     )
@@ -920,7 +923,7 @@ def command_validate_submission(args: argparse.Namespace) -> int:
     log_dir = _existing_directory(
         Path(str(receipt["slurm_log_dir"])), "submitted Slurm log directory"
     )
-    _under_mnt_data1(log_dir, "submitted Slurm log directory")
+    _approved_artifact_path(log_dir, "submitted Slurm log directory")
     if Path.cwd().resolve(strict=True) != log_dir:
         raise ACDWorkflowError("allocation did not start in its registered log directory")
     print(
@@ -949,7 +952,10 @@ def command_plan(args: argparse.Namespace) -> int:
         "source_commit": registration["tool_repository"]["git_commit"],
         "registration_identity_sha256": registration["identity_sha256"],
         "output_root": str(root),
-        "output_root_policy": "all scientific and scheduler artifacts under /mnt/data1",
+        "output_root_policy": (
+            "all scientific and scheduler artifacts under /mnt/data1, "
+            "/mnt/data2, or the exact ldu LACWM Lustre root"
+        ),
         "phases": [
             {
                 "phase": "train",

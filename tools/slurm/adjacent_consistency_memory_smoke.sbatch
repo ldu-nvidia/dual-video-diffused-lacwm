@@ -22,6 +22,15 @@ export PYTHONDONTWRITEBYTECODE=1
 
 die() { echo "ERROR: $*" >&2; exit 2; }
 
+LUSTRE_ARTIFACT_ROOT="/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train"
+approved_artifact_path() {
+  case "$1" in
+    /mnt/data1|/mnt/data1/*|/mnt/data2|/mnt/data2/*|\
+      "$LUSTRE_ARTIFACT_ROOT"|"$LUSTRE_ARTIFACT_ROOT"/*) ;;
+    *) die "$2 must be under an approved artifact root" ;;
+  esac
+}
+
 SOURCE_REPO=""
 EXPECTED_COMMIT=""
 PYTHON_BIN=""
@@ -63,8 +72,10 @@ for value in "$SOURCE_REPO" "$PYTHON_BIN" "$PARENT_SNAPSHOT" "$PARENT_CONFIG" \
   "$SUBMISSION_RECEIPT" "$LOG_DIR"; do
   [[ "$value" == /* ]] || die "all paths must be absolute: $value"
 done
-case "$OUTPUT" in /mnt/data1/*) ;; *) die "output must be under /mnt/data1" ;; esac
-case "$LOG_DIR" in /mnt/data1/*) ;; *) die "logs must be under /mnt/data1" ;; esac
+approved_artifact_path "$OUTPUT" "output"
+approved_artifact_path "$LOG_DIR" "logs"
+approved_artifact_path "$USER_AUTHORIZATION" "user authorization receipt"
+approved_artifact_path "$SUBMISSION_RECEIPT" "submission receipt"
 [[ -d "$SOURCE_REPO" && ! -L "$SOURCE_REPO" ]] || die "source repository is invalid"
 [[ -x "$PYTHON_BIN" ]] || die "Python is unavailable"
 for path in "$PARENT_SNAPSHOT" "$PARENT_CONFIG" "$USER_AUTHORIZATION" \

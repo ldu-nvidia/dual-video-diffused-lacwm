@@ -18,15 +18,18 @@ Set site-specific absolute paths without writing into the source checkout:
 ```bash
 export ACD_SOURCE=/path/to/clean/dual-video-diffused-lacwm
 export ACD_COMMIT=$(git -C "$ACD_SOURCE" rev-parse HEAD)
-export ACD_ROOT=/mnt/data1/ldu/research/Dual\ Video\ Diffusion/artifacts/acd_p0/run-id
-export ACD_RECEIPTS=/mnt/data1/ldu/research/Dual\ Video\ Diffusion/artifacts/acd_p0/receipts
+export ACD_STORAGE=/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train
+export ACD_ROOT="$ACD_STORAGE/artifacts/dual_video_diffusion/acd_p0/run-id"
+export ACD_RECEIPTS="$ACD_STORAGE/artifacts/dual_video_diffusion/acd_p0/receipts"
 export ACD_PYTHON=/absolute/path/to/lacwm-venv/bin/python
 export ACD_EXTERNAL_REPOS=/absolute/path/containing/Causal-Forcing-Flash-WAM-rcm
 ```
 
 The exact commit must be clean and reachable from the audited GitHub remote.
-All artifact/receipt parents must already exist on `/lustre`, `/mnt/data1`, or
-`/mnt/data2` as applicable.
+All output, log, and receipt paths must be under `/mnt/data1`, `/mnt/data2`, or
+the exact user root
+`/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train`.
+No other Lustre prefix is admitted. Required parents must already exist.
 
 ## 1. Exact-source test receipt
 

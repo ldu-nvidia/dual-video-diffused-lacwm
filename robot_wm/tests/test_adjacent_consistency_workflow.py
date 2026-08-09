@@ -13,6 +13,10 @@ from tools.slurm import adjacent_consistency_workflow as workflow
 
 ROOT = Path(__file__).resolve().parents[2]
 SLURM = ROOT / "tools" / "slurm"
+LUSTRE_ROOT = Path(
+    "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/"
+    "users/ldu/lacwm_train"
+)
 
 
 def _authorization(
@@ -69,7 +73,10 @@ def test_slurm_resources_are_exact_b200_non_requeueable(
     assert "validate-submission" in source
     assert "--user-authorization" in source
     assert "--submission-receipt" in source
-    assert "case \"$LOG_DIR\" in /mnt/data1/*)" in source
+    assert 'approved_artifact_path "$LOG_DIR" "logs"' in source
+    for approved_root in ("/mnt/data1", "/mnt/data2", str(LUSTRE_ROOT)):
+        assert approved_root in source
+    assert "/lustre/*" not in source
     executable_source = "\n".join(
         line for line in source.splitlines() if not line.lstrip().startswith("#")
     )
@@ -85,6 +92,78 @@ def test_slurm_resources_are_exact_b200_non_requeueable(
         "git checkout",
     ):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        Path("/mnt/data1/acd/run"),
+        Path("/mnt/data2/acd/run"),
+        LUSTRE_ROOT / "artifacts/dual_video_diffusion/acd/run",
+    ),
+)
+def test_workflow_accepts_each_exact_site_artifact_root(path: Path) -> None:
+    assert workflow._approved_artifact_path(path, "test artifact") == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        Path("relative/acd/run"),
+        Path("/lustre/acd/run"),
+        Path(
+            "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/"
+            "users/another-user/lacwm_train/acd/run"
+        ),
+        LUSTRE_ROOT.parent / "another-project/acd/run",
+        Path("/mnt/data10/acd/run"),
+        Path("/mnt/data1/../etc/acd/run"),
+    ),
+)
+def test_workflow_rejects_paths_outside_exact_site_roots(path: Path) -> None:
+    with pytest.raises(workflow.ACDWorkflowError, match="approved artifact root"):
+        workflow._approved_artifact_path(path, "test artifact")
+
+
+@pytest.mark.parametrize(
+    "filename,required_guards",
+    (
+        (
+            "adjacent_consistency_memory_smoke.sbatch",
+            ("$OUTPUT", "$LOG_DIR", "$USER_AUTHORIZATION", "$SUBMISSION_RECEIPT"),
+        ),
+        (
+            "adjacent_consistency.sbatch",
+            (
+                "$LOG_DIR",
+                "$REGISTRATION",
+                "$USER_AUTHORIZATION",
+                "$SUBMISSION_RECEIPT",
+                "$OUTPUT_ROOT",
+            ),
+        ),
+        (
+            "adjacent_consistency_evaluate.sbatch",
+            (
+                "$LOG_DIR",
+                "$REGISTRATION",
+                "$USER_AUTHORIZATION",
+                "$SUBMISSION_RECEIPT",
+                "$OUTPUT_ROOT",
+            ),
+        ),
+    ),
+)
+def test_wrappers_guard_outputs_logs_and_receipts_with_exact_site_allowlist(
+    filename: str, required_guards: tuple[str, ...]
+) -> None:
+    source = (SLURM / filename).read_text(encoding="utf-8")
+    for variable in required_guards:
+        assert f'approved_artifact_path "{variable}"' in source
+    assert "/mnt/data1|/mnt/data1/*" in source
+    assert "/mnt/data2|/mnt/data2/*" in source
+    assert str(LUSTRE_ROOT) in source
+    assert "/lustre/*" not in source
 
 
 def test_training_wrapper_binds_exact_registered_hydra_semantics() -> None:

@@ -22,6 +22,15 @@ export PYTHONDONTWRITEBYTECODE=1
 
 die() { echo "ERROR: $*" >&2; exit 2; }
 
+LUSTRE_ARTIFACT_ROOT="/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/lacwm_train"
+approved_artifact_path() {
+  case "$1" in
+    /mnt/data1|/mnt/data1/*|/mnt/data2|/mnt/data2/*|\
+      "$LUSTRE_ARTIFACT_ROOT"|"$LUSTRE_ARTIFACT_ROOT"/*) ;;
+    *) die "$2 must be under an approved artifact root" ;;
+  esac
+}
+
 REGISTRATION=""
 REPO_ROOT=""
 PYTHON_BIN=""
@@ -53,7 +62,10 @@ for value in "$REGISTRATION" "$REPO_ROOT" "$PYTHON_BIN" "$USER_AUTHORIZATION" \
   "$SUBMISSION_RECEIPT" "$LOG_DIR"; do
   [[ "$value" == /* ]] || die "all paths must be absolute: $value"
 done
-case "$LOG_DIR" in /mnt/data1/*) ;; *) die "logs must be under /mnt/data1" ;; esac
+approved_artifact_path "$LOG_DIR" "logs"
+approved_artifact_path "$REGISTRATION" "registration receipt"
+approved_artifact_path "$USER_AUTHORIZATION" "user authorization receipt"
+approved_artifact_path "$SUBMISSION_RECEIPT" "submission receipt"
 for path in "$REGISTRATION" "$USER_AUTHORIZATION" "$SUBMISSION_RECEIPT"; do
   [[ -f "$path" && ! -L "$path" ]] || die "required receipt is invalid: $path"
 done
@@ -99,7 +111,7 @@ IFS=$'\t' read -r \
 [[ "$(readlink -f "$REGISTERED_PYTHON")" == "$(readlink -f "$PYTHON_BIN")" ]] || \
   die "Python differs from registration"
 [[ "$REGISTERED_LOG_DIR" == "$LOG_DIR" ]] || die "log directory differs from registration"
-case "$OUTPUT_ROOT" in /mnt/data1/*) ;; *) die "output root must be under /mnt/data1" ;; esac
+approved_artifact_path "$OUTPUT_ROOT" "output root"
 [[ ! -e "$EVALUATION_DIR" && ! -L "$EVALUATION_DIR" ]] || \
   die "evaluation output is not fresh"
 for arm_dir in \
