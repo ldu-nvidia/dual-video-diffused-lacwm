@@ -13,6 +13,12 @@ used 64 B200 GPUs and reached all 60,000 planned optimizer updates.  See
 
 ## Current status
 
+The next evidence-driven execution phase is preregistered in
+[`NEXT_TWELVE_HOUR_EXECUTION_PROTOCOL.md`](docs/experiments/NEXT_TWELVE_HOUR_EXECUTION_PROTOCOL.md).
+It tests causal compressibility of the privileged high-noise correction,
+predicted tracking-corrected rendering, and V-JEPA 2-AC qualification before
+allowing another Wan experiment.
+
 The broader deployable study is now summarized in
 [`TWELVE_HOUR_DUAL_VIDEO_RESEARCH_REPORT.md`](docs/experiments/TWELVE_HOUR_DUAL_VIDEO_RESEARCH_REPORT.md)
 and the living evidence map
