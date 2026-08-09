@@ -1337,6 +1337,18 @@ def _decoded_metrics(
     return mse, temporal
 
 
+def _validate_decoded_horizon(
+    *, model_future_frames: int, decoded_frames: int, raw_frames: int, endpoint: str
+) -> int:
+    future_frames = int(model_future_frames)
+    if future_frames != 8 or decoded_frames < 9 or raw_frames < 9:
+        raise LadderError(
+            f"{endpoint} decoded endpoint requires eight future frames plus "
+            "one history-boundary frame"
+        )
+    return future_frames
+
+
 def _per_sample_future_metrics(
     *,
     velocity: Any,
@@ -1488,7 +1500,12 @@ def _endpoint_rows_j1(output: Path, registration: Mapping[str, Any], fit: Mappin
                     decoded_clean = model.rgb_tokenizer.decode_temporal(
                         video_clean, out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1])
                     )
-                    future_pixel_frames = min(model.num_future_frames, decoded_clean.shape[2])
+                    future_pixel_frames = _validate_decoded_horizon(
+                        model_future_frames=model.num_future_frames,
+                        decoded_frames=decoded_clean.shape[2],
+                        raw_frames=batch["rgb"].shape[1],
+                        endpoint="J1",
+                    )
                     vae_target = _to_uint8_video(
                         decoded_clean[:, :, -future_pixel_frames:]
                     )
@@ -1658,7 +1675,12 @@ def _endpoint_rows_vpm(output: Path, registration: Mapping[str, Any], fit: Mappi
                         prepared["video_clean"],
                         out_hw=(batch["rgb"].shape[-2], batch["rgb"].shape[-1]),
                     )
-                    future_pixel_frames = min(model.num_future_frames, decoded_clean.shape[2])
+                    future_pixel_frames = _validate_decoded_horizon(
+                        model_future_frames=model.num_future_frames,
+                        decoded_frames=decoded_clean.shape[2],
+                        raw_frames=batch["rgb"].shape[1],
+                        endpoint="VPM",
+                    )
                     vae_target = _to_uint8_video(
                         decoded_clean[:, :, -future_pixel_frames:]
                     )
