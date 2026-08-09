@@ -302,6 +302,45 @@ def test_main_python_runtime_preserves_lexical_venv_and_packages(
         stage.validate_main_python_runtime_receipt(receipt)
 
 
+def test_compute_main_runtime_preflight_orders_venv_before_lpips(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = tmp_path / "main" / "bin" / "python"
+    source = tmp_path / "source"
+    frozen_log = tmp_path / "lpips-preflight.log"
+    calls: list[tuple[str, Path]] = []
+    main_receipt = {"identity_sha256": "a" * 64}
+    lpips_receipt = {
+        "identity_sha256": stage.LPIPS_RECEIPT_IDENTITY,
+        "loaded_state_dict_sha256": stage.LPIPS_STATE_DICT_SHA256,
+    }
+    log_receipt = {"path": str(frozen_log), "bytes": 6999, "sha256": "b" * 64}
+
+    def collect(path: Path):
+        calls.append(("venv", path))
+        return main_receipt
+
+    def lpips(path: Path, repo: Path, log: Path):
+        calls.append(("lpips", path))
+        assert repo == source
+        assert log == frozen_log
+        return lpips_receipt, log_receipt
+
+    monkeypatch.setattr(stage, "_collect_main_python_runtime", collect)
+    monkeypatch.setattr(stage, "_validated_offline_lpips", lpips)
+
+    receipt = stage._main_runtime_preflight(entry, source, frozen_log)
+
+    assert calls == [("venv", entry), ("lpips", entry)]
+    assert receipt["kind"] == stage.MAIN_RUNTIME_PREFLIGHT_KIND
+    assert receipt["python"] == str(entry)
+    assert receipt["python_runtime"] == main_receipt
+    assert receipt["lpips_alex"] == lpips_receipt
+    assert receipt["network_access_permitted"] is False
+    assert stage.identity_valid(receipt)
+
+
 def test_cache_runtime_declares_complete_mcap_decode_stack() -> None:
     assert stage.CACHE_RUNTIME_CALIBRATION_PREFLIGHT_TRAIN_INDEX == 1
     assert stage.CACHE_RUNTIME_CALIBRATION_PREFLIGHT_IDENTITY == (
@@ -688,7 +727,8 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python" in launch_runbook
     assert "PYTHONNOUSERSITE=1" in launch_runbook
     assert "--cache-python $CACHE_PYTHON_BIN" in launch_runbook
-    assert launch_runbook.count("-20260808-$SHORT-v3") == 3
+    assert launch_runbook.count("-20260808-$SHORT-v4") == 3
+    assert "-20260808-$SHORT-v3" not in launch_runbook
     assert "-20260808-$SHORT-v2" not in launch_runbook
     assert "-20260808-$SHORT-v1" not in launch_runbook
     assert launch_runbook.count(
@@ -697,8 +737,26 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "$CACHE_PYTHON_BIN tools/physics_flow_stage1.py audit-cache" not in launch_runbook
     assert "p._collect_main_python_runtime" in launch_runbook
     assert "args.python.expanduser().resolve" not in stage_source
-    assert "python = lexical_absolute(args.python)" in stage_source
+    assert "python = lexical_absolute(python_entry)" in stage_source
     assert '"python_runtime": main_python_runtime' in stage_source
+    login_preflight = launch_runbook.split("## 2. Freeze", 1)[1].split(
+        "## 3. Submit", 1
+    )[0]
+    assert "physics_flow_lpips.py" not in login_preflight
+    register_wrapper = launch_runbook.split("REGISTER_JOB=", 1)[1].split(
+        "CACHE_TRAIN_JOB=", 1
+    )[0]
+    assert register_wrapper.index("preflight-main-runtime") < register_wrapper.index(
+        "register-cache"
+    )
+    assert "--lpips-preflight-log $LPIPS_PREFLIGHT_LOG" in register_wrapper
+    compute_preflight = stage_source.split(
+        "def _main_runtime_preflight", 1
+    )[1].split("def command_preflight_main_runtime", 1)[0]
+    assert compute_preflight.index("_collect_main_python_runtime") < (
+        compute_preflight.index("_validated_offline_lpips")
+    )
+    assert '"compute_preflight_passed_before_cache_output"' in stage_source
     register_body = stage_source.split("def command_register_cache", 1)[1].split(
         "def validate_cache_registration", 1
     )[0]

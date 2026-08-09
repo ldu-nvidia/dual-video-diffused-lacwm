@@ -9,6 +9,9 @@ measured robot state.
 
 The workflow has fail-closed state transitions:
 
+``preflight-main-runtime``
+    On an allocated compute node, retain the lexical LACWM venv and construct
+    the exact frozen offline LPIPS scorer before any cache output.
 ``register-cache``
     Bind both immutable RGB/action manifests, camera eligibility, deterministic
     shuffled donors, the independently passed raw-renderer gate, and source.
@@ -269,6 +272,7 @@ CACHE_RUNTIME_CALIBRATION_PREFLIGHT_IDENTITY = (
 )
 MAIN_PYTHON_RUNTIME_KIND = "raw_physics_flow_main_python_runtime_v1"
 MAIN_PYTHON_RUNTIME_SCHEMA_VERSION = 1
+MAIN_RUNTIME_PREFLIGHT_KIND = "raw_physics_flow_main_runtime_preflight_v1"
 MAIN_PYTHON_RUNTIME_DISTRIBUTIONS = {
     "lpips": ("lpips", "0.1.4"),
     "torch": ("torch", "2.7.1+cu128"),
@@ -2579,22 +2583,13 @@ def _validated_cache_receipt(metadata_path: Path, split: str) -> dict[str, Any]:
     }
 
 
-def _registered_runtime(args: argparse.Namespace, source_repo: Path) -> dict[str, Any]:
-    # Keep the lexical venv entry. ``Path.resolve`` here invokes the shared
-    # base CPython and discards the LACWM site-packages (including LPIPS).
-    try:
-        python = lexical_absolute(args.python)
-    except CacheRuntimeError as exc:
-        raise PhysicsFlowStage1Error("registered Python runtime is invalid") from exc
-    main_python_runtime = _collect_main_python_runtime(python)
-    wan = args.wan_dir.expanduser().resolve(strict=True)
-    videox = args.videox_home.expanduser().resolve(strict=True)
-    if not wan.is_dir() or wan.is_symlink() or not videox.is_dir() or videox.is_symlink():
-        raise PhysicsFlowStage1Error("Wan/VideoX runtime directory is invalid")
-    null_prompt = wan / "null_prompt_umt5.pt"
-    scheduler = videox / "config" / "wan2.1" / "wan_civitai.yaml"
-    if not null_prompt.is_file() or not scheduler.is_file():
-        raise PhysicsFlowStage1Error("Wan null prompt or scheduler config is unavailable")
+def _validated_offline_lpips(
+    python: Path,
+    source_repo: Path,
+    lpips_preflight_log: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Reconstruct and compare the exact frozen offline LPIPS instrument."""
+
     lpips_helper = source_repo / "tools" / "physics_flow_lpips.py"
     if not lpips_helper.is_file() or lpips_helper.is_symlink():
         raise PhysicsFlowStage1Error("offline LPIPS receipt helper is unavailable")
@@ -2648,17 +2643,96 @@ def _registered_runtime(args: argparse.Namespace, source_repo: Path) -> dict[str
         or lpips_receipt.get("versions", {}).get("torchvision") != "0.22.1+cu128"
     ):
         raise PhysicsFlowStage1Error("offline LPIPS receipt contract differs")
-    lpips_preflight = file_record(args.lpips_preflight_log)
+    lpips_preflight = file_record(lpips_preflight_log)
     if (
         lpips_preflight["sha256"] != LPIPS_PREFLIGHT_LOG_SHA256
         or lpips_preflight["bytes"] != 6999
-        or _last_json_object(args.lpips_preflight_log, "LPIPS preflight")
+        or _last_json_object(lpips_preflight_log, "LPIPS preflight")
         != lpips_receipt
     ):
         raise PhysicsFlowStage1Error("offline LPIPS preflight receipt differs")
+    return lpips_receipt, lpips_preflight
+
+
+def _main_runtime_preflight(
+    python_entry: Path,
+    source_repo: Path,
+    lpips_preflight_log: Path,
+) -> dict[str, Any]:
+    """Run the lightweight venv probe and heavyweight scorer on compute."""
+
+    try:
+        python = lexical_absolute(python_entry)
+    except CacheRuntimeError as exc:
+        raise PhysicsFlowStage1Error("registered Python runtime is invalid") from exc
+    main_python_runtime = _collect_main_python_runtime(python)
+    lpips_receipt, lpips_preflight = _validated_offline_lpips(
+        python,
+        source_repo,
+        lpips_preflight_log,
+    )
+    return identity_payload(
+        {
+            "schema_version": MAIN_PYTHON_RUNTIME_SCHEMA_VERSION,
+            "kind": MAIN_RUNTIME_PREFLIGHT_KIND,
+            "python": str(python),
+            "python_runtime": main_python_runtime,
+            "lpips_alex": lpips_receipt,
+            "lpips_preflight_job_id": 507388,
+            "lpips_preflight_log": lpips_preflight,
+            "network_access_permitted": False,
+            "protected_test_accessed": False,
+        }
+    )
+
+
+def command_preflight_main_runtime(args: argparse.Namespace) -> int:
+    source = clean_repository(
+        args.source_repo,
+        args.expected_commit,
+        "main-runtime preflight source",
+    )
+    preflight = _main_runtime_preflight(
+        args.python,
+        Path(source["path"]),
+        args.lpips_preflight_log,
+    )
+    print(
+        json.dumps(
+            identity_payload(
+                {
+                    **preflight,
+                    "source_repository": source,
+                    "status": "compute_preflight_passed_before_cache_output",
+                    "protected_test_accessed": False,
+                }
+            ),
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _registered_runtime(args: argparse.Namespace, source_repo: Path) -> dict[str, Any]:
+    # Keep the lexical venv entry. ``Path.resolve`` here invokes the shared
+    # base CPython and discards the LACWM site-packages (including LPIPS).
+    preflight = _main_runtime_preflight(
+        args.python,
+        source_repo,
+        args.lpips_preflight_log,
+    )
+    python = Path(preflight["python"])
+    wan = args.wan_dir.expanduser().resolve(strict=True)
+    videox = args.videox_home.expanduser().resolve(strict=True)
+    if not wan.is_dir() or wan.is_symlink() or not videox.is_dir() or videox.is_symlink():
+        raise PhysicsFlowStage1Error("Wan/VideoX runtime directory is invalid")
+    null_prompt = wan / "null_prompt_umt5.pt"
+    scheduler = videox / "config" / "wan2.1" / "wan_civitai.yaml"
+    if not null_prompt.is_file() or not scheduler.is_file():
+        raise PhysicsFlowStage1Error("Wan null prompt or scheduler config is unavailable")
     return {
         "python": str(python),
-        "python_runtime": main_python_runtime,
+        "python_runtime": preflight["python_runtime"],
         "wan_dir": str(wan),
         "videox_home": str(videox),
         "null_prompt": file_record(null_prompt),
@@ -2669,9 +2743,9 @@ def _registered_runtime(args: argparse.Namespace, source_repo: Path) -> dict[str
         ),
         "scheduler_config": file_record(scheduler),
         "videox_commit": git(videox, "rev-parse", "HEAD"),
-        "lpips_alex": lpips_receipt,
+        "lpips_alex": preflight["lpips_alex"],
         "lpips_preflight_job_id": 507388,
-        "lpips_preflight_log": lpips_preflight,
+        "lpips_preflight_log": preflight["lpips_preflight_log"],
         "protected_test_accessed": False,
     }
 
@@ -4836,6 +4910,15 @@ def command_audit_study(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    runtime_preflight = subparsers.add_parser("preflight-main-runtime")
+    runtime_preflight.add_argument("--source-repo", type=Path, required=True)
+    runtime_preflight.add_argument("--expected-commit", required=True)
+    runtime_preflight.add_argument("--python", type=Path, required=True)
+    runtime_preflight.add_argument(
+        "--lpips-preflight-log", type=Path, required=True
+    )
+    runtime_preflight.set_defaults(handler=command_preflight_main_runtime)
 
     register_cache = subparsers.add_parser("register-cache")
     register_cache.add_argument("--output", type=Path, required=True)

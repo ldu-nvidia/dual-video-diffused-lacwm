@@ -44,8 +44,9 @@ venv with user-site disabled, and content-binds its site-packages plus the
 LPIPS, torch, and torchvision module and distribution `RECORD` files. Both the
 runtime probe and offline LPIPS subprocess use the lexical entry. Registration
 stores that same entry for all subsequent train/evaluation commands, and every
-registration replay revalidates the receipt. The runbook also performs this
-probe before creating a cache or study root.
+registration replay revalidates the receipt. The runbook performs the
+lightweight venv/package probe on login and the model-constructing receipt on a
+compute node before creating a cache root.
 
 Pinned main-runtime operator checks are:
 
@@ -56,9 +57,29 @@ Pinned main-runtime operator checks are:
 | `torch-2.7.1+cu128.dist-info/RECORD` | `277c9bbc200c0507440f5b6da4b681199f7dd72250e52028e308aa81eb285d6b` |
 | `torchvision-0.22.1+cu128.dist-info/RECORD` | `ae8a47757ba5c4a89c8d2f3bdbaefb7f9ca7a0cc4af350fdb58288885fde4cd2` |
 
-A relaunch requires another independently audited source commit and fresh
-commit-derived `v3` source/cache/study/log paths. Neither the successful `v2`
-caches nor any failed-chain path may be resumed or overwritten.
+## Preserved `0561b71-v3` operator-preflight failure: no jobs submitted
+
+After independent audit of exact source
+`0561b71af1056b19840d144f78d767f8aac5d9d4`, the operator froze the clean
+source checkout `.../src/worktrees/raw-physics-flow-stage1-0561b71`. Immutable
+hashes and the lightweight lexical-runtime receipt passed with identity
+`41240b7ae2372d37ae7951a3397c26d33e144c6fbc88f0e459d273b5ff3cc66c`.
+The runbook then attempted to construct the offline AlexNet/LPIPS scorer on
+login node 002. That login cgroup could not allocate a 150,994,944-byte CPU
+tensor and stopped with allocator errno 12. `set -e` stopped before log-root
+creation and before any `sbatch` call. No v3 cache, study, log, registration,
+training, or evaluation path was created; only the clean source checkout is
+preserved.
+
+The repair keeps the lightweight lexical receipt on login but moves the
+heavyweight, network-denied LPIPS construction into the compute registration
+wrapper. `preflight-main-runtime` reconstructs and checks the exact frozen
+receipt, loaded-state identity, AlexNet checkpoint, versions, and preflight log
+before `register-cache` can create any output. Study registration repeats the
+same check independently. A launch requires another independently audited
+source commit and fresh commit-derived `v4` source/cache/study/log paths.
+Neither the successful `v2` caches, the `0561b71` source, nor any failed-chain
+path may be resumed or overwritten.
 
 ## Preserved second failed chain: cache-renderer runtime
 
