@@ -1,7 +1,8 @@
 # Next twelve-hour dual-video diffusion result
 
-Status: final evidence ledger; both prospectively registered paths are
-terminal and the frozen analyses have been reproduced.
+Status: final evidence ledger; the raw-flow and adjacent-consistency paths are
+terminal, while recurrent delta passed its renderer prerequisite and has
+advanced to a controlled low-NFE integration handoff.
 
 ## Question
 
@@ -24,6 +25,7 @@ causal and low-NFE gates.
 | Early latent subspace forcing | yes | matched two-call NFE screen | lowpass redundant with VPM; HH slightly better; aligned path 22.1% slower | `NO_GO_GENERIC_EARLY_SUBSPACE` |
 | Raw predicted robot flow | yes | frozen v7 RAW-FLOW versus matched FLOW-OFF, unmodified VPM parent, and shuffled/held/time-shifted controls at NFE 1/2/4 | NFE-1 top decoded MSE +1.587% versus matched-off, but temporal +0.201% is uncertain, LPIPS is -1.672%, all-frame guardrails fail, the parent is better, and causal controls do not attribute the gain to correct flow | `STOP_FIXED_RAW_FLOW` |
 | Feature-free adjacent consistency | yes | RF-control versus consistency, 400 updates, full objective/readout factorial at NFE 1/2/4 | closest selectable point is NFE-4: temporal +4.963%, but decoded -22.009%, LPIPS -97.295%, and latent -55.963%; no NFE passes | `NO_GO_ACD` |
+| Recurrent delta robot flow | yes | frozen fit384 predictor on the full 55-episode renderer-endpoint-unopened D405 census; three flow-superiority plus six spatial-NI gates | flow EPE +41.880% versus raw, +34.705% versus absolute ridge, +88.274% versus shuffled; all nine Holm-controlled gates pass | `GO_RECURRENT_DELTA_WAN_SCREEN` |
 
 ## Operational evidence
 
@@ -180,6 +182,22 @@ that root. A local post-run visual contact sheet is stored outside Git at
 `artifacts/acd_p0/acd-p0-20260809-6063ec5-v7/acd_p0_contact_sheet.png`, with
 SHA-256 `223225be4855456b969c42d7eb15da6a4bb7c56a2214cc10c847c2a4a505cde5`.
 
+Recurrent-delta renderer confirmation canonical root:
+
+```text
+/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/
+  lacwm_train/artifacts/dual_video_diffusion/recurrent_delta_spatial_confirmation/
+  recurrent-delta-spatial-confirmation-renderer55-seed20260809-92cc958-v1
+```
+
+Its registration, causal-closure, evaluation, analysis, and completion
+identities are respectively
+`db1c29e5a89c35b8b1b8c9a4ba8d1be2ef796c3793961fcd4204db46d363d42d`,
+`0b8f50bf3ac84e9932870b3c7cf430618bc49006f1306cf869328a5f65ebdcfc`,
+`d0f09573e9f91f84c86007730f39a0fd348d6bd6dc723859de9bdcd329525483`,
+`2426a1546a43403fc09f7d8bb60475526e4d342586727c880dd005aad99010f8`,
+and `a94afb1e39ccee4b80298182f287431409fbce47ae260c94d4324fa23081e5ff`.
+
 ## Claim boundary
 
 The completed screens support a narrower and more useful conclusion: clean
@@ -193,17 +211,23 @@ positive claim requires an inference-available state, a matched stronger
 baseline, a prospective low-NFE endpoint, action sensitivity, and a gain large
 enough to survive uncertainty and complete latency accounting.
 
-The only remaining auxiliary with a large causal effect is the recurrent
-delta-response robot-state predictor: on 24 fresh clips it reduced rendered
-robot-flow EPE by 47.25% versus raw commands and 40.78% versus the absolute
-ridge, with 24/24 favorable clips. It did not receive a generator handoff
-because four spatial-retention intervals crossed zero. Because ACD-P0 is
-negative, the next justified experiment is a separately preregistered, larger
-fresh spatial non-inferiority confirmation of recurrent delta. Only a joint
-flow-plus-spatial pass may authorize an equal-Wan-call recurrent-flow screen
-against VPM@1 with
-off, shuffled, held, and wrong-time controls. ACD-P0 is negative, so that
-recurrent-delta confirmation is now the highest-priority causal-auxiliary test.
+The recurrent delta-response robot-state predictor has now cleared that
+prerequisite. The exact fit384 model was frozen and evaluated on the complete
+55-episode renderer-endpoint-unopened D405 census. Mean rendered robot-flow EPE
+fell from `4.628886` to `2.690298` pixels versus raw planned commands
+(`+41.880%`), from `4.120211` to `2.690298` versus absolute ridge (`+34.705%`),
+and from `22.943593` to `2.690298` versus episode-shuffled commands
+(`+88.274%`). All three flow-superiority and all six spatial non-inferiority
+gates passed their separate Holm families. The tightest ridge-IoU lower bound
+was `-0.002832` against the frozen `-0.005` margin; a parametric sensitivity
+misses that margin narrowly, so the result authorizes a controlled generator
+screen, not a broad spatial-equivalence claim.
+
+This confirmation is train-only and endpoint-specific. Metadata auditing found
+that all 55 episodes had appeared in unrelated experiment populations, although
+their renderer endpoints had not been opened. No Wan call or generated-video
+metric was involved. The exact result and repair chronology are recorded in
+`RECURRENT_DELTA_SPATIAL_CONFIRMATION_RESULT.md`.
 
 ## Final handoff
 
@@ -212,12 +236,12 @@ Raw-flow v8 is terminal at `STOP_FIXED_RAW_FLOW`; ACD-P0 is terminal at
 loss was still falling, and do not launch a stochastic object/contact residual
 that was conditional on raw-flow success.
 
-Next, preregister the 55 still-unopened D405 train episodes (or a larger new
-population) for a recurrent-delta spatial non-inferiority confirmation. Preserve
-the already established motion gates and define practical spatial margins
-before opening those outcomes. If the joint renderer gate passes, run one
-equal-call generator screen against VPM@1 with recurrent-flow off, aligned,
-episode-shuffled, held-current, and wrong-time controls. If it fails, close the
-deterministic geometry branch. A full Causal-rCM/Flash-WAM-style consistency
-recipe remains a separate baseline-reproduction project; this 400-update
-ACD-P0 result must not be generalized to those untested methods.
+The justified next experiment is now an equal-Wan-call recurrent-flow screen
+against VPM@1 with recurrent-flow off, aligned, episode-shuffled, held-current,
+and nonwrapping wrong-time controls. First substitute the recurrent field into
+the frozen RAW-FLOW checkpoint to separate field quality from retraining. A
+clear generated-video gain that disappears under controls may authorize matched
+recurrent-field training; otherwise stop without spending another full training
+pair. A full Causal-rCM/Flash-WAM-style consistency recipe remains a separate
+baseline-reproduction project; this 400-update ACD-P0 result must not be
+generalized to those untested methods.
