@@ -57,6 +57,9 @@ def arm_values(registration: dict[str, Any], arm: stage.Arm) -> dict[str, str]:
         "training_root": str(root / "training"),
         "arm_plan": str(root / "arm_plans" / f"{arm.code.lower()}.json"),
         "parent_snapshot": registration["parent"]["snapshot"]["path"],
+        "parent_resolved_config": registration["parent"]["resolved_config"][
+            "path"
+        ],
         "train_manifest": train_input["manifest"]["path"],
         "train_rgb_metadata": train_input["cache"]["metadata"]["path"],
         "train_flow_metadata": registration["flow_caches"]["train"]["metadata"][
@@ -109,6 +112,7 @@ def command_arm_values(args: argparse.Namespace) -> int:
             "training_root",
             "arm_plan",
             "parent_snapshot",
+            "parent_resolved_config",
             "train_manifest",
             "train_rgb_metadata",
             "train_flow_metadata",
@@ -149,6 +153,9 @@ def command_write_arm_plan(args: argparse.Namespace) -> int:
             "run_identity_sha256": values["run_identity"],
             "run_dir": values["run_dir"],
             "parent_snapshot_sha256": stage.PARENT_SNAPSHOT_SHA256,
+            "parent_resolved_config_sha256": (
+                stage.PARENT_RESOLVED_CONFIG_SHA256
+            ),
             "train_flow_metadata_sha256": values["train_flow_metadata_sha256"],
             "train_raw_sha256": values["train_raw_sha256"],
             "seed": 1234,
@@ -237,6 +244,14 @@ def command_plan(args: argparse.Namespace) -> int:
         "--batch-size",
         "2",
     ]
+    parent_parity = [
+        registration["runtime"]["python"],
+        str(repo / "tools" / "physics_flow_parent_parity.py"),
+        "--registration",
+        str(args.registration),
+        "--output",
+        str(root / stage.PARENT_PARITY_FILENAME),
+    ]
     print(
         json.dumps(
             {
@@ -244,6 +259,11 @@ def command_plan(args: argparse.Namespace) -> int:
                 "mode": "no_commands_executed_no_files_created",
                 "registration_identity_sha256": registration["identity_sha256"],
                 "arms": arms,
+                "native_parent_sampler_parity": {
+                    "argv": parent_parity,
+                    "shell": shlex.join(parent_parity),
+                    "must_complete_before_validation_open": True,
+                },
                 "evaluation": {"argv": evaluation, "shell": shlex.join(evaluation)},
                 "finalization": [
                     str(repo / "tools" / "physics_flow_stage1.py"),

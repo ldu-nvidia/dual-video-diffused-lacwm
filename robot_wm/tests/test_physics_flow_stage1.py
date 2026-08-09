@@ -25,11 +25,24 @@ snapshot_receipt = _load(
     "snapshot_model_state_receipt_test",
     "tools/snapshot_model_state_receipt.py",
 )
+parent_adapter = _load(
+    "physics_flow_parent_vpm_test",
+    "tools/physics_flow_parent_vpm.py",
+)
+parent_parity_tool = _load(
+    "physics_flow_parent_parity_test",
+    "tools/physics_flow_parent_parity.py",
+)
 
 
 def test_endpoint_grid_is_equal_call_raw_only() -> None:
-    assert len(stage.ENDPOINTS) == 18
-    assert {endpoint.arm for endpoint in stage.ENDPOINTS} == {"FLOW-OFF", "RAW-FLOW"}
+    assert len(stage.ENDPOINTS) == 21
+    assert {arm.code for arm in stage.ARMS} == {"FLOW-OFF", "RAW-FLOW"}
+    assert {endpoint.arm for endpoint in stage.ENDPOINTS} == {
+        "FLOW-OFF",
+        "RAW-FLOW",
+        "PARENT-VPM",
+    }
     assert {
         endpoint.condition_source
         for endpoint in stage.ENDPOINTS
@@ -39,8 +52,13 @@ def test_endpoint_grid_is_equal_call_raw_only() -> None:
     assert all(
         endpoint.condition_source == "off"
         for endpoint in stage.ENDPOINTS
-        if endpoint.arm == "FLOW-OFF"
+        if endpoint.arm in {"FLOW-OFF", "PARENT-VPM"}
     )
+    assert [
+        endpoint.nfe
+        for endpoint in stage.ENDPOINTS
+        if endpoint.arm == "PARENT-VPM"
+    ] == [1, 2, 4]
     source = (ROOT / "tools/physics_flow_stage1.py").read_text()
     assert "recurrent_delta" not in source
     assert "hybrid_anchor_raw_delta" not in source
@@ -50,6 +68,7 @@ def test_endpoint_grid_is_equal_call_raw_only() -> None:
     assert stage.PARENT_SNAPSHOT_SHA256.startswith("de65e832")
     assert stage.PARENT_RUN_IDENTITY_SHA256.startswith("d79c3699")
     assert stage.PARENT_CANONICAL_MODEL_STATE_SHA256.startswith("d1231b8b")
+    assert stage.PARENT_RESOLVED_CONFIG_SHA256.startswith("ae3ffd27")
     assert stage.LEGACY_REJECTED_SNAPSHOT_SHA256.startswith("f67c7bae")
 
 
@@ -73,6 +92,50 @@ def test_snapshot_receipt_hashes_scalar_and_records_lineage(tmp_path: Path) -> N
     assert receipt["model_tensor_count"] == 2
     assert len(receipt["canonical_model_state_sha256"]) == 64
     assert set(tensors) == {"matrix", "scalar"}
+
+
+def test_parent_parity_hash_handles_scalar_and_native_artifacts() -> None:
+    assert len(parent_parity_tool._torch_tensor_hash(torch.tensor(0.25))) == 64
+    noise = torch.randn(1, 16, 4, 2, 3)
+    predicted = torch.linspace(-1.0, 1.0, 1 * 3 * 8 * 2 * 3).reshape(
+        1, 3, 8, 2, 3
+    )
+    decoded = (
+        ((predicted.float().clamp(-1.0, 1.0) + 1.0) * 127.5)
+        .round()
+        .to(torch.uint8)
+    )
+
+    class FakeParent:
+        _last_sampling_counters = {
+            "wan_calls_by_source_nfe": {"off:nfe_1": 1},
+            "wan_calls_total": 1,
+            "online_teacher_calls": 0,
+            "auxiliary_clean_available": 0,
+            "deployment_mode": 1,
+        }
+
+        def pop_visualization_artifacts(self):
+            return {
+                "deployment_mode": torch.tensor([1]),
+                "auxiliary_clean_available": torch.tensor([0]),
+                "online_teacher_call_count": torch.tensor([0]),
+                "evaluation_nfe_steps": torch.tensor([1]),
+                "video_final_off_nfe_1": torch.zeros(1, 16, 4, 2, 3),
+                "decoded_future_off_nfe_1": decoded,
+                "video_initial_state": noise.to(torch.float16),
+                "sample_ids": torch.tensor([7_000_000]),
+            }
+
+    result = parent_adapter.extract_native_parent_artifacts(
+        FakeParent(),
+        nfe=1,
+        predicted_future=predicted,
+        expected_video_noise=noise,
+    )
+    assert result["wan_calls"] == 1
+    assert result["native_public_sampler"] == "sample_future_deployable"
+    assert torch.equal(result["decoded_uint8"], decoded)
 
 
 def test_support_weighted_pool_and_bottom_padding() -> None:
@@ -161,6 +224,10 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
         assert token in protocol
     assert "--no-requeue" in launcher
     assert "compare-traces" in launcher
+    assert "physics_flow_parent_parity.py" in launcher
+    assert launcher.index('"$PYTHON_BIN" "$PARENT_PARITY"') < launcher.rindex(
+        '"$PYTHON_BIN" -m torch.distributed.run'
+    )
     assert "every endpoint for every registered" in evaluator
     assert evaluator.index("materialized_by_seed.append") < evaluator.index(
         "dataset.scoring_batch"
@@ -169,3 +236,10 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "offline AlexNet checkpoint is absent" in lpips_helper
     assert "network access is forbidden" in lpips_helper
     assert "loaded_state_dict_sha256" in lpips_helper
+    parent_adapter = (ROOT / "tools/physics_flow_parent_vpm.py").read_text()
+    parent_parity = (ROOT / "tools/physics_flow_parent_parity.py").read_text()
+    assert "model.sample_future_deployable(" in parent_adapter
+    assert "model.sample_future_deployable(" in parent_parity
+    assert "rgb[index, 0:5]" in parent_parity
+    assert "rgb[index, 5" not in parent_parity
+    assert "bitwise_parity_required" in parent_parity
