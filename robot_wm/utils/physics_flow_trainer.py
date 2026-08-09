@@ -182,7 +182,7 @@ class PhysicsFlowTrainer(Trainer):
         for path, expected_split in ((train_metadata, "train"), (val_metadata, "val")):
             payload = json.loads(path.read_text())
             if (
-                payload.get("schema") != "raw-physics-flow-cache-v2"
+                payload.get("schema") != "raw-physics-flow-cache-v3"
                 or payload.get("complete") is not True
                 or payload.get("split") != expected_split
                 or payload.get("renderer_decision")

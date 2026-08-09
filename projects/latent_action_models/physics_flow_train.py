@@ -18,6 +18,20 @@ from robot_wm.utils.physics_flow_trainer import PhysicsFlowTrainer
 
 
 logger = logging.getLogger(__name__)
+EXPECTED_EVALUATION_NOISE_SEED = 20_260_729
+
+
+def _validate_protocol_config(cfg: DictConfig) -> None:
+    """Fail before distributed/model setup when the endpoint seed can diverge."""
+
+    model_seed = int(cfg.model.dual_diffusion.evaluation_noise_seed)
+    forward_seed = int(
+        cfg.model.forward_model.dual_diffusion.evaluation_noise_seed
+    )
+    if {model_seed, forward_seed} != {EXPECTED_EVALUATION_NOISE_SEED}:
+        raise RuntimeError(
+            "physics-flow arms require native-parent evaluation seed 20260729"
+        )
 
 
 def _seed_all(seed: int) -> None:
@@ -50,6 +64,7 @@ def _teardown(trainer: PhysicsFlowTrainer) -> None:
 
 
 def _setup(cfg: DictConfig) -> PhysicsFlowTrainer:
+    _validate_protocol_config(cfg)
     dist.init_process_group()
     _seed_all(int(cfg.seed))
     trainer = None

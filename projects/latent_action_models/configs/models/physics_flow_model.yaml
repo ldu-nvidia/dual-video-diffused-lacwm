@@ -27,4 +27,8 @@ dual_diffusion:
   capture_latent_trajectories: false
   artifact_batch_limit: null
   evaluation_nfe_steps: [1, 2, 4]
+  # The untouched de65 parent was trained/evaluated with this stateless base
+  # seed.  All Stage-1 arms must share it so same-sample endpoint noise is
+  # identical before any model is instantiated.
+  evaluation_noise_seed: 20260729
   evaluation_condition_sources: [autonomous]

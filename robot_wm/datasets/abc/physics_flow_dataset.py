@@ -102,7 +102,7 @@ class ABCPhysicsFlowDataset(ABCVideoResidualAnchorDataset):
         ):
             raise ValueError("flow identities must be lowercase SHA-256")
         if (
-            meta.get("schema") != "raw-physics-flow-cache-v2"
+            meta.get("schema") != "raw-physics-flow-cache-v3"
             or meta.get("complete") is not True
             or meta.get("split") != self.expected_split
             or int(meta.get("clip_count", -1)) != self.expected_clip_count

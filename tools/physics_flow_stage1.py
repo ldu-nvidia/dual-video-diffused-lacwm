@@ -115,6 +115,7 @@ DONOR_SEED = 20260831
 BOOTSTRAP_SEED = 20260831
 BOOTSTRAP_SAMPLES = 10_000
 NOISE_SEEDS = (0, 1, 2, 3)
+EVALUATION_NOISE_SEED = 20260729
 NFE_GRID = (1, 2, 4)
 PRIMARY_NFE = 1
 PRIMARY_MIN_POINT_PERCENT = 3.0
@@ -344,6 +345,209 @@ CACHE_AUDIT_KIND = "raw_physics_flow_cache_audit"
 STUDY_REGISTRATION_KIND = "raw_physics_flow_stage1_registration"
 STUDY_ANALYSIS_KIND = "raw_physics_flow_stage1_analysis"
 STUDY_AUDIT_KIND = "raw_physics_flow_stage1_audit"
+V5_NUMERIC_REFERENCE_KIND = "raw_physics_flow_v5_numeric_reference"
+V5_SOURCE_COMMIT = "e632344a8f031a520640779d130d805aa1dd0b6e"
+V5_CACHE_ROOT = (
+    "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/"
+    "lacwm_train/artifacts/dual_video_diffusion/raw_physics_flow_cache/"
+    "raw-physics-flow-cache-20260808-e632344-v5"
+)
+V5_STUDY_ROOT = (
+    "/lustre/fsw/portfolios/coreai/projects/coreai_chef_pretrain/users/ldu/"
+    "lacwm_train/artifacts/dual_video_diffusion/raw_physics_flow_stage1/"
+    "raw-physics-flow-stage1-20260808-e632344-v5"
+)
+V5_CACHE_REGISTRATION = {
+    "bytes": 767_589,
+    "sha256": "6a91a46c9f8da312239441582b753f4748d677346235a6903229b6b388b31f46",
+    "identity_sha256": (
+        "930668450392711e7452329516a252cffd5b6a00b95fc2977aef0fd37b1aefb5"
+    ),
+}
+V5_CACHE_SPLITS = {
+    "train": {
+        "count": TRAIN_COUNT,
+        "metadata": {
+            "bytes": 3_423,
+            "sha256": (
+                "9c5287167eab78d9108e264dd7da34a3fc398d22548a1b581f30ab45f928ce03"
+            ),
+            "identity_sha256": (
+                "44c5a4aa60aef996b29277a6146b223009fce74279586d0cdddbfb4b7856d569"
+            ),
+        },
+        "audit": {
+            "bytes": 1_152,
+            "sha256": (
+                "d0ee12556b383ccd674340433fda01188a60e14be3f497a27e3179d208a2e912"
+            ),
+            "identity_sha256": (
+                "5eafa52b0789d9bb534679368cac8b86b25820660617630cd757f8a9ca26bee9"
+            ),
+        },
+        "row_lineage": {
+            "bytes": 3_680_339,
+            "sha256": (
+                "1760e8ca21a3cca97e1f5fe11bb9986dad91354286425c05d402c776c9036eb3"
+            ),
+        },
+        "complete": {
+            "bytes": 2_583,
+            "sha256": (
+                "e893c425e0f0d7c3cc1c7f23f6fb662208d9aae16b69ebaaca9d54e1b62e6b26"
+            ),
+            "identity_sha256": (
+                "305b5681ddbe5b8d9c1d33d535f3854dc588df6b94b37ef4351d5a3dae786494"
+            ),
+        },
+        "arrays": {
+            "raw": {
+                "bytes": 31_457_408,
+                "sha256": (
+                    "fda3f874e0f9bccb1a830ac29f966a467e1e019c9f073a7fbc93cda29d3e8ca4"
+                ),
+            },
+            "episode_shuffled": {
+                "bytes": 31_457_408,
+                "sha256": (
+                    "04f7c4fe25d57e82b64bc1d2909562f09e73d344847a613aeb89dd4711d65048"
+                ),
+            },
+            "timeshift_plus_one": {
+                "bytes": 31_457_408,
+                "sha256": (
+                    "dbc9bf2bf1902054ed9911d91c3b1d18275c6d40edb1743c228fb32d3aa82123"
+                ),
+            },
+            "hold_current": {
+                "bytes": 31_457_408,
+                "sha256": (
+                    "65e77c06b71775e76f67a7141a2fdb0871f80e24913b1ea6e1855f68dc03cf77"
+                ),
+            },
+        },
+    },
+    "val": {
+        "count": VAL_COUNT,
+        "metadata": {
+            "bytes": 3_400,
+            "sha256": (
+                "e93eea9072dde155487be152d82ac83b9b35a1c836dadec9907eff595a879488"
+            ),
+            "identity_sha256": (
+                "695500f6d6c974e61f50d93bffa71c97341a360a3f1b0103b4ad71d5e4bb1d1e"
+            ),
+        },
+        "audit": {
+            "bytes": 1_146,
+            "sha256": (
+                "6a5b5142dcedaf6e83cc4c991b070bf90dcc7d2c556561a87f9094a54e9ae68c"
+            ),
+            "identity_sha256": (
+                "5c10199db33b5250859ffb94147ea768e153e83f151790f423a98adf568a7216"
+            ),
+        },
+        "row_lineage": {
+            "bytes": 438_027,
+            "sha256": (
+                "d07f67654b5ec74d58df4bd0bf23cdae45e23615c5dee57cbc0b01e77d6aa4bd"
+            ),
+        },
+        "complete": {
+            "bytes": 2_564,
+            "sha256": (
+                "927c348edfae4990b5b54e4b66bc11f37e0faa6fedffe88c5f1b4ebaf1159b3c"
+            ),
+            "identity_sha256": (
+                "98c70588e7abe747d5c72d3998701ab946c69a6c93688df91e3e089edbc56b04"
+            ),
+        },
+        "arrays": {
+            "raw": {
+                "bytes": 3_932_288,
+                "sha256": (
+                    "0c28706f769bd23cc70c373d2eb622e647f313eabdd2d1637b0e7eff82834357"
+                ),
+            },
+            "episode_shuffled": {
+                "bytes": 3_932_288,
+                "sha256": (
+                    "22d51e6068f0200dba8e906b90a627080727d2e58aebddfe303d7c251a8bfb31"
+                ),
+            },
+            "timeshift_plus_one": {
+                "bytes": 3_932_288,
+                "sha256": (
+                    "d431b506c933779d869aec4e1f083f210611b2902d458687b534842df9581367"
+                ),
+            },
+            "hold_current": {
+                "bytes": 3_932_288,
+                "sha256": (
+                    "98c8543d17abec4a831837c7b408149fa561c25638eaf383a9acef271931417c"
+                ),
+            },
+        },
+    },
+}
+V5_STUDY_REGISTRATION = {
+    "bytes": 61_802,
+    "sha256": "3c552667bf9fca23f20fae325a4d1b15faef5fa7fe990d0a460b1fcd371cbbec",
+    "identity_sha256": (
+        "245d6bf6c50c596ffc7a8c66183e436569f466b7082967c4dc5f57066cc54bcb"
+    ),
+}
+V5_TRAINING_PAIRING = {
+    "bytes": 4_900,
+    "sha256": "4776b2792e1aa30d95566c9e6fade3ccadc7622053319051b1186124ac174e37",
+    "identity_sha256": (
+        "37413d615de5c5e8b4f89ada0e086ed70e33d8822ee58852ddae9f6b3361de9c"
+    ),
+}
+V5_TRAINING_ARMS = {
+    "FLOW-OFF": {
+        "run_name": "physics-flow-off-seed1234-u000200",
+        "trace": {
+            "bytes": 415_609,
+            "sha256": (
+                "d90c49501204b35fc409868c5be8c007a13105c3e4823d5562acf39aa21b11ad"
+            ),
+        },
+        "completion": {
+            "bytes": 214,
+            "sha256": (
+                "4363fbe5f3f4ea36e4547eef3e5852e4dc6caf05222b16b5e7077f3336165783"
+            ),
+        },
+        "snapshot": {
+            "bytes": 4_248_290_490,
+            "sha256": (
+                "d59c06d44bc4989a072061993452a4f784f915d18af73cd29d067a3f548ba3da"
+            ),
+        },
+    },
+    "RAW-FLOW": {
+        "run_name": "physics-flow-raw-seed1234-u000200",
+        "trace": {
+            "bytes": 415_622,
+            "sha256": (
+                "80ed779289767eb77ce38dea6640b16d6589d874be77646f4329aa894a59c721"
+            ),
+        },
+        "completion": {
+            "bytes": 214,
+            "sha256": (
+                "f22e99e21a11612b30acd3e81892f29f19120af2492b2f090c1038276f5ae165"
+            ),
+        },
+        "snapshot": {
+            "bytes": 4_248_290_490,
+            "sha256": (
+                "870d17ede7ec60c513ebbdaf43dccfb55012107f3caf28c6edbfea4555923e6f"
+            ),
+        },
+    },
+}
 
 CACHE_SOURCES = (
     "raw",
@@ -376,13 +580,13 @@ ARMS = (
     Arm(
         "FLOW-OFF",
         "ravenhuang/wan-dit/physics_flow_off",
-        "physics-flow-off-seed1234-u000200",
+        "physics-flow-off-strict-v6-seed1234-u000200",
         False,
     ),
     Arm(
         "RAW-FLOW",
         "ravenhuang/wan-dit/physics_flow_on",
-        "physics-flow-raw-seed1234-u000200",
+        "physics-flow-raw-strict-v6-seed1234-u000200",
         True,
     ),
 )
@@ -1884,6 +2088,272 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _pinned_reference_file(
+    path: Path,
+    expected: Mapping[str, Any],
+    label: str,
+    *,
+    verify_digest: bool = True,
+) -> dict[str, Any]:
+    """Bind a historical reference without importing its scientific claims."""
+
+    path = path.expanduser()
+    if not path.is_absolute() or not path.is_file() or path.is_symlink():
+        raise PhysicsFlowStage1Error(f"{label} must be an absolute regular file")
+    path = path.resolve(strict=True)
+    if path.stat().st_size != expected.get("bytes"):
+        raise PhysicsFlowStage1Error(f"{label} byte count differs")
+    if verify_digest and sha256_file(path) != expected.get("sha256"):
+        raise PhysicsFlowStage1Error(f"{label} digest differs")
+    return {
+        "path": str(path),
+        "bytes": int(expected["bytes"]),
+        "sha256": str(expected["sha256"]),
+    }
+
+
+def _validated_v5_cache_reference(root: Path) -> dict[str, Any]:
+    """Validate the sealed v5 cache as a numeric-only repair reference."""
+
+    root = root.expanduser()
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise PhysicsFlowStage1Error("v5 cache reference must be an absolute directory")
+    root = root.resolve(strict=True)
+    if str(root) != V5_CACHE_ROOT:
+        raise PhysicsFlowStage1Error("v5 cache reference path is noncanonical")
+    registration_record = _pinned_reference_file(
+        root / "cache_registration.json",
+        V5_CACHE_REGISTRATION,
+        "v5 cache registration",
+    )
+    registration = read_json(
+        Path(registration_record["path"]), "v5 cache registration"
+    )
+    if (
+        not identity_valid(registration)
+        or registration.get("schema_version") != 2
+        or registration.get("kind") != CACHE_REGISTRATION_KIND
+        or registration.get("identity_sha256")
+        != V5_CACHE_REGISTRATION["identity_sha256"]
+        or registration.get("source_repository", {}).get("git_commit")
+        != V5_SOURCE_COMMIT
+        or Path(str(registration.get("output_root", ""))).resolve(strict=True)
+        != root
+        or registration.get("future_rgb_opened") is not False
+        or registration.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("v5 cache registration contract differs")
+    split_receipts = {}
+    for split, expected in V5_CACHE_SPLITS.items():
+        split_root = root / split
+        metadata_record = _pinned_reference_file(
+            split_root / "metadata.json",
+            expected["metadata"],
+            f"v5 {split} cache metadata",
+        )
+        audit_record = _pinned_reference_file(
+            split_root / "audit.json",
+            expected["audit"],
+            f"v5 {split} cache audit",
+        )
+        lineage_record = _pinned_reference_file(
+            split_root / "row_lineage.jsonl",
+            expected["row_lineage"],
+            f"v5 {split} row lineage",
+        )
+        complete_record = _pinned_reference_file(
+            split_root / "complete.json",
+            expected["complete"],
+            f"v5 {split} cache completion",
+        )
+        metadata = read_json(Path(metadata_record["path"]), f"v5 {split} metadata")
+        audit = read_json(Path(audit_record["path"]), f"v5 {split} audit")
+        complete = read_json(
+            Path(complete_record["path"]), f"v5 {split} completion"
+        )
+        arrays = {
+            source: _pinned_reference_file(
+                split_root / f"{source}.float16.npy",
+                expected["arrays"][source],
+                f"v5 {split} {source} array",
+            )
+            for source in CACHE_SOURCES
+        }
+        if (
+            not identity_valid(metadata)
+            or metadata.get("schema_version") != 2
+            or metadata.get("schema") != "raw-physics-flow-cache-v2"
+            or metadata.get("identity_sha256")
+            != expected["metadata"]["identity_sha256"]
+            or metadata.get("split") != split
+            or metadata.get("clip_count") != expected["count"]
+            or metadata.get("arrays") != arrays
+            or metadata.get("row_lineage") != lineage_record
+            or metadata.get("future_rgb_opened") is not False
+            or metadata.get("protected_test_accessed") is not False
+        ):
+            raise PhysicsFlowStage1Error(f"v5 {split} cache metadata differs")
+        if (
+            not identity_valid(audit)
+            or audit.get("schema_version") != 2
+            or audit.get("kind") != CACHE_AUDIT_KIND
+            or audit.get("status") != "audit_passed"
+            or audit.get("identity_sha256")
+            != expected["audit"]["identity_sha256"]
+            or audit.get("split") != split
+            or audit.get("clip_count") != expected["count"]
+            or audit.get("cache_metadata_identity_sha256")
+            != metadata["identity_sha256"]
+            or audit.get("future_rgb_opened") is not False
+            or audit.get("protected_test_accessed") is not False
+        ):
+            raise PhysicsFlowStage1Error(f"v5 {split} cache audit differs")
+        if (
+            not identity_valid(complete)
+            or complete.get("schema_version") != 2
+            or complete.get("kind") != "raw_physics_flow_cache_complete"
+            or complete.get("status") != "completed"
+            or complete.get("identity_sha256")
+            != expected["complete"]["identity_sha256"]
+            or complete.get("split") != split
+            or complete.get("metadata") != metadata_record
+            or complete.get("row_lineage") != lineage_record
+            or complete.get("arrays") != arrays
+        ):
+            raise PhysicsFlowStage1Error(f"v5 {split} cache completion differs")
+        split_receipts[split] = {
+            "count": expected["count"],
+            "metadata": metadata_record,
+            "metadata_identity_sha256": metadata["identity_sha256"],
+            "audit": audit_record,
+            "audit_identity_sha256": audit["identity_sha256"],
+            "row_lineage": lineage_record,
+            "complete": complete_record,
+            "complete_identity_sha256": complete["identity_sha256"],
+            "arrays": arrays,
+        }
+    return identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": V5_NUMERIC_REFERENCE_KIND,
+            "purpose": "strict-access-repair-numeric-equivalence-only",
+            "scientific_outcome_reference": False,
+            "v5_endpoint_rows": 0,
+            "v5_source_commit": V5_SOURCE_COMMIT,
+            "root": str(root),
+            "cache_registration": registration_record,
+            "cache_registration_identity_sha256": registration["identity_sha256"],
+            "splits": split_receipts,
+            "known_strict_access_claim_invalid": True,
+            "protected_test_accessed": False,
+        }
+    )
+
+
+def _validated_v5_study_reference(
+    root: Path, *, verify_snapshot_digests: bool
+) -> dict[str, Any]:
+    """Bind the completed v5 training arms, never its absent evaluation."""
+
+    root = root.expanduser()
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise PhysicsFlowStage1Error("v5 study reference must be an absolute directory")
+    root = root.resolve(strict=True)
+    if str(root) != V5_STUDY_ROOT:
+        raise PhysicsFlowStage1Error("v5 study reference path is noncanonical")
+    registration_record = _pinned_reference_file(
+        root / "registration.json",
+        V5_STUDY_REGISTRATION,
+        "v5 study registration",
+    )
+    pairing_record = _pinned_reference_file(
+        root / "training_pairing.json",
+        V5_TRAINING_PAIRING,
+        "v5 training pairing",
+    )
+    registration = read_json(
+        Path(registration_record["path"]), "v5 study registration"
+    )
+    pairing = read_json(Path(pairing_record["path"]), "v5 training pairing")
+    if (
+        not identity_valid(registration)
+        or registration.get("schema_version") != 2
+        or registration.get("kind") != STUDY_REGISTRATION_KIND
+        or registration.get("identity_sha256")
+        != V5_STUDY_REGISTRATION["identity_sha256"]
+        or registration.get("source_repository", {}).get("git_commit")
+        != V5_SOURCE_COMMIT
+        or Path(str(registration.get("output_root", ""))).resolve(strict=True)
+        != root
+        or not identity_valid(pairing)
+        or pairing.get("identity_sha256")
+        != V5_TRAINING_PAIRING["identity_sha256"]
+        or pairing.get("status") != "paired_trace_passed"
+        or pairing.get("paired_updates") != 200
+    ):
+        raise PhysicsFlowStage1Error("v5 study/training reference differs")
+    arms = {}
+    for code, expected in V5_TRAINING_ARMS.items():
+        run_root = root / "training" / expected["run_name"]
+        trace = _pinned_reference_file(
+            run_root / "physics_flow_training_trace.jsonl",
+            expected["trace"],
+            f"v5 {code} trace",
+        )
+        completion = _pinned_reference_file(
+            run_root / "physics_flow_training_trace_complete.json",
+            expected["completion"],
+            f"v5 {code} trace completion",
+        )
+        snapshot = _pinned_reference_file(
+            run_root / "snapshot.pt",
+            expected["snapshot"],
+            f"v5 {code} snapshot",
+            verify_digest=verify_snapshot_digests,
+        )
+        artifact = pairing.get("artifacts", {}).get(code, {})
+        if (
+            artifact.get("trace") != trace
+            or artifact.get("completion") != completion
+            or artifact.get("snapshot") != snapshot
+        ):
+            raise PhysicsFlowStage1Error(f"v5 {code} pairing artifacts differ")
+        arms[code] = {
+            "run_name": expected["run_name"],
+            "trace": trace,
+            "completion": completion,
+            "snapshot": snapshot,
+        }
+    evaluation = root / "evaluation"
+    if (
+        not evaluation.is_dir()
+        or evaluation.is_symlink()
+        or any(evaluation.iterdir())
+    ):
+        raise PhysicsFlowStage1Error(
+            "v5 numeric reference must retain its empty evaluation directory"
+        )
+    return identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": V5_NUMERIC_REFERENCE_KIND,
+            "purpose": "strict-access-and-evaluation-seed-repair-equivalence",
+            "scientific_outcome_reference": False,
+            "v5_endpoint_rows": 0,
+            "v5_scored_videos": 0,
+            "v5_source_commit": V5_SOURCE_COMMIT,
+            "root": str(root),
+            "study_registration": registration_record,
+            "study_registration_identity_sha256": registration["identity_sha256"],
+            "training_pairing": pairing_record,
+            "training_pairing_identity_sha256": pairing["identity_sha256"],
+            "arms": arms,
+            "known_strict_access_claim_invalid": True,
+            "protected_test_accessed": False,
+        }
+    )
+
+
 def exclusive_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -2277,6 +2747,9 @@ def _scan_split(
 def command_register_cache(args: argparse.Namespace) -> int:
     output = fresh_lustre_root(args.output)
     source = clean_repository(args.source_repo, args.expected_commit, "physics-flow source")
+    v5_numeric_reference = _validated_v5_cache_reference(
+        args.v5_reference_cache_root
+    )
     official = clean_repository(args.official_abc_root, EXPECTED_ABC_COMMIT, "official ABC")
     renderer = validate_renderer_gate(args.renderer_gate)
     train_rows = validate_manifest(
@@ -2362,6 +2835,7 @@ def command_register_cache(args: argparse.Namespace) -> int:
             "created_at_utc": now(),
             "output_root": str(output),
             "source_repository": source,
+            "v5_numeric_reference": v5_numeric_reference,
             "cache_renderer_runtime": cache_renderer_runtime,
             "official_abc_repository": official,
             "renderer_prerequisite": renderer,
@@ -2482,6 +2956,15 @@ def validate_cache_registration(path: Path) -> dict[str, Any]:
     )
     if observed_source != source:
         raise PhysicsFlowStage1Error("cache source repository changed after registration")
+    v5_reference = registration.get("v5_numeric_reference", {})
+    if (
+        not isinstance(v5_reference, Mapping)
+        or Path(str(v5_reference.get("root", ""))).resolve(strict=True)
+        != Path(str(v5_reference.get("root", "")))
+        or _validated_v5_cache_reference(Path(str(v5_reference.get("root", ""))))
+        != v5_reference
+    ):
+        raise PhysicsFlowStage1Error("v5 numeric cache reference changed")
     cache_runtime = validate_cache_renderer_runtime_receipt(
         registration.get("cache_renderer_runtime"),
         source_repo=Path(source["path"]),
@@ -3237,6 +3720,202 @@ def _resolve_record(
     return path
 
 
+def _v5_row_numeric_signature(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only renderer/model values shared across v2 and strict v3."""
+
+    provenance = row.get("input_provenance")
+    tensor_hashes = row.get("tensor_sha256")
+    if not isinstance(provenance, Mapping) or not isinstance(
+        tensor_hashes, Mapping
+    ):
+        raise PhysicsFlowStage1Error("cache row lacks numeric provenance")
+    render = row.get("render_diagnostics")
+    hold_render = row.get("hold_render_diagnostics")
+    signature = {
+        "clip_index": row.get("clip_index"),
+        "clip_id": row.get("clip_id"),
+        "episode_dir": row.get("episode_dir"),
+        "d405_eligible": row.get("d405_eligible"),
+        "frame_indices": row.get("frame_indices"),
+        "action_window": row.get("action_window"),
+        "camera_type": row.get("camera_type"),
+        "calibration": row.get("calibration"),
+        "motion_stratum": row.get("motion_stratum"),
+        "episode_shuffled_donor_index": row.get(
+            "episode_shuffled_donor_index"
+        ),
+        "episode_shuffled_donor_clip_id": row.get(
+            "episode_shuffled_donor_clip_id"
+        ),
+        # Renderer wall-clock telemetry is deliberately excluded.  Every
+        # deterministic transition diagnostic remains in the comparison.
+        "render_transitions": (
+            render.get("transitions") if isinstance(render, Mapping) else None
+        ),
+        "hold_render_transitions": (
+            hold_render.get("transitions")
+            if isinstance(hold_render, Mapping)
+            else None
+        ),
+        "raw_pose_path_sha256": row.get("raw_pose_path_sha256"),
+        "observed_frame4_state_sha256": provenance.get(
+            "observed_frame4_state_sha256"
+        ),
+        "registered_action_row_sha256": provenance.get(
+            "registered_action_row_sha256"
+        ),
+        "candidate_action_span_sha256": provenance.get(
+            "candidate_action_span_sha256"
+        ),
+        "candidate_action_endpoints_sha256": provenance.get(
+            "candidate_action_endpoints_sha256"
+        ),
+        "cache_raw_action_max_abs": provenance.get("cache_raw_action_max_abs"),
+        "tensor_sha256": {
+            source: tensor_hashes.get(source) for source in CACHE_SOURCES
+        },
+    }
+    digest_fields = (
+        "raw_pose_path_sha256",
+        "observed_frame4_state_sha256",
+        "registered_action_row_sha256",
+        "candidate_action_span_sha256",
+        "candidate_action_endpoints_sha256",
+    )
+    if (
+        any(
+            SHA256_RE.fullmatch(str(signature[field] or "")) is None
+            for field in digest_fields
+        )
+        or any(
+            SHA256_RE.fullmatch(str(value or "")) is None
+            for value in signature["tensor_sha256"].values()
+        )
+        or signature["cache_raw_action_max_abs"] != 0.0
+    ):
+        raise PhysicsFlowStage1Error("cache row numeric hash is invalid")
+    return signature
+
+
+def _v5_cache_numeric_equivalence(
+    *,
+    split: str,
+    current_metadata: Mapping[str, Any],
+    current_rows: Sequence[Mapping[str, Any]],
+    reference: Mapping[str, Any],
+    reference_rows: Sequence[Mapping[str, Any]],
+    current_arrays: Mapping[str, Any],
+    reference_arrays: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require strict-access repair to leave every flow/model value unchanged."""
+
+    if len(current_rows) != len(reference_rows) or len(current_rows) != reference.get(
+        "count"
+    ):
+        raise PhysicsFlowStage1Error(f"v5 {split} row population differs")
+    array_matches = {}
+    for source in CACHE_SOURCES:
+        current = current_metadata.get("arrays", {}).get(source, {})
+        prior = reference.get("arrays", {}).get(source, {})
+        match = (
+            current.get("bytes") == prior.get("bytes")
+            and current.get("sha256") == prior.get("sha256")
+        )
+        if not match:
+            raise PhysicsFlowStage1Error(
+                f"strict-access repair changed v5 {split} {source} array bytes"
+            )
+        array_matches[source] = True
+    numeric_rows = 0
+    provenance_rows = 0
+    for index, (current, prior) in enumerate(zip(current_rows, reference_rows)):
+        if (
+            not identity_valid(current)
+            or not identity_valid(prior)
+            or prior.get("schema_version") != 2
+            or prior.get("split") != split
+            or prior.get("clip_index") != index
+            or _v5_row_numeric_signature(current)
+            != _v5_row_numeric_signature(prior)
+        ):
+            raise PhysicsFlowStage1Error(
+                f"strict-access repair changed v5 {split} row {index} values"
+            )
+        current_state = current.get("input_provenance", {}).get("states_npz")
+        prior_state = prior.get("input_provenance", {}).get("states_npz")
+        if (
+            current.get("identity_sha256") == prior.get("identity_sha256")
+            or current_state == prior_state
+            or not isinstance(current_state, Mapping)
+            or current_state.get("state_access_schema") != STATE_ACCESS_SCHEMA
+            or current_state.get("array_byte_access_audit", {}).get(
+                "selected_observed_state_array_data_bytes_returned"
+            )
+            != 56
+            or current_state.get("array_byte_access_audit", {}).get(
+                "selected_registered_action_array_data_bytes_returned"
+            )
+            != 3_640
+            or current_state.get("array_byte_access_audit", {}).get(
+                "future_measured_state_array_data_bytes_returned"
+            )
+            != 0
+            or current_state.get("array_byte_access_audit", {}).get(
+                "unregistered_action_array_data_bytes_returned"
+            )
+            != 0
+        ):
+            raise PhysicsFlowStage1Error(
+                f"strict-access repair failed to change {split} row {index} provenance"
+            )
+        numeric_rows += 1
+        provenance_rows += 1
+        for source in CACHE_SOURCES:
+            current_hash = tensor_sha256(current_arrays[source][index])
+            prior_hash = tensor_sha256(reference_arrays[source][index])
+            claimed = current.get("tensor_sha256", {}).get(source)
+            prior_claimed = prior.get("tensor_sha256", {}).get(source)
+            if not (
+                current_hash == prior_hash == claimed == prior_claimed
+            ):
+                raise PhysicsFlowStage1Error(
+                    f"v5 {split} row {index} {source} tensor bytes differ"
+                )
+    return identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "raw_physics_flow_v5_cache_numeric_equivalence",
+            "status": "bitwise_numeric_equivalence_passed",
+            "split": split,
+            "reference_metadata": reference["metadata"],
+            "reference_metadata_identity_sha256": reference[
+                "metadata_identity_sha256"
+            ],
+            "reference_row_lineage": reference["row_lineage"],
+            "array_file_bytes_bit_identical": array_matches,
+            "row_numeric_signatures_identical": numeric_rows,
+            "row_tensor_hashes_recomputed_per_version": (
+                numeric_rows * len(CACHE_SOURCES) * 2
+            ),
+            "row_provenance_identities_distinct": provenance_rows,
+            "row_identity_sha256_distinct": provenance_rows,
+            "state_access_receipts_distinct": provenance_rows,
+            "excluded_provenance_fields": [
+                "schema_version",
+                "identity_sha256",
+                "input_provenance.states_npz",
+                "render_diagnostics.pose_render_ms",
+                "hold_render_diagnostics.pose_render_ms",
+            ],
+            "strict_provenance_schema_changed": True,
+            "scientific_outcome_reference": False,
+            "v5_endpoint_rows": 0,
+            "future_rgb_opened": False,
+            "protected_test_accessed": False,
+        }
+    )
+
+
 def audit_cache(metadata_path: Path, *, write: bool) -> dict[str, Any]:
     metadata_path = metadata_path.resolve(strict=True)
     metadata = load_cache_metadata(metadata_path)
@@ -3276,6 +3955,30 @@ def audit_cache(metadata_path: Path, *, write: bool) -> dict[str, Any]:
     lineage = read_jsonl(lineage_path)
     if len(lineage) != expected_count:
         raise PhysicsFlowStage1Error("row lineage count differs")
+    v5_reference = registration["v5_numeric_reference"]["splits"][split]
+    reference_lineage_path = _absolute_file_record_matches(
+        v5_reference["row_lineage"], f"v5 {split} row lineage"
+    )
+    reference_lineage = read_jsonl(reference_lineage_path)
+    reference_arrays = {}
+    for source in CACHE_SOURCES:
+        reference_path = _absolute_file_record_matches(
+            v5_reference["arrays"][source], f"v5 {split} {source} array"
+        )
+        reference_value = np.load(
+            reference_path, mmap_mode="r", allow_pickle=False
+        )
+        validate_compact_flow(reference_value, count=expected_count)
+        reference_arrays[source] = reference_value
+    v5_equivalence = _v5_cache_numeric_equivalence(
+        split=split,
+        current_metadata=metadata,
+        current_rows=lineage,
+        reference=v5_reference,
+        reference_rows=reference_lineage,
+        current_arrays=arrays,
+        reference_arrays=reference_arrays,
+    )
     d405 = 0
     false_flags = 0
     row_hashes_verified = 0
@@ -3399,6 +4102,7 @@ def audit_cache(metadata_path: Path, *, write: bool) -> dict[str, Any]:
             "row_tensor_hashes_verified": row_hashes_verified,
             "lineage_identities_verified": expected_count,
             "deterministic_controls_reconstructed": list(CACHE_SOURCES[1:]),
+            "v5_numeric_equivalence": v5_equivalence,
             "timeshift_max_abs_error": max_time_error,
             "episode_shuffled_max_abs_error": max_donor_error,
             "hold_nonmotion_max_abs": max_hold_nonmotion,
@@ -3439,6 +4143,20 @@ def _validated_cache_receipt(metadata_path: Path, split: str) -> dict[str, Any]:
         or audit.get("kind") != CACHE_AUDIT_KIND
         or audit.get("status") != "audit_passed"
         or audit.get("cache_metadata_identity_sha256") != metadata["identity_sha256"]
+        or audit.get("v5_numeric_equivalence", {}).get("status")
+        != "bitwise_numeric_equivalence_passed"
+        or audit.get("v5_numeric_equivalence", {}).get(
+            "row_numeric_signatures_identical"
+        )
+        != (TRAIN_COUNT if split == "train" else VAL_COUNT)
+        or audit.get("v5_numeric_equivalence", {}).get(
+            "row_provenance_identities_distinct"
+        )
+        != (TRAIN_COUNT if split == "train" else VAL_COUNT)
+        or audit.get("v5_numeric_equivalence", {}).get(
+            "array_file_bytes_bit_identical"
+        )
+        != {source: True for source in CACHE_SOURCES}
     ):
         raise PhysicsFlowStage1Error(f"{split} cache audit receipt differs")
     return {
@@ -3449,6 +4167,7 @@ def _validated_cache_receipt(metadata_path: Path, split: str) -> dict[str, Any]:
         "d405_count": metadata["d405_count"],
         "arrays": metadata["arrays"],
         "row_lineage": metadata["row_lineage"],
+        "v5_numeric_equivalence": audit["v5_numeric_equivalence"],
         "protected_test_accessed": False,
     }
 
@@ -3859,6 +4578,10 @@ def _validate_parent_lineage(
 def command_register_study(args: argparse.Namespace) -> int:
     output = fresh_lustre_root(args.output)
     source = clean_repository(args.source_repo, args.expected_commit, "study source")
+    v5_training_reference = _validated_v5_study_reference(
+        args.v5_reference_study_root,
+        verify_snapshot_digests=True,
+    )
     train_cache = _validated_cache_receipt(args.train_flow_metadata, "train")
     val_cache = _validated_cache_receipt(args.val_flow_metadata, "val")
     train_metadata = load_cache_metadata(args.train_flow_metadata, split="train")
@@ -4045,6 +4768,7 @@ def command_register_study(args: argparse.Namespace) -> int:
             "output_root": str(output),
             "source_repository": source,
             "source_files": source_files,
+            "v5_training_reference": v5_training_reference,
             "cache_registration_identity_sha256": train_metadata[
                 "cache_registration_identity_sha256"
             ],
@@ -4098,6 +4822,10 @@ def command_register_study(args: argparse.Namespace) -> int:
                 "flow_clock": 0.0,
                 "flow_velocity_loss": 0.0,
                 "clean_future_or_teacher_conditioning": False,
+                "same_arm_v5_exact_deterministic_trace_required": True,
+                "same_arm_v5_exact_model_tensor_hashes_required": True,
+                "snapshot_pickle_byte_identity_required": False,
+                "evaluation_output_absent_until_repair_equivalence_gate": True,
             },
             "evaluation_contract": {
                 "population": "all prospectively registered D405 rows in immutable val64",
@@ -4109,6 +4837,7 @@ def command_register_study(args: argparse.Namespace) -> int:
                 "val64_may_have_prior_use_elsewhere_in_research_program": True,
                 "d405_count": val_cache["d405_count"],
                 "noise_seed_ids": list(NOISE_SEEDS),
+                "model_evaluation_noise_seed": EVALUATION_NOISE_SEED,
                 "nfe_grid": list(NFE_GRID),
                 "endpoints": [asdict(endpoint) for endpoint in ENDPOINTS],
                 "same_noise_across_all_endpoints": True,
@@ -4239,6 +4968,7 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
     )
     if (
         not identity_valid(registration)
+        or registration.get("schema_version") != SCHEMA_VERSION
         or registration.get("kind") != STUDY_REGISTRATION_KIND
         or registration.get("status")
         != "registered_before_training_or_generated_video_outcomes"
@@ -4322,6 +5052,26 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         or registration.get("evaluation_contract", {}).get("endpoints")
         != [asdict(endpoint) for endpoint in ENDPOINTS]
         or registration.get("evaluation_contract", {}).get(
+            "model_evaluation_noise_seed"
+        )
+        != EVALUATION_NOISE_SEED
+        or registration.get("training_contract", {}).get(
+            "same_arm_v5_exact_deterministic_trace_required"
+        )
+        is not True
+        or registration.get("training_contract", {}).get(
+            "same_arm_v5_exact_model_tensor_hashes_required"
+        )
+        is not True
+        or registration.get("training_contract", {}).get(
+            "snapshot_pickle_byte_identity_required"
+        )
+        is not False
+        or registration.get("training_contract", {}).get(
+            "evaluation_output_absent_until_repair_equivalence_gate"
+        )
+        is not True
+        or registration.get("evaluation_contract", {}).get(
             "val64_globally_new_or_untouched_claim"
         )
         is not False
@@ -4394,6 +5144,16 @@ def validate_study_registration(path: Path) -> dict[str, Any]:
         Path(source["path"]), source["git_commit"], "study source"
     ) != source:
         raise PhysicsFlowStage1Error("study source changed after registration")
+    v5_reference = registration.get("v5_training_reference")
+    if (
+        not isinstance(v5_reference, Mapping)
+        or _validated_v5_study_reference(
+            Path(str(v5_reference.get("root", ""))),
+            verify_snapshot_digests=False,
+        )
+        != v5_reference
+    ):
+        raise PhysicsFlowStage1Error("v5 training reference changed")
     main_python_runtime = validate_main_python_runtime_receipt(
         registration.get("runtime", {}).get("python_runtime")
     )
@@ -4887,6 +5647,294 @@ def _training_trace(
     return header, events, artifacts
 
 
+V5_TRAINING_HEADER_EXCLUSIONS = (
+    "study_registration",
+    "study_registration_identity_sha256",
+    "study_registration_sha256",
+    "train_flow_metadata",
+    "train_flow_metadata_sha256",
+    "val_flow_metadata",
+    "val_flow_metadata_sha256",
+)
+V5_TRAINING_COMPLETION_EXCLUSIONS = ("trace_sha256",)
+V5_TRAINING_METRIC_EXCLUSIONS = (
+    "samples_per_second",
+    "system/optimizer_step_seconds_max",
+    "system/gpu_memory_allocated_gib_max",
+    "system/gpu_memory_reserved_gib_max",
+)
+V5_SNAPSHOT_METADATA_EXCLUSIONS = (
+    "path",
+    "file_sha256",
+    "file_bytes",
+    "snapshot_metadata.run_identity_sha256",
+)
+
+
+def _v5_training_trace(
+    reference: Mapping[str, Any], arm: Arm
+) -> tuple[dict[str, Any], dict[int, dict[str, Any]], dict[str, Any]]:
+    """Parse one pinned v5 arm without applying current-run path semantics."""
+
+    artifact = reference.get("arms", {}).get(arm.code)
+    if not isinstance(artifact, Mapping):
+        raise PhysicsFlowStage1Error(f"v5 {arm.code} reference is absent")
+    trace_path = _absolute_file_record_matches(
+        artifact["trace"], f"v5 {arm.code} trace"
+    )
+    complete_path = _absolute_file_record_matches(
+        artifact["completion"], f"v5 {arm.code} trace completion"
+    )
+    rows = read_jsonl(trace_path)
+    if not rows:
+        raise PhysicsFlowStage1Error(f"v5 {arm.code} training trace is empty")
+    header = rows[0]
+    if (
+        header.get("kind") != "physics_flow_training_trace_header"
+        or header.get("arm") != arm.code
+        or header.get("fuse_flow") is not arm.fuse_flow
+        or header.get("parent_snapshot_sha256") != PARENT_SNAPSHOT_SHA256
+        or header.get("parent_run_identity_sha256")
+        != PARENT_RUN_IDENTITY_SHA256
+        or header.get("continuation_updates") != 200
+        or header.get("wan_calls_per_example") != 1
+        or header.get("flow_model_calls_per_example") != 0
+        or header.get("future_measured_state_conditioning") is not False
+        or header.get("future_rgb_conditioning") is not False
+        or header.get("study_registration")
+        != reference["study_registration"]["path"]
+        or header.get("study_registration_sha256")
+        != reference["study_registration"]["sha256"]
+        or header.get("study_registration_identity_sha256")
+        != reference["study_registration_identity_sha256"]
+        or header.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error(f"v5 {arm.code} trace header differs")
+    events: dict[int, dict[str, Any]] = {}
+    for row in rows[1:]:
+        if (
+            row.get("kind") != "physics_flow_training_trace_event"
+            or row.get("arm") != arm.code
+        ):
+            raise PhysicsFlowStage1Error(
+                f"v5 {arm.code} trace has an unknown row"
+            )
+        metrics = row.get("metrics")
+        if not isinstance(metrics, Mapping):
+            raise PhysicsFlowStage1Error("v5 training metrics row is invalid")
+        if "train_loss/loss" not in metrics:
+            continue
+        iteration = metrics.get("iteration")
+        if (
+            isinstance(iteration, bool)
+            or not isinstance(iteration, int)
+            or iteration in events
+        ):
+            raise PhysicsFlowStage1Error("v5 training iteration differs")
+        events[iteration] = row
+    if set(events) != set(range(200)):
+        raise PhysicsFlowStage1Error(
+            f"v5 {arm.code} lacks exactly 200 training updates"
+        )
+    completion = read_json(complete_path, f"v5 {arm.code} trace completion")
+    if (
+        completion.get("kind") != "physics_flow_training_trace_complete"
+        or completion.get("arm") != arm.code
+        or completion.get("completed_updates") != 200
+        or completion.get("trace_sha256") != artifact["trace"]["sha256"]
+        or completion.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error(f"v5 {arm.code} completion differs")
+    return header, events, completion
+
+
+def _without_fields(
+    value: Mapping[str, Any], excluded: Sequence[str]
+) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key not in excluded}
+
+
+def _same_arm_v5_training_equivalence(
+    registration: Mapping[str, Any],
+    current: Mapping[
+        str,
+        tuple[dict[str, Any], dict[int, dict[str, Any]], dict[str, Any]],
+    ],
+) -> dict[str, Any]:
+    """Prove the strict-access repair changed provenance, not model values."""
+
+    from tools.snapshot_model_state_receipt import model_state_receipt
+
+    reference = _validated_v5_study_reference(
+        Path(registration["v5_training_reference"]["root"]),
+        verify_snapshot_digests=False,
+    )
+    if reference != registration["v5_training_reference"]:
+        raise PhysicsFlowStage1Error("v5 training reference changed")
+    arm_receipts = {}
+    tensor_comparisons = 0
+    update_comparisons = 0
+    for arm in ARMS:
+        header, events, artifacts = current[arm.code]
+        old_header, old_events, old_completion = _v5_training_trace(
+            reference, arm
+        )
+        if set(header) != set(old_header):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} same-arm header field inventory differs from v5"
+            )
+        if _without_fields(header, V5_TRAINING_HEADER_EXCLUSIONS) != (
+            _without_fields(old_header, V5_TRAINING_HEADER_EXCLUSIONS)
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} deterministic training header differs from v5"
+            )
+        if any(
+            header.get(field) == old_header.get(field)
+            for field in V5_TRAINING_HEADER_EXCLUSIONS
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} strict repair provenance did not change from v5"
+            )
+        current_completion = read_json(
+            Path(artifacts["completion"]["path"]),
+            f"{arm.code} trace completion",
+        )
+        if set(current_completion) != set(old_completion) or _without_fields(
+            current_completion, V5_TRAINING_COMPLETION_EXCLUSIONS
+        ) != _without_fields(old_completion, V5_TRAINING_COMPLETION_EXCLUSIONS):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} deterministic trace completion differs from v5"
+            )
+        current_trace_rows = read_jsonl(Path(artifacts["trace"]["path"]))
+        old_trace_rows = read_jsonl(
+            Path(reference["arms"][arm.code]["trace"]["path"])
+        )
+        current_auxiliary = [
+            row
+            for row in current_trace_rows[1:]
+            if "train_loss/loss" not in row.get("metrics", {})
+        ]
+        old_auxiliary = [
+            row
+            for row in old_trace_rows[1:]
+            if "train_loss/loss" not in row.get("metrics", {})
+        ]
+        if current_auxiliary != old_auxiliary:
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} auxiliary trace rows differ from v5"
+            )
+        for iteration in range(200):
+            observed = events[iteration]
+            prior = old_events[iteration]
+            if (
+                set(observed) != set(prior)
+                or _without_fields(observed, ("metrics",))
+                != _without_fields(prior, ("metrics",))
+            ):
+                raise PhysicsFlowStage1Error(
+                    f"{arm.code} event envelope differs from v5 at {iteration}"
+                )
+            metrics = observed["metrics"]
+            old_metrics = prior["metrics"]
+            if (
+                set(metrics) != set(old_metrics)
+                or not set(V5_TRAINING_METRIC_EXCLUSIONS).issubset(metrics)
+                or _without_fields(metrics, V5_TRAINING_METRIC_EXCLUSIONS)
+                != _without_fields(old_metrics, V5_TRAINING_METRIC_EXCLUSIONS)
+            ):
+                raise PhysicsFlowStage1Error(
+                    f"{arm.code} deterministic metrics differ from v5 at {iteration}"
+                )
+            update_comparisons += 1
+
+        current_snapshot = Path(artifacts["snapshot"]["path"])
+        old_snapshot_record = reference["arms"][arm.code]["snapshot"]
+        old_snapshot = Path(old_snapshot_record["path"])
+        current_state, current_tensors = model_state_receipt(current_snapshot)
+        old_state, old_tensors = model_state_receipt(old_snapshot)
+        if (
+            current_state["file_sha256"] != artifacts["snapshot"]["sha256"]
+            or old_state["file_sha256"] != old_snapshot_record["sha256"]
+            or current_state["model_schema_sha256"]
+            != old_state["model_schema_sha256"]
+            or current_state["canonical_model_state_sha256"]
+            != old_state["canonical_model_state_sha256"]
+            or current_state["model_tensor_count"]
+            != old_state["model_tensor_count"]
+            or current_tensors != old_tensors
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} model tensors differ from sealed v5 training"
+            )
+        current_metadata = current_state["snapshot_metadata"]
+        old_metadata = old_state["snapshot_metadata"]
+        if (
+            _without_fields(current_metadata, ("run_identity_sha256",))
+            != _without_fields(old_metadata, ("run_identity_sha256",))
+            or current_metadata.get("run_identity_sha256")
+            == old_metadata.get("run_identity_sha256")
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} snapshot provenance repair differs"
+            )
+        tensor_comparisons += len(current_tensors)
+        arm_receipts[arm.code] = {
+            "updates_compared_exactly": 200,
+            "auxiliary_trace_rows_compared_exactly": len(
+                current_auxiliary
+            ),
+            "deterministic_metric_fields_per_update": (
+                len(events[0]["metrics"])
+                - len(V5_TRAINING_METRIC_EXCLUSIONS)
+            ),
+            "current_snapshot": artifacts["snapshot"],
+            "v5_snapshot": old_snapshot_record,
+            "model_schema_sha256": current_state["model_schema_sha256"],
+            "canonical_model_state_sha256": current_state[
+                "canonical_model_state_sha256"
+            ],
+            "model_tensor_count": current_state["model_tensor_count"],
+            "per_tensor_receipt_sha256": hashlib.sha256(
+                canonical_json(current_tensors)
+            ).hexdigest(),
+            "all_per_tensor_hashes_exact": True,
+            "snapshot_pickle_bytes_compared": False,
+            "snapshot_metadata_provenance_distinct": True,
+        }
+    return identity_payload(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "raw_physics_flow_v5_training_repair_equivalence",
+            "status": "exact_training_and_model_state_equivalence_passed",
+            "reference_identity_sha256": reference["identity_sha256"],
+            "reference_source_commit": V5_SOURCE_COMMIT,
+            "scientific_outcome_reference": False,
+            "v5_endpoint_rows": 0,
+            "same_arm_updates_compared_exactly": update_comparisons,
+            "model_tensor_hashes_compared_exactly": tensor_comparisons,
+            "arms": arm_receipts,
+            "header_provenance_exclusions": list(
+                V5_TRAINING_HEADER_EXCLUSIONS
+            ),
+            "completion_provenance_exclusions": list(
+                V5_TRAINING_COMPLETION_EXCLUSIONS
+            ),
+            "operational_metric_exclusions": list(
+                V5_TRAINING_METRIC_EXCLUSIONS
+            ),
+            "snapshot_pickle_and_metadata_exclusions": list(
+                V5_SNAPSHOT_METADATA_EXCLUSIONS
+            ),
+            "endpoint_artifacts_opened": 0,
+            "endpoint_rows_opened": 0,
+            "future_rgb_opened": False,
+            "future_measured_state_opened": False,
+            "protected_test_accessed": False,
+        }
+    )
+
+
 def compare_training_traces(
     registration: Mapping[str, Any], *, write: bool
 ) -> dict[str, Any]:
@@ -4895,6 +5943,18 @@ def compare_training_traces(
     )
     raw_header, raw_events, raw_artifacts = _training_trace(
         registration, ARM_BY_CODE["RAW-FLOW"]
+    )
+    evaluation_root = Path(registration["output_root"]) / "evaluation"
+    if write and (evaluation_root.exists() or evaluation_root.is_symlink()):
+        raise PhysicsFlowStage1Error(
+            "repair-equivalence gate must precede evaluation output creation"
+        )
+    v5_equivalence = _same_arm_v5_training_equivalence(
+        registration,
+        {
+            "FLOW-OFF": (off_header, off_events, off_artifacts),
+            "RAW-FLOW": (raw_header, raw_events, raw_artifacts),
+        },
     )
     same_header_fields = (
         "parent_snapshot_sha256",
@@ -4981,6 +6041,10 @@ def compare_training_traces(
             "exact_all_rank_hash_comparisons": compared,
             "metric_names": metric_names,
             "same_parent_parameter_schema_and_initial_auxiliary_state": True,
+            "v5_repair_equivalence": v5_equivalence,
+            "prospective_evaluation_absence_enforced_when_written": True,
+            "endpoint_artifacts_opened_by_repair_gate": 0,
+            "endpoint_rows_opened_by_repair_gate": 0,
             "terminal_nonselectable_seam_diagnostics": terminal_seam,
             "artifacts": {
                 "FLOW-OFF": off_artifacts,
@@ -4996,6 +6060,106 @@ def compare_training_traces(
             Path(registration["output_root"]) / "training_pairing.json", receipt
         )
     return receipt
+
+
+def load_training_pairing(
+    registration: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load the prospective repair gate without repeating multi-GB hashing."""
+
+    path = Path(registration["output_root"]) / "training_pairing.json"
+    pairing = read_json(path, "training pairing")
+    equivalence = pairing.get("v5_repair_equivalence", {})
+    if (
+        not identity_valid(pairing)
+        or pairing.get("schema_version") != SCHEMA_VERSION
+        or pairing.get("kind") != "raw_physics_flow_training_pairing"
+        or pairing.get("status") != "paired_trace_passed"
+        or pairing.get("registration_identity_sha256")
+        != registration["identity_sha256"]
+        or pairing.get("paired_updates") != 200
+        or pairing.get("prospective_evaluation_absence_enforced_when_written")
+        is not True
+        or pairing.get("endpoint_artifacts_opened_by_repair_gate") != 0
+        or pairing.get("endpoint_rows_opened_by_repair_gate") != 0
+        or equivalence.get("status")
+        != "exact_training_and_model_state_equivalence_passed"
+        or equivalence.get("reference_identity_sha256")
+        != registration["v5_training_reference"]["identity_sha256"]
+        or equivalence.get("same_arm_updates_compared_exactly") != 400
+        or equivalence.get("scientific_outcome_reference") is not False
+        or equivalence.get("v5_endpoint_rows") != 0
+        or equivalence.get("endpoint_artifacts_opened") != 0
+        or equivalence.get("endpoint_rows_opened") != 0
+        or equivalence.get("operational_metric_exclusions")
+        != list(V5_TRAINING_METRIC_EXCLUSIONS)
+        or equivalence.get("header_provenance_exclusions")
+        != list(V5_TRAINING_HEADER_EXCLUSIONS)
+        or equivalence.get("completion_provenance_exclusions")
+        != list(V5_TRAINING_COMPLETION_EXCLUSIONS)
+        or equivalence.get("snapshot_pickle_and_metadata_exclusions")
+        != list(V5_SNAPSHOT_METADATA_EXCLUSIONS)
+        or any(
+            equivalence.get("arms", {}).get(arm.code, {}).get(
+                "all_per_tensor_hashes_exact"
+            )
+            is not True
+            or equivalence.get("arms", {}).get(arm.code, {}).get(
+                "snapshot_pickle_bytes_compared"
+            )
+            is not False
+            for arm in ARMS
+        )
+        or pairing.get("future_rgb_opened") is not False
+        or pairing.get("future_measured_state_opened") is not False
+        or pairing.get("protected_test_accessed") is not False
+    ):
+        raise PhysicsFlowStage1Error("training repair-equivalence gate differs")
+    for arm in ARMS:
+        artifact = pairing.get("artifacts", {}).get(arm.code)
+        if not isinstance(artifact, Mapping):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} paired artifact inventory is absent"
+            )
+        run_root = (
+            Path(registration["output_root"]) / "training" / arm.run_name
+        ).resolve(strict=True)
+        if (
+            Path(str(artifact.get("run_dir", ""))).resolve(strict=True)
+            != run_root
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} paired run path differs"
+            )
+        for name, filename in (
+            ("trace", "physics_flow_training_trace.jsonl"),
+            ("completion", "physics_flow_training_trace_complete.json"),
+            ("resolved_config", ".hydra/config.yaml"),
+        ):
+            observed = _absolute_file_record_matches(
+                artifact.get(name), f"{arm.code} paired {name}"
+            )
+            if observed != (run_root / filename).resolve(strict=True):
+                raise PhysicsFlowStage1Error(
+                    f"{arm.code} paired {name} path differs"
+                )
+        snapshot = artifact.get("snapshot")
+        snapshot_path = Path(str(snapshot.get("path", ""))) if isinstance(
+            snapshot, Mapping
+        ) else Path()
+        if (
+            not isinstance(snapshot, Mapping)
+            or not snapshot_path.is_absolute()
+            or snapshot_path.resolve(strict=True)
+            != (run_root / "snapshot.pt").resolve(strict=True)
+            or snapshot_path.is_symlink()
+            or snapshot_path.stat().st_size != snapshot.get("bytes")
+            or SHA256_RE.fullmatch(str(snapshot.get("sha256", ""))) is None
+        ):
+            raise PhysicsFlowStage1Error(
+                f"{arm.code} paired snapshot inventory differs"
+            )
+    return pairing, file_record(path)
 
 
 def command_compare_traces(args: argparse.Namespace) -> int:
@@ -5398,20 +6562,7 @@ def _endpoint_rows(
 def analyze_study(
     registration: Mapping[str, Any], *, write: bool
 ) -> dict[str, Any]:
-    pairing_path = Path(registration["output_root"]) / "training_pairing.json"
-    pairing = read_json(pairing_path, "training pairing")
-    replay_pairing = compare_training_traces(registration, write=False)
-    if (
-        not identity_valid(pairing)
-        or pairing.get("kind") != "raw_physics_flow_training_pairing"
-        or pairing.get("status") != "paired_trace_passed"
-    ):
-        raise PhysicsFlowStage1Error("paired training receipt differs")
-    for key, value in pairing.items():
-        if key == "identity_sha256":
-            continue
-        if replay_pairing.get(key) != value:
-            raise PhysicsFlowStage1Error(f"training pairing replay differs at {key}")
+    pairing, _pairing_record = load_training_pairing(registration)
     rows, inventory = load_evaluation_rows(registration)
     parent_parity, _parent_parity_record = load_parent_sampler_parity(
         registration
@@ -5690,6 +6841,11 @@ def command_analyze(args: argparse.Namespace) -> int:
 def command_audit_study(args: argparse.Namespace) -> int:
     registration = validate_study_registration(args.registration)
     pairing = compare_training_traces(registration, write=False)
+    stored_pairing, stored_pairing_record = load_training_pairing(registration)
+    if pairing != stored_pairing:
+        raise PhysicsFlowStage1Error(
+            "training repair-equivalence replay differs from prospective gate"
+        )
     parent_parity, parent_parity_record = load_parent_sampler_parity(
         registration
     )
@@ -5741,6 +6897,7 @@ def command_audit_study(args: argparse.Namespace) -> int:
             "audited_at_utc": now(),
             "registration_identity_sha256": registration["identity_sha256"],
             "training_pairing_identity_sha256": pairing["identity_sha256"],
+            "training_pairing": stored_pairing_record,
             "native_parent_sampler_parity_identity_sha256": parent_parity[
                 "identity_sha256"
             ],
@@ -5752,6 +6909,11 @@ def command_audit_study(args: argparse.Namespace) -> int:
             "analysis_identity_sha256": analysis["identity_sha256"],
             "decision": analysis["decision"],
             "paired_training_updates_replayed": 200,
+            "same_arm_v5_training_updates_replayed": 400,
+            "same_arm_v5_model_tensor_hashes_replayed": pairing[
+                "v5_repair_equivalence"
+            ]["model_tensor_hashes_compared_exactly"],
+            "v5_endpoint_artifacts_opened_by_repair_replay": 0,
             "evaluation_rows_replayed": len(rows),
             "episode_cluster_effects_recomputed": sum(
                 len(metrics) for metrics in analysis["effects"].values()
@@ -5808,6 +6970,9 @@ def build_parser() -> argparse.ArgumentParser:
     register_cache.add_argument("--val-cache-metadata", type=Path, required=True)
     register_cache.add_argument("--preprocessed-root", type=Path, required=True)
     register_cache.add_argument("--raw-root", type=Path, required=True)
+    register_cache.add_argument(
+        "--v5-reference-cache-root", type=Path, required=True
+    )
     register_cache.set_defaults(handler=command_register_cache)
 
     build_cache = subparsers.add_parser("build-cache")
@@ -5838,6 +7003,9 @@ def build_parser() -> argparse.ArgumentParser:
     study.add_argument("--python", type=Path, required=True)
     study.add_argument("--wan-dir", type=Path, required=True)
     study.add_argument("--videox-home", type=Path, required=True)
+    study.add_argument(
+        "--v5-reference-study-root", type=Path, required=True
+    )
     study.set_defaults(handler=command_register_study)
 
     traces = subparsers.add_parser("compare-traces")

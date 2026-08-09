@@ -83,6 +83,20 @@ def test_endpoint_grid_is_equal_call_raw_only() -> None:
     assert stage.SCHEMA_VERSION == 3
     assert stage.CACHE_SCHEMA == "raw-physics-flow-cache-v3"
     assert stage.STATE_ACCESS_SCHEMA == "raw-physics-flow-selected-npy-bytes-v1"
+    assert stage.EVALUATION_NOISE_SEED == 20260729
+    assert {arm.run_name for arm in stage.ARMS} == {
+        "physics-flow-off-strict-v6-seed1234-u000200",
+        "physics-flow-raw-strict-v6-seed1234-u000200",
+    }
+    dataset_source = (
+        ROOT / "robot_wm/datasets/abc/physics_flow_dataset.py"
+    ).read_text()
+    trainer_source = (
+        ROOT / "robot_wm/utils/physics_flow_trainer.py"
+    ).read_text()
+    for consumer in (dataset_source, trainer_source):
+        assert '"raw-physics-flow-cache-v3"' in consumer
+        assert '"raw-physics-flow-cache-v2"' not in consumer
     assert stage.PARENT_SNAPSHOT_SHA256.startswith("de65e832")
     assert stage.RENDERER_REGISTRATION_IDENTITY == (
         "9cc556aba53d1defb69b0049dab67d12a3991decb917015bba5153c16cb8c2b1"
@@ -1076,6 +1090,286 @@ def test_target_blind_evaluation_flags_fail_closed() -> None:
         stage.validate_evaluation_causal_flags(missing, label="test")
 
 
+def test_v5_cache_equivalence_requires_values_equal_and_provenance_distinct() -> None:
+    arrays = {
+        source: np.asarray([[[float(index + 1)]]], dtype=np.float16)
+        for index, source in enumerate(stage.CACHE_SOURCES)
+    }
+    tensor_hashes = {
+        source: stage.tensor_sha256(value[0])
+        for source, value in arrays.items()
+    }
+    shared_provenance = {
+        "observed_frame4_state_sha256": "1" * 64,
+        "registered_action_row_sha256": "2" * 64,
+        "candidate_action_span_sha256": "3" * 64,
+        "candidate_action_endpoints_sha256": "4" * 64,
+        "cache_raw_action_max_abs": 0.0,
+    }
+    base = {
+        "kind": "raw_physics_flow_cache_row",
+        "split": "train",
+        "clip_index": 0,
+        "clip_id": "fixture",
+        "episode_dir": "/fixture/episode",
+        "d405_eligible": True,
+        "frame_indices": list(range(13)),
+        "action_window": [0, 65],
+        "camera_type": "D405",
+        "calibration": {"calibration_identity_sha256": "5" * 64},
+        "motion_stratum": 1,
+        "episode_shuffled_donor_index": 7,
+        "episode_shuffled_donor_clip_id": "donor",
+        "render_diagnostics": {"transitions": [{"support": 3}]},
+        "hold_render_diagnostics": {"transitions": [{"support": 4}]},
+        "raw_pose_path_sha256": "6" * 64,
+        "tensor_sha256": tensor_hashes,
+        "protected_test_accessed": False,
+    }
+    prior = stage.identity_payload(
+        {
+            **base,
+            "schema_version": 2,
+            "input_provenance": {
+                **shared_provenance,
+                "states_npz": {"legacy_full_member_materialization": True},
+            },
+        }
+    )
+    current = stage.identity_payload(
+        {
+            **base,
+            "schema_version": 3,
+            "input_provenance": {
+                **shared_provenance,
+                "states_npz": {
+                    "state_access_schema": stage.STATE_ACCESS_SCHEMA,
+                    "array_byte_access_audit": {
+                        "selected_observed_state_array_data_bytes_returned": 56,
+                        "selected_registered_action_array_data_bytes_returned": 3640,
+                        "future_measured_state_array_data_bytes_returned": 0,
+                        "unregistered_action_array_data_bytes_returned": 0,
+                    },
+                },
+            },
+        }
+    )
+    records = {
+        source: {
+            "path": f"/fixture/{source}.npy",
+            "bytes": int(value.nbytes),
+            "sha256": hashlib.sha256(value.tobytes()).hexdigest(),
+        }
+        for source, value in arrays.items()
+    }
+    reference = {
+        "count": 1,
+        "metadata": {"path": "/fixture/metadata.json"},
+        "metadata_identity_sha256": "7" * 64,
+        "row_lineage": {"path": "/fixture/row_lineage.jsonl"},
+        "arrays": records,
+    }
+    receipt = stage._v5_cache_numeric_equivalence(
+        split="train",
+        current_metadata={"arrays": records},
+        current_rows=[current],
+        reference=reference,
+        reference_rows=[prior],
+        current_arrays=arrays,
+        reference_arrays={key: value.copy() for key, value in arrays.items()},
+    )
+    assert receipt["status"] == "bitwise_numeric_equivalence_passed"
+    assert receipt["row_tensor_hashes_recomputed_per_version"] == 8
+    changed = {key: value.copy() for key, value in arrays.items()}
+    changed["raw"][0, 0, 0] += np.float16(1)
+    with pytest.raises(stage.PhysicsFlowStage1Error):
+        stage._v5_cache_numeric_equivalence(
+            split="train",
+            current_metadata={"arrays": records},
+            current_rows=[current],
+            reference=reference,
+            reference_rows=[prior],
+            current_arrays=changed,
+            reference_arrays=arrays,
+        )
+
+
+def test_same_arm_v5_training_equivalence_is_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_registration = {
+        "path": str(tmp_path / "v5-registration.json"),
+        "bytes": 1,
+        "sha256": "8" * 64,
+    }
+    old_registration_identity = "9" * 64
+    reference_arms = {}
+    current = {}
+    for arm in stage.ARMS:
+        arm_root = tmp_path / arm.code.lower()
+        arm_root.mkdir()
+        common_header = {
+            "kind": "physics_flow_training_trace_header",
+            "arm": arm.code,
+            "fuse_flow": arm.fuse_flow,
+            "parent_snapshot": "/fixture/parent.pt",
+            "parent_snapshot_sha256": stage.PARENT_SNAPSHOT_SHA256,
+            "parent_run_identity_sha256": stage.PARENT_RUN_IDENTITY_SHA256,
+            "continuation_updates": 200,
+            "wan_calls_per_example": 1,
+            "flow_model_calls_per_example": 0,
+            "flow_clock": 0.0,
+            "flow_velocity_loss": 0.0,
+            "future_measured_state_conditioning": False,
+            "future_rgb_conditioning": False,
+            "optimizer_state_policy": "fresh_identical_adamw",
+            "parameter_schema_sha256": "a" * 64,
+            "initial_auxiliary_state_sha256": "b" * 64,
+            "protected_test_accessed": False,
+        }
+        old_header = {
+            **common_header,
+            "study_registration": old_registration["path"],
+            "study_registration_identity_sha256": old_registration_identity,
+            "study_registration_sha256": old_registration["sha256"],
+            "train_flow_metadata": "/fixture/v5/train/metadata.json",
+            "train_flow_metadata_sha256": "c" * 64,
+            "val_flow_metadata": "/fixture/v5/val/metadata.json",
+            "val_flow_metadata_sha256": "d" * 64,
+        }
+        new_header = {
+            **common_header,
+            "study_registration": "/fixture/v6/registration.json",
+            "study_registration_identity_sha256": "e" * 64,
+            "study_registration_sha256": "f" * 64,
+            "train_flow_metadata": "/fixture/v6/train/metadata.json",
+            "train_flow_metadata_sha256": "0" * 64,
+            "val_flow_metadata": "/fixture/v6/val/metadata.json",
+            "val_flow_metadata_sha256": "1" * 64,
+        }
+        old_events = []
+        new_events = {}
+        for iteration in range(200):
+            deterministic = {
+                "iteration": iteration,
+                "train_loss/loss": float(iteration) / 100,
+                "system/world_size": 8,
+            }
+            old_metrics = {
+                **deterministic,
+                **{
+                    key: float(iteration)
+                    for key in stage.V5_TRAINING_METRIC_EXCLUSIONS
+                },
+            }
+            new_metrics = {
+                **deterministic,
+                **{
+                    key: float(iteration + 1)
+                    for key in stage.V5_TRAINING_METRIC_EXCLUSIONS
+                },
+            }
+            old_events.append(
+                {
+                    "kind": "physics_flow_training_trace_event",
+                    "arm": arm.code,
+                    "metrics": old_metrics,
+                    "total_observations": (iteration + 1) * 8,
+                }
+            )
+            new_events[iteration] = {
+                "kind": "physics_flow_training_trace_event",
+                "arm": arm.code,
+                "metrics": new_metrics,
+                "total_observations": (iteration + 1) * 8,
+            }
+        trace_path = arm_root / "v5-trace.jsonl"
+        trace_path.write_bytes(
+            b"".join(
+                stage.canonical_json(row) + b"\n"
+                for row in [old_header, *old_events]
+            )
+        )
+        new_trace_path = arm_root / "v6-trace.jsonl"
+        new_trace_path.write_bytes(
+            b"".join(
+                stage.canonical_json(row) + b"\n"
+                for row in [new_header, *new_events.values()]
+            )
+        )
+        old_completion = {
+            "kind": "physics_flow_training_trace_complete",
+            "arm": arm.code,
+            "completed_updates": 200,
+            "rows": 201,
+            "trace_sha256": stage.sha256_file(trace_path),
+            "protected_test_accessed": False,
+        }
+        old_completion_path = arm_root / "v5-complete.json"
+        old_completion_path.write_bytes(
+            stage.canonical_json(old_completion) + b"\n"
+        )
+        new_completion = {**old_completion, "trace_sha256": "2" * 64}
+        new_completion_path = arm_root / "v6-complete.json"
+        new_completion_path.write_bytes(
+            stage.canonical_json(new_completion) + b"\n"
+        )
+        model = {"weight": torch.arange(12, dtype=torch.float32).reshape(3, 4)}
+        old_snapshot_path = arm_root / "v5-snapshot.pt"
+        new_snapshot_path = arm_root / "v6-snapshot.pt"
+        snapshot_common = {
+            "snapshot_schema_version": 3,
+            "_start_iter": 200,
+            "world_size": 8,
+            "gradient_accumulation_steps": 1,
+            "model": model,
+        }
+        torch.save(
+            {**snapshot_common, "run_identity_sha256": "3" * 64},
+            old_snapshot_path,
+        )
+        torch.save(
+            {**snapshot_common, "run_identity_sha256": "4" * 64},
+            new_snapshot_path,
+        )
+        reference_arms[arm.code] = {
+            "run_name": f"v5-{arm.code}",
+            "trace": stage.file_record(trace_path),
+            "completion": stage.file_record(old_completion_path),
+            "snapshot": stage.file_record(old_snapshot_path),
+        }
+        current[arm.code] = (
+            new_header,
+            new_events,
+            {
+                "trace": stage.file_record(new_trace_path),
+                "completion": stage.file_record(new_completion_path),
+                "snapshot": stage.file_record(new_snapshot_path),
+            },
+        )
+    reference = stage.identity_payload(
+        {
+            "root": str(tmp_path),
+            "study_registration": old_registration,
+            "study_registration_identity_sha256": old_registration_identity,
+            "arms": reference_arms,
+        }
+    )
+    registration = {"v5_training_reference": reference}
+    monkeypatch.setattr(
+        stage,
+        "_validated_v5_study_reference",
+        lambda _root, verify_snapshot_digests: reference,
+    )
+    receipt = stage._same_arm_v5_training_equivalence(registration, current)
+    assert receipt["same_arm_updates_compared_exactly"] == 400
+    assert receipt["model_tensor_hashes_compared_exactly"] == 2
+    assert all(
+        arm_receipt["all_per_tensor_hashes_exact"]
+        for arm_receipt in receipt["arms"].values()
+    )
+
+
 def test_protocol_and_launcher_have_causal_guards() -> None:
     protocol = (
         ROOT / "docs/experiments/PHYSICS_FLOW_WAN_SCREEN_PROTOCOL.md"
@@ -1122,6 +1416,16 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
         ROOT / "docs/experiments/PHYSICS_FLOW_STAGE1_LAUNCH_RUNBOOK.md"
     ).read_text()
     stage_source = (ROOT / "tools/physics_flow_stage1.py").read_text()
+    evaluator_source = (
+        ROOT / "tools/physics_flow_stage1_evaluate.py"
+    ).read_text()
+    trainer_source = (
+        ROOT / "projects/latent_action_models/physics_flow_train.py"
+    ).read_text()
+    model_config = (
+        ROOT
+        / "projects/latent_action_models/configs/models/physics_flow_model.yaml"
+    ).read_text()
     cache_runtime_source = (
         ROOT / "tools/physics_flow_cache_runtime.py"
     ).read_text()
@@ -1147,7 +1451,9 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert "CACHE_PYTHON_BIN=$BASE/envs/interaction-event-py310-v1/bin/python" in launch_runbook
     assert "PYTHONNOUSERSITE=1" in launch_runbook
     assert "--cache-python $CACHE_PYTHON_BIN" in launch_runbook
-    assert launch_runbook.count("-20260808-$SHORT-v5") == 3
+    assert launch_runbook.count("-20260808-$SHORT-v6") == 3
+    assert "--v5-reference-cache-root $V5_CACHE_ROOT" in launch_runbook
+    assert "--v5-reference-study-root $V5_STUDY_ROOT" in launch_runbook
     assert "-20260808-$SHORT-v4" not in launch_runbook
     assert "-20260808-$SHORT-v3" not in launch_runbook
     assert "-20260808-$SHORT-v2" not in launch_runbook
@@ -1209,6 +1515,22 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
         assert token in cache_runtime_source
     assert '"tools/abc_d405_nominal_geometry_probe.py"' in stage_source
     assert '"tools/corrected_renderer_attribution.py"' in stage_source
+    assert "evaluation_noise_seed: 20260729" in model_config
+    assert trainer_source.index("_validate_protocol_config(cfg)") < (
+        trainer_source.index("dist.init_process_group()")
+    )
+    evaluator_config_gate = evaluator_source.index(
+        "{model_seed, forward_seed} != {EXPECTED_EVALUATION_NOISE_SEED}"
+    )
+    assert evaluator_config_gate < evaluator_source.index(
+        "model = instantiate(config.model)"
+    )
+    assert evaluator_source.index("stage.load_training_pairing(registration)") < (
+        evaluator_source.index("dataset = RegisteredCausalInputs(registration)")
+    )
+    assert "model.evaluation_noise_seed != EXPECTED_EVALUATION_NOISE_SEED" in (
+        evaluator_source
+    )
     build_body = stage_source.split("def command_build_cache", 1)[1].split(
         "def load_cache_metadata", 1
     )[0]
@@ -1222,3 +1544,13 @@ def test_protocol_and_launcher_have_causal_guards() -> None:
     assert launch_runbook.count("--time=02:00:00") == 4
     assert "--parent-source-repo $PARENT_SOURCE_REPO" in launch_runbook
     assert "--dependency=afterok:$FLOW_OFF_JOB:$RAW_FLOW_JOB" in launch_runbook
+    compare_index = launcher.index(
+        '"$PYTHON_BIN" "$STAGE_TOOL" compare-traces'
+    )
+    parity_index = launcher.index('"$PYTHON_BIN" "$PARENT_PARITY"')
+    evaluate_index = launcher.rindex(
+        '"$PYTHON_BIN" -m torch.distributed.run'
+    )
+    assert compare_index < parity_index < evaluate_index
+    assert "V5_TRAINING_METRIC_EXCLUSIONS" in stage_source
+    assert "snapshot_pickle_bytes_compared" in stage_source
