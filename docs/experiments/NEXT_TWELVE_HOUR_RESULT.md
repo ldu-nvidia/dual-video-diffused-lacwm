@@ -285,6 +285,18 @@ The plan reports `launch_ready: false`, `submission_performed: false`, and a nul
 submission command. Thus no generated-video endpoint, quality gain, or Wan
 training result has been produced by this handoff.
 
+A posthoc, non-outcome diagnostic then checked condition distinguishability
+without opening future RGB or a generator. Every eligible aligned row differed
+from off, shuffled, wrong-time, and hold in both splits. Shuffled fields had
+mean relative L2 distance `1.0452` (train) / `1.0538` (validation), while the
+harder wrong-time control remained nondegenerate at `0.4235` / `0.4202` and
+hold at `0.4455` / `0.4265`. Mean aligned support was `15.79%` / `15.13%` of
+the pooled spatiotemporal field. This shows the planned controls are numerically
+separable; it says nothing about whether Wan will use them. Diagnostic identity
+is `f91debf83e94aa2a1a5792dca2850715eb9f0ed0c6fe975a8f4c14b15a10eab2`
+and file SHA-256 is
+`5adc647ccc912839d50e9278ae0be2922ece0546ec02660bb39d4fb49c666ba5`.
+
 ## Claim boundary
 
 The completed screens support a narrower and more useful conclusion: clean
