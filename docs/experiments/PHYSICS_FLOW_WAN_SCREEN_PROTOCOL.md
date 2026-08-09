@@ -273,7 +273,10 @@ LPIPS/torch/torchvision module and distribution `RECORD` files. Resolving the
 entry is forbidden because it drops the LACWM site-packages. Every evaluation
 rank must reconstruct the identical receipt without network access, and the
 final auditor verifies that one identity served every arm and endpoint. The
-frozen preflight is job `507388`: LPIPS 0.1.4 / torch 2.7.1+cu128 /
+login-node operator check is metadata-only; full AlexNet/LPIPS construction is
+the first command in the compute registration wrapper, before cache output,
+and study registration repeats it independently. The frozen preflight is job
+`507388`: LPIPS 0.1.4 / torch 2.7.1+cu128 /
 torchvision 0.22.1+cu128,
 receipt `04f5013b7161fbf91ed6116d25f7e6ec66afc661024236ad27564b1899cb94be`,
 loaded-state SHA-256

@@ -62,9 +62,9 @@ LPIPS_PREFLIGHT_LOG=$PREFLIGHT/lpips_pin-507388.log
 CAUSAL_LADDER=$BASE/artifacts/dual_video_diffusion/causal_compressibility_ladder/causal-compressibility-train256-dev64-seed20260820-4d4db76-v1/registration.json
 DIRECT_FRONTIER=$BASE/artifacts/dual_video_diffusion/vpm_direct_residual_frontier/vpm-direct-residual-fit256-outcome31-seed20260832-4f75f9c-v2
 
-CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v3
-STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v3
-LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v3
+CACHE_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_cache/raw-physics-flow-cache-20260808-$SHORT-v4
+STUDY_ROOT=$BASE/artifacts/dual_video_diffusion/raw_physics_flow_stage1/raw-physics-flow-stage1-20260808-$SHORT-v4
+LOG_ROOT=$BASE/logs/dual_video_diffusion/raw-physics-flow-stage1-20260808-$SHORT-v4
 REGISTRATION=$STUDY_ROOT/registration.json
 ```
 
@@ -124,10 +124,6 @@ PYTHONPATH="$SOURCE_REPO" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
   "$PYTHON_BIN" -c \
   'from pathlib import Path; from tools import physics_flow_stage1 as p; p._collect_main_python_runtime(Path(__import__("sys").argv[1]))' \
   "$PYTHON_BIN"
-PYTHONPATH="$SOURCE_REPO" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 WANDB_MODE=offline \
-  "$PYTHON_BIN" "$SOURCE_REPO/tools/physics_flow_lpips.py" \
-  --receipt-only >/dev/null
 mkdir -p "$(dirname "$CACHE_ROOT")" "$(dirname "$STUDY_ROOT")" "$LOG_ROOT"
 test -d "$(dirname "$CACHE_ROOT")"
 test -d "$(dirname "$STUDY_ROOT")"
@@ -150,10 +146,13 @@ LACWM-registration and cache-runtime calibration identities to match. Only the
 two cache builders execute their main process with that cache-only runtime.
 The LACWM interpreter is also invoked through its absolute lexical venv entry,
 never its resolved base-CPython target. Before output creation, the operator
-preflight and study registration require its full symlink chain, resolved
-executable, `pyvenv.cfg`, isolated site-packages, and LPIPS/torch/torchvision
-module plus distribution-RECORD receipt. Resolving that entry discards those
-site-packages and fails closed before training.
+lightweight operator preflight requires its full symlink chain, resolved
+executable, `pyvenv.cfg`, isolated site-packages, and
+LPIPS/torch/torchvision module plus distribution-RECORD receipt. The
+heavyweight offline AlexNet/LPIPS model construction runs as the first command
+inside the compute registration job, before `register-cache` can create its
+output. Study registration independently repeats it. Resolving the entry
+discards those site-packages and fails closed before cache or training output.
 
 ```bash
 BASH_PREFIX="/bin/bash -lc 'set -euo pipefail; umask 077; export PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 LACWM_PYTHON=$PYTHON_BIN WAN_DIR=$WAN_DIR VIDEOX_HOME=$VIDEOX_HOME MUJOCO_GL=egl; source $SOURCE_REPO/tools/env/activate_b200.sh; cd $SOURCE_REPO;"
@@ -165,7 +164,11 @@ REGISTER_JOB=$(sbatch --parsable \
   --mem=256G --time=02:00:00 \
   --partition=batch --account=coreai_chef_posttrain --qos=short --no-requeue \
   --exclude=pool0-0081,pool0-0089 \
-  --wrap="$BASH_PREFIX $PYTHON_BIN tools/physics_flow_stage1.py register-cache \
+  --wrap="$BASH_PREFIX \
+    $PYTHON_BIN tools/physics_flow_stage1.py preflight-main-runtime \
+      --source-repo $SOURCE_REPO --expected-commit $EXPECTED_COMMIT \
+      --python $PYTHON_BIN --lpips-preflight-log $LPIPS_PREFLIGHT_LOG; \
+    $PYTHON_BIN tools/physics_flow_stage1.py register-cache \
     --output $CACHE_ROOT --source-repo $SOURCE_REPO \
     --cache-python $CACHE_PYTHON_BIN \
     --expected-commit $EXPECTED_COMMIT --official-abc-root $OFFICIAL_ABC \
