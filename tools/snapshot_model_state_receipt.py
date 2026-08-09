@@ -92,6 +92,9 @@ def compare_model_state_drift(
     import math
     import torch
 
+    # Receipt equality is replayed in allocations with different CPU counts.
+    # Pin reductions here so descriptive norms cannot vary with thread topology.
+    torch.set_num_threads(1)
     paths = [
         reference_path.expanduser().resolve(strict=True),
         current_path.expanduser().resolve(strict=True),
@@ -151,6 +154,10 @@ def compare_model_state_drift(
 
         reference_flat = tensors[0].reshape(-1)
         current_flat = tensors[1].reshape(-1)
+        bitwise_equal = per_state_hashes[0][name] == per_state_hashes[1][name]
+        compared_elements += int(reference_flat.numel())
+        if bitwise_equal:
+            continue
         tensor_delta_sq = 0.0
         tensor_reference_sq = 0.0
         tensor_max = 0.0
@@ -172,26 +179,23 @@ def compare_model_state_drift(
             )
             if abs_delta.numel():
                 tensor_max = max(tensor_max, float(abs_delta.max()))
-        bitwise_equal = per_state_hashes[0][name] == per_state_hashes[1][name]
-        if not bitwise_equal:
-            mismatches.append(
-                {
-                    "name": name,
-                    "dtype": items[0]["dtype"],
-                    "shape": items[0]["shape"],
-                    "elements": int(reference_flat.numel()),
-                    "reference_tensor_sha256": per_state_hashes[0][name],
-                    "current_tensor_sha256": per_state_hashes[1][name],
-                    "value_mismatch_elements": value_mismatches,
-                    "reference_l2": math.sqrt(tensor_reference_sq),
-                    "l2_drift": math.sqrt(tensor_delta_sq),
-                    "max_abs_drift": tensor_max,
-                }
-            )
+        mismatches.append(
+            {
+                "name": name,
+                "dtype": items[0]["dtype"],
+                "shape": items[0]["shape"],
+                "elements": int(reference_flat.numel()),
+                "reference_tensor_sha256": per_state_hashes[0][name],
+                "current_tensor_sha256": per_state_hashes[1][name],
+                "value_mismatch_elements": value_mismatches,
+                "reference_l2": math.sqrt(tensor_reference_sq),
+                "l2_drift": math.sqrt(tensor_delta_sq),
+                "max_abs_drift": tensor_max,
+            }
+        )
         reference_sq += tensor_reference_sq
         delta_sq += tensor_delta_sq
         global_max = max(global_max, tensor_max)
-        compared_elements += int(reference_flat.numel())
 
     if schemas[0] != schemas[1]:
         raise ValueError("model tensor schema differs")
@@ -237,10 +241,12 @@ def compare_model_state_drift(
         "all_current_tensors_finite": True,
         "model_tensor_count": len(names[0]),
         "compared_elements": compared_elements,
+        "cpu_reduction_threads": 1,
         "bitwise_identical_tensor_count": len(names[0]) - len(mismatches),
         "mismatched_tensor_count": len(mismatches),
         "mismatched_tensors": mismatches,
         "global_drift": {
+            "scope": "mismatched_tensors_only",
             "reference_l2": reference_l2,
             "drift_l2": drift_l2,
             "relative_l2_vs_reference": relative_l2,

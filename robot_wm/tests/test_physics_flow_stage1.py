@@ -1860,6 +1860,10 @@ def test_finite_model_state_drift_is_descriptive_and_fail_closed(
     assert result["mismatched_tensor_count"] == 1
     assert result["global_drift"]["drift_l2"] > 0.0
     assert result["global_drift"]["numerical_pass_threshold"] is None
+    assert result["global_drift"]["scope"] == "mismatched_tensors_only"
+    assert result["cpu_reduction_threads"] == 1
+    torch.set_num_threads(4)
+    assert snapshot_receipt.compare_model_state_drift(reference, current) == result
 
     torch.save({"model": {"weight": torch.ones(2, 1)}}, current)
     with pytest.raises(ValueError, match="dtype/shape differs"):
