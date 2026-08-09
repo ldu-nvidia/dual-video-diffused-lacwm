@@ -14,6 +14,7 @@ from tools.corrected_renderer_attribution import (
     select_motion_stratified,
     symmetric_boundary_chamfer,
 )
+from tools.measure_corrected_renderer_predictor_latency import causal_predictor_features
 
 
 class CorrectedRendererAttributionTest(unittest.TestCase):
@@ -158,6 +159,16 @@ class CorrectedRendererAttributionTest(unittest.TestCase):
                 "measured_oracle",
             },
         )
+
+    def test_latency_replay_feature_builder_never_reads_future_state(self):
+        states = np.full((13, 14), np.nan, dtype=np.float32)
+        states[:5] = np.arange(5 * 14, dtype=np.float32).reshape(5, 14)
+        actions = np.arange(13 * 5 * 14, dtype=np.float32).reshape(13, 5, 14)
+        history, future = causal_predictor_features(states, actions)
+        self.assertEqual(history.shape, (406,))
+        self.assertEqual(future.shape, (8, 5, 14))
+        self.assertTrue(np.isfinite(history).all())
+        self.assertTrue(np.isfinite(future).all())
 
 
 if __name__ == "__main__":
