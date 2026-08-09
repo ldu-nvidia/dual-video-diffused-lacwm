@@ -816,9 +816,11 @@ def _load_model(
     torch_device = torch.device(device)
     if torch_device.type != "cuda" or not torch.cuda.is_available():
         raise QualificationError("production qualification requires CUDA")
-    dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[dtype_name]
-    encoder = encoder.eval().to(device=torch_device, dtype=dtype)
-    predictor = predictor.eval().to(device=torch_device, dtype=dtype)
+    # Match app/vjepa_droid/train.py: parameters remain FP32 while the forward
+    # executes under BF16 autocast.  Casting parameter storage itself to BF16
+    # changes residual/normalization numerics and is not the released recipe.
+    encoder = encoder.eval().to(device=torch_device, dtype=torch.float32)
+    predictor = predictor.eval().to(device=torch_device, dtype=torch.float32)
     transform = make_transforms(
         random_horizontal_flip=False,
         random_resize_aspect_ratio=DROID_RESIZE_ASPECT_RATIO,
@@ -831,7 +833,8 @@ def _load_model(
     torch.cuda.synchronize(torch_device)
     return encoder, predictor, transform, {
         "device": str(torch_device),
-        "dtype": dtype_name,
+        "parameter_storage_dtype": "float32",
+        "forward_autocast_dtype": dtype_name,
         "load_seconds": time.perf_counter() - load_start,
         "encoder_missing_keys": list(encoder_message.missing_keys),
         "encoder_unexpected_keys": list(encoder_message.unexpected_keys),
@@ -869,11 +872,20 @@ def _encode_frames(
         .unsqueeze(2)
         .repeat(1, 1, 2, 1, 1)
     )
-    dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[dtype_name]
-    model_input = model_input.to(device=device, dtype=dtype, non_blocking=True)
+    compute_dtype = {
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[dtype_name]
+    model_input = model_input.to(
+        device=device, dtype=torch.float32, non_blocking=True
+    )
     torch.cuda.synchronize()
     started = time.perf_counter()
-    with torch.inference_mode():
+    with torch.inference_mode(), torch.autocast(
+        device_type="cuda",
+        dtype=compute_dtype,
+        enabled=dtype_name == "bfloat16",
+    ):
         encoded = encoder(model_input)
         encoded = encoded.view(1, FRAMES_PER_CLIP, -1, encoded.size(-1))
         encoded = functional.layer_norm(encoded, (encoded.size(-1),))
@@ -897,17 +909,24 @@ def _predict_teacher_forced(
     import torch.nn.functional as functional
 
     names = list(CONTROL_NAMES)
-    dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[dtype_name]
+    compute_dtype = {
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[dtype_name]
     context = encoded[:, :-1].flatten(1, 2).repeat(len(names), 1, 1)
     action_tensor = torch.from_numpy(np.stack([controls[name] for name in names])).to(
-        device=device, dtype=dtype
+        device=device, dtype=torch.float32
     )
     state_tensor = torch.from_numpy(
         np.repeat(measured_poses[None, :-1], len(names), axis=0)
-    ).to(device=device, dtype=dtype)
+    ).to(device=device, dtype=torch.float32)
     torch.cuda.synchronize()
     started = time.perf_counter()
-    with torch.inference_mode():
+    with torch.inference_mode(), torch.autocast(
+        device_type="cuda",
+        dtype=compute_dtype,
+        enabled=dtype_name == "bfloat16",
+    ):
         predicted = predictor(context, action_tensor, state_tensor)
         predicted = functional.layer_norm(predicted, (predicted.size(-1),))
         predicted = predicted.view(
@@ -931,7 +950,10 @@ def _predict_causal_autoregressive(
     import torch.nn.functional as functional
 
     names = list(CONTROL_NAMES)
-    dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[dtype_name]
+    compute_dtype = {
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[dtype_name]
     action_arrays = np.stack([controls[name] for name in names])
     state_arrays = np.stack(
         [integrate_actions(initial_pose, controls[name])[:-1] for name in names]
@@ -941,14 +963,18 @@ def _predict_causal_autoregressive(
     per_call_seconds: list[float] = []
     for step in range(max_horizon):
         action_tensor = torch.from_numpy(action_arrays[:, : step + 1]).to(
-            device=device, dtype=dtype
+            device=device, dtype=torch.float32
         )
         state_tensor = torch.from_numpy(state_arrays[:, : step + 1]).to(
-            device=device, dtype=dtype
+            device=device, dtype=torch.float32
         )
         torch.cuda.synchronize()
         started = time.perf_counter()
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda",
+            dtype=compute_dtype,
+            enabled=dtype_name == "bfloat16",
+        ):
             predicted = predictor(context, action_tensor, state_tensor)
             next_tokens = predicted[:, -TOKENS_PER_FRAME:]
             next_tokens = functional.layer_norm(next_tokens, (next_tokens.size(-1),))
