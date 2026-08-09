@@ -13,7 +13,7 @@
 #SBATCH --no-requeue
 
 # Run-only workflow. Registration must already have sealed the exact remaining
-# 29 IDs, frozen model bytes, causal contract, and source before this allocation
+# 55 IDs, frozen model bytes, causal contract, and source before this allocation
 # may open their measured future state or RGB.
 set -euo pipefail
 umask 077
@@ -61,7 +61,7 @@ done
 [[ -z "$(git -C "$OFFICIAL_ABC_ROOT" status --porcelain --untracked-files=all)" ]] || \
   die "official ABC checkout must be clean"
 [[ -d "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || die "registered output is unavailable"
-EXPECTED_BASENAME="recurrent-delta-spatial-confirmation-strict29-seed20260809-${EXPECTED_COMMIT:0:7}-v1"
+EXPECTED_BASENAME="recurrent-delta-spatial-confirmation-renderer55-seed20260809-${EXPECTED_COMMIT:0:7}-v1"
 [[ "$(basename "$OUTPUT_DIR")" == "$EXPECTED_BASENAME" ]] || \
   die "output basename must be $EXPECTED_BASENAME"
 [[ -s "$OUTPUT_DIR/registration.json" ]] || die "sealed registration is unavailable"
