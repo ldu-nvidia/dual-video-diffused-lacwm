@@ -83,6 +83,16 @@ noise-seed-disjoint. The actual frozen VPM@1 sampler is evaluated on identical
 clips and noise; its previously reported aggregate is not substituted for a
 paired comparison.
 
+There is a strong population-level null hypothesis. Let `S` be the
+inference-visible student state and `Y=v*-vS` the exact direct residual. Under
+unrestricted squared-error regression, the optimal causal correction is
+`E[Y|S]`; a head trained only on a different privileged target cannot improve
+that population MSE. PFD can beat `DIRECT` only through useful finite-sample
+target smoothing, representation, regularization, or optimization—not by
+adding target-specific information to the deployed inputs. This is why the
+direct arm is the decisive control and why a one-seed PFD pass would require
+replication.
+
 ### Advance gate
 
 Advance `PFD-ALIGNED` only if all conditions hold:
@@ -192,4 +202,3 @@ not treated as an interaction latent.
 - No paper-level claim is made without multi-seed confirmation, a frozen
   untouched split, perceptual/distributional metrics, long-horizon rollouts,
   and closed-loop utility.
-
