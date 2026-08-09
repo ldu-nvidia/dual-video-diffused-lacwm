@@ -146,6 +146,8 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
     if output.exists():
         raise FileExistsError(output)
     output.mkdir(parents=True)
+    if len(args.source_commit) != 40 or any(character not in "0123456789abcdef" for character in args.source_commit):
+        raise GateError("--source-commit must be a lowercase 40-character Git commit")
 
     prior_path = args.prior_registration.resolve()
     prior = base.read_json(prior_path)
@@ -198,7 +200,11 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
             "kind": "trajectory_consistent_renderer_gate_registration",
             "status": "registered_before_fresh_score_state_or_rgb_access",
             "created_at_utc": base.now(),
-            "source": {**base.file_record(script), "git_commit": base.git_commit(script.parents[1])},
+            "source": {
+                **base.file_record(script),
+                "registered_git_commit": args.source_commit,
+                "runtime_worktree_git_commit": base.git_commit(script.parents[1]),
+            },
             "prior_gate0c": {
                 "registration": base.file_record(prior_copy),
                 "source_registration_path": str(prior_path),
@@ -1660,6 +1666,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_parser.add_argument("--preprocessed-root", type=Path, required=True)
     register_parser.add_argument("--raw-root", type=Path, required=True)
     register_parser.add_argument("--prior-registration", type=Path, required=True)
+    register_parser.add_argument("--source-commit", required=True)
     prepare_parser = subparsers.add_parser("prepare")
     prepare_parser.add_argument("--output", type=Path, required=True)
     evaluate_parser = subparsers.add_parser("evaluate")
