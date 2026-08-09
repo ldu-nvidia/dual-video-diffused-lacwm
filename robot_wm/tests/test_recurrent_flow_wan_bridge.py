@@ -157,6 +157,10 @@ def test_external_strict_audit_binding(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_registration_source_must_be_executing_physical_checkout(tmp_path: Path) -> None:
     assert bridge._validate_executing_source_repo(bridge.REPO_ROOT) == bridge.REPO_ROOT
+    other = tmp_path / "other-source"
+    other.mkdir()
+    with pytest.raises(bridge.RecurrentFlowBridgeError, match="executing bridge checkout"):
+        bridge._validate_executing_source_repo(other)
     alias = tmp_path / "source-alias"
     alias.symlink_to(bridge.REPO_ROOT, target_is_directory=True)
     with pytest.raises(bridge.RecurrentFlowBridgeError, match="executing bridge checkout"):
