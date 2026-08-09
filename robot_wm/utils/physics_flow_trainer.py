@@ -14,10 +14,10 @@ from robot_wm.utils.trainer import Trainer
 
 
 PARENT_SNAPSHOT_SHA256 = (
-    "f67c7bae50c4c279bf6372e098833be32699aca24232d7d489a1f7a45b5a8e21"
+    "de65e832c56f82be1472edb1fd789e16d3a6c8a7adc9b1f31306779951cb463a"
 )
 PARENT_RUN_IDENTITY_SHA256 = (
-    "649a2c11a0a77091ed6e8d54073dd45a825239dfe3b0245ca5a55876c4df9fba"
+    "d79c3699f0c68dcd17321fcb0ea2846fca4d96f8c815f91dff02a19d3140787f"
 )
 PARENT_AUXILIARY_PREFIXES = (
     "forward_model.tf_token_adapter",
@@ -48,6 +48,14 @@ def _exclusive_json(path: Path, payload: dict[str, Any]) -> None:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _canonical_identity(payload: dict[str, Any]) -> str:
+    unsigned = dict(payload)
+    unsigned.pop("identity_sha256", None)
+    return hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _registered_file(path_name: str, digest_name: str) -> tuple[Path, str]:
@@ -86,7 +94,7 @@ def _state_sha256(state: dict[str, Any]) -> str:
         digest.update(b"\0")
         digest.update(json.dumps(list(tensor.shape), separators=(",", ":")).encode())
         digest.update(b"\0")
-        digest.update(memoryview(tensor.view(torch.uint8).numpy()))
+        digest.update(memoryview(tensor.reshape(-1).view(torch.uint8).numpy()))
     return digest.hexdigest()
 
 
@@ -150,23 +158,64 @@ class PhysicsFlowTrainer(Trainer):
             "PHYSICS_FLOW_VAL_FLOW_METADATA",
             "PHYSICS_FLOW_VAL_FLOW_METADATA_SHA256",
         )
+        study_registration, study_registration_sha = _registered_file(
+            "PHYSICS_FLOW_STUDY_REGISTRATION",
+            "PHYSICS_FLOW_STUDY_REGISTRATION_SHA256",
+        )
+        study = json.loads(study_registration.read_text())
+        expected_study_identity = os.environ.get(
+            "PHYSICS_FLOW_STUDY_REGISTRATION_IDENTITY_SHA256", ""
+        )
+        if (
+            study.get("kind") != "raw_physics_flow_stage1_registration"
+            or study.get("status")
+            != "registered_before_training_or_generated_video_outcomes"
+            or study.get("identity_sha256") != expected_study_identity
+            or _canonical_identity(study) != expected_study_identity
+            or study.get("recurrent_or_hybrid_condition_included") is not False
+            or study.get("future_rgb_opened") is not False
+            or study.get("future_measured_state_opened") is not False
+            or study.get("generator_outcome_opened") is not False
+            or study.get("protected_test_accessed") is not False
+        ):
+            raise RuntimeError("physics-flow prospective study registration differs")
         for path, expected_split in ((train_metadata, "train"), (val_metadata, "val")):
             payload = json.loads(path.read_text())
             if (
-                payload.get("schema") != "physics-flow-cache-v1"
+                payload.get("schema") != "raw-physics-flow-cache-v2"
                 or payload.get("complete") is not True
                 or payload.get("split") != expected_split
-                or payload.get("renderer_decision") != "GO_FOR_WAN_SCREEN"
+                or payload.get("renderer_decision")
+                != "GO_raw_geometry_scaffold_pass"
+                or payload.get("renderer_family") != "raw_geometry_scaffold"
                 or payload.get("causal_inputs_only") is not True
                 or payload.get("future_rgb_opened") is not False
                 or payload.get("future_measured_state_opened") is not False
+                or payload.get("generator_outcome_opened") is not False
                 or payload.get("protected_test_accessed") is not False
             ):
                 raise RuntimeError(f"physics-flow {expected_split} cache contract differs")
+        registered_train = Path(
+            study["flow_caches"]["train"]["metadata"]["path"]
+        ).resolve(strict=True)
+        registered_val = Path(
+            study["flow_caches"]["val"]["metadata"]["path"]
+        ).resolve(strict=True)
+        if registered_train != train_metadata or registered_val != val_metadata:
+            raise RuntimeError("physics-flow study/cache path linkage differs")
         del snapshot, parent_state, model_state, parent_shared, model_shared
         super().__init__(*args, **kwargs)
         module = self.model.module
-        self._physics_flow_arm = "FLOW-ON" if bool(module.fuse_flow) else "FLOW-OFF"
+        self._physics_flow_arm = "RAW-FLOW" if bool(module.fuse_flow) else "FLOW-OFF"
+        expected_run_identity = study["arm_run_identity_sha256"].get(
+            self._physics_flow_arm
+        )
+        if (
+            os.environ.get("LACWM_RUN_IDENTITY_SHA256") != expected_run_identity
+            or not isinstance(expected_run_identity, str)
+            or len(expected_run_identity) != 64
+        ):
+            raise RuntimeError("physics-flow arm run identity differs from registration")
         self._trace_path = self.save_path.parent / "physics_flow_training_trace.jsonl"
         self._complete_path = self.save_path.parent / "physics_flow_training_trace_complete.json"
         schema = [
@@ -219,6 +268,9 @@ class PhysicsFlowTrainer(Trainer):
                     "parent_snapshot": str(load_path.resolve(strict=True)),
                     "parent_snapshot_sha256": PARENT_SNAPSHOT_SHA256,
                     "parent_run_identity_sha256": PARENT_RUN_IDENTITY_SHA256,
+                    "study_registration": str(study_registration),
+                    "study_registration_sha256": study_registration_sha,
+                    "study_registration_identity_sha256": expected_study_identity,
                     "train_flow_metadata": str(train_metadata),
                     "train_flow_metadata_sha256": train_metadata_sha,
                     "val_flow_metadata": str(val_metadata),

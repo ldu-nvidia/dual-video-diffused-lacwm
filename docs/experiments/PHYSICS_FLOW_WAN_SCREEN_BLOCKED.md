@@ -2,7 +2,8 @@
 
 Date: 2026-08-08
 
-Status: **`BLOCKED_INCOMPLETE`; no training or video evaluation was launched**
+Status: **historical blocked handoff, superseded prospectively by the raw-only
+Stage-1 protocol; this document is not launch authority**
 
 ## Decision
 
@@ -82,3 +83,10 @@ raw-delta hybrid, and raw planned-geometry fallback are being evaluated on 24
 previously untouched D405 episodes with global multiplicity correction. A
 passing arm must then be frozen into a new cache registration; this stopped
 predicted-ridge analysis may not be reinterpreted as permission to launch.
+
+That re-entry condition was later satisfied only by the independently tested
+`raw_geometry_scaffold_pass` family in the fresh trajectory-consistent gate.
+The new `PHYSICS_FLOW_WAN_SCREEN_PROTOCOL.md` excludes recurrent/hybrid
+conditions, replaces wrong-calibration with hold-current, and requires the
+previously missing cache builder, deterministic controls, causal evaluator,
+clustered analyzer, auditors, matched trace comparison, and guarded launcher.
